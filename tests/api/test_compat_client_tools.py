@@ -343,7 +343,7 @@ async def test_paid_request_uses_physical_usage_and_durable_wallet_barrier(
     cli, _ = client_surface
     body = {**request_body(stream=wire == 'sse'), 'model': 'gpt-4o-mini'}
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        monkeypatch.setattr(astream, 'get_async_client', lambda proxy: http)
+        monkeypatch.setattr(astream, 'get_async_client', lambda *args, **kwargs: http)
         response = await cli.post('/v1/chat/completions', json=body,
                                   headers={'Authorization': f'Bearer {token}'})
     data = (frames((await response.get_data()).decode())[-1] if wire == 'sse'

@@ -6,9 +6,11 @@
 //! owner/Attempt counters keep deletion and retry work bounded.
 //!
 //! Archives are reconstructible diagnostic evidence, not durable user state: a
-//! live put that would meet the owner or conversation ceiling or the tenant
-//! byte budget first reclaims the oldest archives (`reclaim_for_put`, ordered
-//! by the owner age index), so capture never stops at a ceiling.
+//! live put that would meet the owner or conversation ceiling, its Attempt's
+//! byte budget or the tenant byte budget first reclaims the oldest archives
+//! (`reclaim_for_put`: the Attempt's own by its index, the owner's by the owner
+//! age index, and for bytes the owner's oldest bodies by the owner body age
+//! index), so capture never stops at a ceiling.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -32,9 +34,9 @@ use crate::generated_tofudb_ir::{
     RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE, RAW_ARCHIVE_CONVERSATION_STATS_NAMESPACE,
     RAW_ARCHIVE_DOCUMENT_NAMESPACE, RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES,
     RAW_ARCHIVE_ID_CLAIM_NAMESPACE, RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
-    RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE,
-    RAW_ARCHIVE_TASK_INDEX_NAMESPACE, RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE,
-    RAW_ARCHIVE_TENANT_USAGE_NAMESPACE,
+    RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE,
+    RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, RAW_ARCHIVE_TASK_INDEX_NAMESPACE,
+    RAW_ARCHIVE_TASK_ROUND_INDEX_NAMESPACE, RAW_ARCHIVE_TENANT_USAGE_NAMESPACE,
 };
 
 pub(crate) mod migration;
@@ -290,7 +292,11 @@ impl Request {
                 let stored = request_blob
                     .len()
                     .checked_add(response_blob.len())
-                    .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("raw archive byte count overflow"))?;
+                    .ok_or_else(|| {
+                        crate::resource_exhaustion::accounting_overflow(
+                            "raw archive byte count overflow",
+                        )
+                    })?;
                 if request_blob.len() > MAX_RAW_ARCHIVE_STORED_BYTES
                     || response_blob.len() > MAX_RAW_ARCHIVE_STORED_BYTES
                     || stored > MAX_RAW_ARCHIVE_STORED_BYTES
@@ -321,7 +327,11 @@ impl Request {
                 ]
                 .into_iter()
                 .try_fold(0usize, usize::checked_add)
-                .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("raw archive metadata byte count overflow"))
+                .ok_or_else(|| {
+                    crate::resource_exhaustion::accounting_overflow(
+                        "raw archive metadata byte count overflow",
+                    )
+                })
             }
             Self::List {
                 task_id,
@@ -560,14 +570,29 @@ impl ArchiveIdentity {
         )
     }
 
-    fn age_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+    /// Key of this archive in an owner age index: `RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE`
+    /// (every archive) or `RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE` (only
+    /// archives with stored bytes). Both carry the same keys and values.
+    fn owner_index_key(
+        &self,
+        transaction: &AuthorityTransaction,
+        namespace: &str,
+    ) -> io::Result<EntityKey> {
         index_key(
             transaction,
-            RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+            namespace,
             &[],
             self.created_at_ms,
             &self.archive_id,
         )
+    }
+
+    fn age_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+        self.owner_index_key(transaction, RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE)
+    }
+
+    fn body_age_key(&self, transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+        self.owner_index_key(transaction, RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE)
     }
 
     fn encode(&self) -> io::Result<Vec<u8>> {
@@ -576,9 +601,10 @@ impl ArchiveIdentity {
     }
 }
 
-/// Splits a conversation removal index key into conversation, timestamp and
-/// archive identity (the inverse of `index_key` over `conversation_index_prefix`).
-fn decode_conversation_index_key(raw: &[u8]) -> io::Result<(&str, u64, &str)> {
+/// Splits a conversation or Attempt index key into its prefix text (the
+/// conversation or Attempt ID), timestamp and archive identity: the inverse of
+/// `index_key` over `conversation_index_prefix` or `attempt_index_prefix`.
+fn decode_text_prefixed_index_key(raw: &[u8]) -> io::Result<(&str, u64, &str)> {
     fn text(raw: &[u8], at: usize) -> Option<(&str, usize)> {
         let start = at.checked_add(2)?;
         let length = usize::from(u16::from_be_bytes(raw.get(at..start)?.try_into().ok()?));
@@ -586,16 +612,17 @@ fn decode_conversation_index_key(raw: &[u8]) -> io::Result<(&str, u64, &str)> {
         Some((std::str::from_utf8(raw.get(start..end)?).ok()?, end))
     }
     (|| {
-        let (conversation_id, at) = text(raw, 0)?;
+        let (prefix_text, at) = text(raw, 0)?;
         let created_at_ms = u64::from_be_bytes(raw.get(at..at.checked_add(8)?)?.try_into().ok()?);
         let (archive_id, end) = text(raw, at + 8)?;
-        (end == raw.len()).then_some((conversation_id, created_at_ms, archive_id))
+        (end == raw.len()).then_some((prefix_text, created_at_ms, archive_id))
     })()
-    .ok_or_else(|| invalid_data("raw archive conversation index key is malformed"))
+    .ok_or_else(|| invalid_data("raw archive index key is malformed"))
 }
 
-/// Retires one archive's document, identity claim and all five covering
-/// indexes. Callers repair the usage counters of the set they remove.
+/// Retires one archive's document, identity claim and all covering indexes
+/// (five, plus the body age row of an archive with stored bytes). Callers
+/// repair the usage counters of the set they remove.
 fn retire_archive(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -639,6 +666,9 @@ fn retire_archive(
         identity.age_key(transaction)?,
     ] {
         database.entity_delete(transaction, key)?;
+    }
+    if identity.stored_bytes > 0 {
+        database.entity_delete(transaction, identity.body_age_key(transaction)?)?;
     }
     Ok(())
 }
@@ -708,6 +738,7 @@ fn reclaim_archive(
 }
 
 const AGE_BACKFILL_CURSOR_KEY: &[u8] = b"cursor";
+const BODY_AGE_BACKFILL_CURSOR_KEY: &[u8] = b"bodies";
 const AGE_BACKFILL_RESUME_AFTER: u8 = 0;
 const AGE_BACKFILL_COMPLETE: u8 = 1;
 
@@ -717,6 +748,25 @@ fn age_backfill_cursor_key(transaction: &AuthorityTransaction) -> io::Result<Ent
         RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
         AGE_BACKFILL_CURSOR_KEY,
     )
+}
+
+fn body_age_backfill_cursor_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+    owner_key(
+        transaction,
+        RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+        BODY_AGE_BACKFILL_CURSOR_KEY,
+    )
+}
+
+/// Whether every archive of the owner with stored bytes is in the body age
+/// index; until then a body written before that index existed may lack its row.
+fn owner_body_age_index_complete(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<bool> {
+    let cursor_key = body_age_backfill_cursor_key(transaction)?;
+    Ok(database.entity_get(transaction, &cursor_key)?.as_deref()
+        == Some(&[AGE_BACKFILL_COMPLETE][..]))
 }
 
 /// Whether every archive of the owner is in the age index; until then an
@@ -762,7 +812,7 @@ fn backfill_owner_age_index(
     let page = database.entity_scan(transaction, &start, &end, page_rows)?;
     for (key, raw) in &page {
         let (conversation_id, created_at_ms, archive_id) =
-            decode_conversation_index_key(key.key_bytes())?;
+            decode_text_prefixed_index_key(key.key_bytes())?;
         let record: RemovalRecord = serde_json::from_slice(raw)
             .map_err(|_| invalid_data("raw archive removal index is malformed"))?;
         if record.created_at_ms != created_at_ms || record.archive_id != archive_id {
@@ -786,23 +836,86 @@ fn backfill_owner_age_index(
     database.entity_put(transaction, cursor_key, cursor)
 }
 
-fn owner_reclaim_needed(
+/// Indexes archives with stored bytes written before the body age index
+/// existed, walking the complete owner age index oldest first. Each call reads
+/// at most `page_rows` age rows after the persistent owner cursor; rewriting an
+/// already indexed row stores the identical value.
+fn backfill_owner_body_age_index(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    page_rows: usize,
+) -> io::Result<()> {
+    let cursor_key = body_age_backfill_cursor_key(transaction)?;
+    let (namespace_start, end) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+        b"",
+    )?;
+    let start = match database.entity_get(transaction, &cursor_key)?.as_deref() {
+        None => namespace_start,
+        Some([AGE_BACKFILL_COMPLETE]) => return Ok(()),
+        Some([AGE_BACKFILL_RESUME_AFTER, last @ ..]) if !last.is_empty() => {
+            let mut successor = last.to_vec();
+            successor.push(0);
+            owner_key(
+                transaction,
+                RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+                &successor,
+            )?
+        }
+        Some(_) => {
+            return Err(invalid_data(
+                "raw archive body age backfill cursor is malformed",
+            ))
+        }
+    };
+    let page = database.entity_scan(transaction, &start, &end, page_rows)?;
+    for (key, raw) in &page {
+        let identity: ArchiveIdentity = serde_json::from_slice(raw)
+            .map_err(|_| invalid_data("raw archive age index is malformed"))?;
+        if identity.age_key(transaction)? != *key {
+            return Err(invalid_data("raw archive age index key differs"));
+        }
+        if identity.stored_bytes > 0 {
+            database.entity_put(
+                transaction,
+                identity.body_age_key(transaction)?,
+                raw.clone(),
+            )?;
+        }
+    }
+    let cursor = match page.last() {
+        Some((last, _)) if page.len() == page_rows => {
+            let mut cursor = vec![AGE_BACKFILL_RESUME_AFTER];
+            cursor.extend_from_slice(last.key_bytes());
+            cursor
+        }
+        _ => vec![AGE_BACKFILL_COMPLETE],
+    };
+    database.entity_put(transaction, cursor_key, cursor)
+}
+
+fn owner_ceiling_reached(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<bool> {
+    let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
+    Ok(
+        read_u64(database, transaction, &owner_count_key, "owner count")?
+            >= MAX_RAW_ARCHIVES_PER_OWNER,
+    )
+}
+
+/// Whether a storable body exceeds the tenant budget while its Attempt still
+/// has room; a body its Attempt scrubs anyway never reclaims for bytes.
+fn byte_reclaim_needed(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     attempt_id: &str,
     requested: u64,
     budget_bytes: u64,
-    body_storable: bool,
 ) -> io::Result<bool> {
-    let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
-    if read_u64(database, transaction, &owner_count_key, "owner count")?
-        >= MAX_RAW_ARCHIVES_PER_OWNER
-    {
-        return Ok(true);
-    }
-    if !body_storable {
-        return Ok(false);
-    }
     let attempt_key = counter_key(
         transaction,
         RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE,
@@ -820,11 +933,133 @@ fn owner_reclaim_needed(
     )
 }
 
+/// Retires the putting Attempt's own oldest archives while its stored bytes
+/// plus the new body would exceed the per-Attempt budget. Each request of an
+/// Attempt carries its predecessors (prior responses reappear in the next
+/// request), so the newest archive dominates the Attempt's diagnostic value.
+/// Returns the per-put reclamation allowance that is left.
+fn reclaim_attempt_for_put(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    attempt_id: &str,
+    requested: u64,
+    mut remaining: usize,
+) -> io::Result<usize> {
+    let usage_key = counter_key(
+        transaction,
+        RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE,
+        attempt_id.as_bytes(),
+    )?;
+    let mut usage = read_u64(database, transaction, &usage_key, "Attempt usage")?;
+    let exceeds =
+        |usage: u64| usage.saturating_add(requested) > MAX_RAW_ARCHIVE_STORED_BYTES as u64;
+    if remaining == 0 || !exceeds(usage) {
+        return Ok(remaining);
+    }
+    let (start, end) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE,
+        &attempt_index_prefix(attempt_id)?,
+    )?;
+    let conversation_prefix = conversation_index_prefix(conversation_id)?;
+    for (key, raw) in database.entity_scan(transaction, &start, &end, remaining)? {
+        if !exceeds(usage) {
+            break;
+        }
+        let (indexed_attempt, created_at_ms, archive_id) =
+            decode_text_prefixed_index_key(key.key_bytes())?;
+        if indexed_attempt != attempt_id || raw.as_slice() != archive_id.as_bytes() {
+            return Err(invalid_data("raw archive Attempt index key differs"));
+        }
+        // The put proved this Attempt belongs to `conversation_id`, so its
+        // removal row carries the stored bytes every counter was charged.
+        let removal_key = index_key(
+            transaction,
+            RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE,
+            &conversation_prefix,
+            created_at_ms,
+            archive_id,
+        )?;
+        let removal = database
+            .entity_get(transaction, &removal_key)?
+            .ok_or_else(|| invalid_data("raw archive Attempt index target differs"))?;
+        let record: RemovalRecord = serde_json::from_slice(&removal)
+            .map_err(|_| invalid_data("raw archive removal index is malformed"))?;
+        if record.archive_id != archive_id || record.attempt_id != attempt_id {
+            return Err(invalid_data("raw archive Attempt index target differs"));
+        }
+        reclaim_archive(
+            database,
+            transaction,
+            &ArchiveIdentity::from_removal(conversation_id, &record),
+        )?;
+        usage = usage
+            .checked_sub(record.stored_bytes)
+            .ok_or_else(|| invalid_data("raw archive Attempt usage underflow"))?;
+        remaining -= 1;
+    }
+    Ok(remaining)
+}
+
+/// Retires the owner's oldest archives in one owner age index namespace while
+/// `needed` holds, returning the per-put reclamation allowance that is left.
+fn reclaim_owner_oldest(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    namespace: &str,
+    mut remaining: usize,
+    needed: impl Fn(&AuthorityDatabase, &mut AuthorityTransaction) -> io::Result<bool>,
+) -> io::Result<usize> {
+    let (start, end) = EntityKey::prefix_range(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        namespace,
+        b"",
+    )?;
+    let mut oldest = None;
+    while remaining > 0 && needed(database, transaction)? {
+        if oldest.is_none() {
+            oldest = Some(
+                database
+                    .entity_scan(transaction, &start, &end, remaining)?
+                    .into_iter(),
+            );
+        }
+        let Some((key, raw)) = oldest.as_mut().and_then(|candidates| candidates.next()) else {
+            break;
+        };
+        let identity: ArchiveIdentity = serde_json::from_slice(&raw)
+            .map_err(|_| invalid_data("raw archive age index is malformed"))?;
+        if identity.owner_index_key(transaction, namespace)? != key {
+            return Err(invalid_data("raw archive age index key differs"));
+        }
+        let claim = claim_key(transaction, &identity.archive_id)?;
+        if database.entity_get(transaction, &claim)?.is_none() {
+            // An engine that predates the age index retired this archive and
+            // left its row behind (which the body backfill may have copied);
+            // the rows alone are stale, not corruption.
+            database.entity_delete(transaction, identity.age_key(transaction)?)?;
+            if identity.stored_bytes > 0 {
+                database.entity_delete(transaction, identity.body_age_key(transaction)?)?;
+            }
+        } else {
+            reclaim_archive(database, transaction, &identity)?;
+        }
+        remaining -= 1;
+    }
+    Ok(remaining)
+}
+
 /// Makes room for one live put instead of refusing at a count ceiling or
-/// scrubbing a body the budget could hold: that conversation's oldest archives
-/// for its ceiling, then the owner's oldest for the owner ceiling and the byte
-/// budget, at most `MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT` in total. A body that
-/// is scrubbed anyway (free space, Attempt budget, parts above the budget)
+/// scrubbing a body the budgets could hold: that conversation's oldest archives
+/// for its ceiling, then that Attempt's oldest for the per-Attempt budget, then
+/// the owner's oldest archives for the owner ceiling and the owner's oldest
+/// bodies for the byte budget, at most `MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT` in
+/// total. Byte reclamation walks the body age index so body-less placeholders,
+/// which free nothing, never consume that bound. A body that is scrubbed anyway
+/// (free space, parts above the budget, an Attempt still above its budget)
 /// never reclaims for bytes. Whatever is still exceeded afterwards keeps the
 /// existing refusal or scrub, and the next put continues reclaiming.
 // TODO(enterprise): the byte budget is tenant-wide while reclamation only
@@ -840,11 +1075,19 @@ fn reclaim_for_put(
     budget_bytes: u64,
     space_exhausted: bool,
 ) -> io::Result<()> {
-    backfill_owner_age_index(
-        database,
-        transaction,
-        MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT,
-    )?;
+    if owner_age_index_complete(database, transaction)? {
+        backfill_owner_body_age_index(
+            database,
+            transaction,
+            MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT,
+        )?;
+    } else {
+        backfill_owner_age_index(
+            database,
+            transaction,
+            MAX_RAW_ARCHIVE_AGE_BACKFILL_ROWS_PER_PUT,
+        )?;
+    }
     let mut remaining = MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT;
     let (conversation_count, _) = read_conversation_stats(database, transaction, conversation_id)?;
     let conversation_excess = conversation_count
@@ -872,47 +1115,40 @@ fn reclaim_for_put(
         }
     }
     let body_storable = !space_exhausted && requested <= budget_bytes;
-    let (start, end) = EntityKey::prefix_range(
-        transaction.tenant_id(),
-        transaction.owner_user_id(),
-        RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
-        b"",
-    )?;
-    let mut oldest = None;
-    while remaining > 0
-        && owner_reclaim_needed(
+    if body_storable {
+        remaining = reclaim_attempt_for_put(
             database,
             transaction,
+            conversation_id,
             attempt_id,
             requested,
-            budget_bytes,
-            body_storable,
-        )?
-    {
-        if oldest.is_none() {
-            oldest = Some(
-                database
-                    .entity_scan(transaction, &start, &end, remaining)?
-                    .into_iter(),
-            );
-        }
-        let Some((key, raw)) = oldest.as_mut().and_then(|candidates| candidates.next()) else {
-            break;
-        };
-        let identity: ArchiveIdentity = serde_json::from_slice(&raw)
-            .map_err(|_| invalid_data("raw archive age index is malformed"))?;
-        if identity.age_key(transaction)? != key {
-            return Err(invalid_data("raw archive age index key differs"));
-        }
-        let claim = claim_key(transaction, &identity.archive_id)?;
-        if database.entity_get(transaction, &claim)?.is_none() {
-            // An engine that predates the age index retired this archive and
-            // left its row behind; the row alone is stale, not corruption.
-            database.entity_delete(transaction, key)?;
+            remaining,
+        )?;
+    }
+    let remaining = reclaim_owner_oldest(
+        database,
+        transaction,
+        RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
+        remaining,
+        owner_ceiling_reached,
+    )?;
+    if body_storable {
+        // Until its backfill completes the body age index may lack old bodies,
+        // so the budget keeps reclaiming by the complete age index.
+        let namespace = if owner_body_age_index_complete(database, transaction)? {
+            RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE
         } else {
-            reclaim_archive(database, transaction, &identity)?;
-        }
-        remaining -= 1;
+            RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE
+        };
+        reclaim_owner_oldest(
+            database,
+            transaction,
+            namespace,
+            remaining,
+            |database, transaction| {
+                byte_reclaim_needed(database, transaction, attempt_id, requested, budget_bytes)
+            },
+        )?;
     }
     Ok(())
 }
@@ -1011,12 +1247,18 @@ fn put_contents(
     let owner_count_key = counter_key(transaction, RAW_ARCHIVE_OWNER_COUNT_NAMESPACE, b"count")?;
     let owner_count = read_u64(database, transaction, &owner_count_key, "owner count")?;
     if owner_count >= MAX_RAW_ARCHIVES_PER_OWNER {
-        return Err(crate::resource_exhaustion::raw_archive_owner_capacity("raw archive owner capacity is exhausted"));
+        return Err(crate::resource_exhaustion::raw_archive_owner_capacity(
+            "raw archive owner capacity is exhausted",
+        ));
     }
     let (conversation_count, conversation_bytes) =
         read_conversation_stats(database, transaction, conversation_id)?;
     if conversation_count >= MAX_RAW_ARCHIVES_PER_CONVERSATION as u64 {
-        return Err(crate::resource_exhaustion::raw_archive_conversation_capacity("raw archive conversation capacity is exhausted"));
+        return Err(
+            crate::resource_exhaustion::raw_archive_conversation_capacity(
+                "raw archive conversation capacity is exhausted",
+            ),
+        );
     }
     let tenant_usage_key = global_key(transaction, TENANT_USAGE_NAMESPACE, b"bytes")?;
     let tenant_usage = read_u64(database, transaction, &tenant_usage_key, "tenant usage")?;
@@ -1026,31 +1268,42 @@ fn put_contents(
         attempt_id.as_bytes(),
     )?;
     let attempt_usage = read_u64(database, transaction, &attempt_usage_key, "Attempt usage")?;
-    let quota = tenant_usage
+    let budget_exhausted = tenant_usage
         .checked_add(requested)
-        .is_none_or(|next| next > *budget_bytes)
-        || space_exhausted;
+        .is_none_or(|next| next > *budget_bytes);
     let attempt_exhausted = attempt_usage
         .checked_add(requested)
         .is_none_or(|next| next > MAX_RAW_ARCHIVE_STORED_BYTES as u64);
-    if restoring && (quota || attempt_exhausted) {
+    if restoring && (budget_exhausted || space_exhausted || attempt_exhausted) {
         return Err(crate::resource_exhaustion::raw_archive_restore_budget(
             "raw archive snapshot exceeds retained-byte budget",
         ));
     }
-    let (stored_request, stored_response, stored_bytes, final_integrity, final_reason) = if quota {
-        (&[][..], &[][..], 0, "partial", "quota_exhausted")
+    // Name the constraint that bound. Free space and parts above the whole
+    // budget scrub whatever the Attempt holds; otherwise an Attempt still above
+    // its budget also stopped byte reclamation, so it, not the tenant budget,
+    // is why the body is gone.
+    let scrub_reason = if space_exhausted || requested > *budget_bytes {
+        Some("quota_exhausted")
     } else if attempt_exhausted {
-        (&[][..], &[][..], 0, "partial", "attempt_limit")
+        Some("attempt_limit")
+    } else if budget_exhausted {
+        Some("quota_exhausted")
     } else {
-        (
-            request_blob.as_slice(),
-            response_blob.as_slice(),
-            requested,
-            integrity.as_str(),
-            truncation_reason.as_str(),
-        )
+        None
     };
+    let (stored_request, stored_response, stored_bytes, final_integrity, final_reason) =
+        if let Some(reason) = scrub_reason {
+            (&[][..], &[][..], 0, "partial", reason)
+        } else {
+            (
+                request_blob.as_slice(),
+                response_blob.as_slice(),
+                requested,
+                integrity.as_str(),
+                truncation_reason.as_str(),
+            )
+        };
     let document = ArchiveDocument {
         archive_id: archive_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -1146,18 +1399,27 @@ fn put_contents(
         .map_err(|_| invalid_data("raw archive removal index cannot be encoded"))?,
     )?;
     let identity = ArchiveIdentity::from_document(&document);
+    let encoded_identity = identity.encode()?;
+    if stored_bytes > 0 {
+        database.entity_put(
+            transaction,
+            identity.body_age_key(transaction)?,
+            encoded_identity.clone(),
+        )?;
+    }
     database.entity_put(
         transaction,
         identity.age_key(transaction)?,
-        identity.encode()?,
+        encoded_identity,
     )?;
     if owner_count == 0 {
-        // No older archive exists, so none can be missing from the age index.
-        database.entity_put(
-            transaction,
+        // No older archive exists, so none can be missing from either index.
+        for cursor_key in [
             age_backfill_cursor_key(transaction)?,
-            vec![AGE_BACKFILL_COMPLETE],
-        )?;
+            body_age_backfill_cursor_key(transaction)?,
+        ] {
+            database.entity_put(transaction, cursor_key, vec![AGE_BACKFILL_COMPLETE])?;
+        }
     }
     database.entity_put(
         transaction,
@@ -1876,6 +2138,22 @@ mod tests {
                 .collect()
         }
 
+        fn body_order(db: &mut AuthorityDatabase) -> Vec<String> {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let (start, end) =
+                EntityKey::prefix_range(7, 11, RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE, b"")
+                    .unwrap();
+            db.entity_scan(&mut tx, &start, &end, 1000)
+                .unwrap()
+                .into_iter()
+                .map(|(_, raw)| {
+                    serde_json::from_slice::<ArchiveIdentity>(&raw)
+                        .unwrap()
+                        .archive_id
+                })
+                .collect()
+        }
+
         fn retained(db: &mut AuthorityDatabase, archive: &str) -> bool {
             let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
             let claim = claim_key(&tx, archive).unwrap();
@@ -1927,34 +2205,52 @@ mod tests {
             db.commit(tx).unwrap();
         }
 
-        /// Returns the owner to the state of archives written before the age
-        /// index existed: no age rows and no backfill cursor.
-        fn forget_age_index(db: &mut AuthorityDatabase) {
+        fn forget_index(db: &mut AuthorityDatabase, namespace: &str, cursor_key: &[u8]) {
             let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-            let (start, end) =
-                EntityKey::prefix_range(7, 11, RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE, b"").unwrap();
+            let (start, end) = EntityKey::prefix_range(7, 11, namespace, b"").unwrap();
             for (key, _) in db.entity_scan(&mut tx, &start, &end, 1000).unwrap() {
                 db.entity_delete(&mut tx, key).unwrap();
             }
-            let cursor = owner_key(
-                &tx,
-                RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
-                AGE_BACKFILL_CURSOR_KEY,
-            )
-            .unwrap();
+            let cursor =
+                owner_key(&tx, RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE, cursor_key).unwrap();
             db.entity_delete(&mut tx, cursor).unwrap();
             db.commit(tx).unwrap();
         }
 
-        fn backfill_cursor(db: &mut AuthorityDatabase) -> Option<Vec<u8>> {
-            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
-            let cursor = owner_key(
-                &tx,
-                RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE,
+        /// Returns the owner to the state of archives written before the body
+        /// age index existed: no body age rows and no body backfill cursor.
+        fn forget_body_age_index(db: &mut AuthorityDatabase) {
+            forget_index(
+                db,
+                RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE,
+                BODY_AGE_BACKFILL_CURSOR_KEY,
+            );
+        }
+
+        /// Returns the owner to the state of archives written before the age
+        /// index existed: neither owner age index and no backfill cursor.
+        fn forget_age_index(db: &mut AuthorityDatabase) {
+            forget_body_age_index(db);
+            forget_index(
+                db,
+                RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE,
                 AGE_BACKFILL_CURSOR_KEY,
-            )
-            .unwrap();
+            );
+        }
+
+        fn cursor(db: &mut AuthorityDatabase, cursor_key: &[u8]) -> Option<Vec<u8>> {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let cursor =
+                owner_key(&tx, RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE, cursor_key).unwrap();
             db.entity_get(&mut tx, &cursor).unwrap()
+        }
+
+        fn backfill_cursor(db: &mut AuthorityDatabase) -> Option<Vec<u8>> {
+            cursor(db, AGE_BACKFILL_CURSOR_KEY)
+        }
+
+        fn body_backfill_cursor(db: &mut AuthorityDatabase) -> Option<Vec<u8>> {
+            cursor(db, BODY_AGE_BACKFILL_CURSOR_KEY)
         }
 
         #[test]
@@ -2011,14 +2307,22 @@ mod tests {
             seed_parent(&mut db, "other");
             // Older than every archive of "conv": its ceiling must not reach it.
             put(&mut db, "other", "other-0", 5, 0, BUDGET);
+            // One stored byte each, so every archive also carries a body age row.
             for index in 0..=MAX_RAW_ARCHIVES_PER_CONVERSATION {
                 let archive = format!("archive-{index:04}");
-                let stored = put(&mut db, "conv", &archive, index as u64 + 10, 0, BUDGET);
+                let stored = put(&mut db, "conv", &archive, index as u64 + 10, 1, BUDGET);
                 assert_eq!(stored["archiveId"], archive.as_str());
             }
             assert_eq!(
                 conversation(&mut db, "conv"),
-                (MAX_RAW_ARCHIVES_PER_CONVERSATION as u64, 0)
+                (
+                    MAX_RAW_ARCHIVES_PER_CONVERSATION as u64,
+                    MAX_RAW_ARCHIVES_PER_CONVERSATION as u64
+                )
+            );
+            assert_eq!(
+                body_order(&mut db).first().map(String::as_str),
+                Some("archive-0001")
             );
             assert!(!retained(&mut db, "archive-0000"));
             assert!(retained(&mut db, "archive-0001"));
@@ -2035,6 +2339,8 @@ mod tests {
             assert!(!retained(&mut db, "archive-0001"));
             assert_eq!(owner_count(&mut db), 1);
             assert_eq!(age_order(&mut db), ["other-0"]);
+            assert!(body_order(&mut db).is_empty());
+            assert_eq!(tenant_usage(&mut db), 0);
         }
 
         #[test]
@@ -2183,6 +2489,7 @@ mod tests {
             let observe = |db: &mut AuthorityDatabase| {
                 (
                     age_order(db),
+                    body_order(db),
                     tenant_usage(db),
                     owner_count(db),
                     conversation(db, "conv-b"),
@@ -2192,6 +2499,7 @@ mod tests {
             };
             let before = (
                 vec!["b-10".to_owned(), "a-20".to_owned()],
+                vec!["b-10".to_owned(), "a-20".to_owned()],
                 200,
                 2,
                 (1, 100),
@@ -2199,6 +2507,7 @@ mod tests {
                 false,
             );
             let after = (
+                vec!["a-20".to_owned(), "a-30".to_owned()],
                 vec!["a-20".to_owned(), "a-30".to_owned()],
                 400,
                 2,
@@ -2305,8 +2614,26 @@ mod tests {
             let started = Instant::now();
             put(&mut db, "conv-a", "z-0", 30_000, 2048, budget);
             let backfill = (started.elapsed(), ops(&vfs));
+            let mut index = 1;
+            while backfill_cursor(&mut db) != Some(vec![AGE_BACKFILL_COMPLETE]) {
+                put(
+                    &mut db,
+                    "conv-a",
+                    &format!("z-{index}"),
+                    30_000 + index,
+                    2048,
+                    budget,
+                );
+                index += 1;
+            }
+            // With the age index complete, the next put backfills bodies.
+            forget_body_age_index(&mut db);
+            vfs.arm_fault(None).unwrap();
+            let started = Instant::now();
+            put(&mut db, "conv-a", "z-last", 30_000 + index, 2048, budget);
+            let body_backfill = (started.elapsed(), ops(&vfs));
             eprintln!(
-                "MEASURE plain/put {plain:?} reclaiming/put {reclaiming:?} first-backfill-put {backfill:?}"
+                "MEASURE plain/put {plain:?} reclaiming/put {reclaiming:?} first-backfill-put {backfill:?} first-body-backfill-put {body_backfill:?}"
             );
         }
 
@@ -2327,6 +2654,214 @@ mod tests {
             assert_eq!(owner_count(&mut db), 1);
             assert_eq!(tenant_usage(&mut db), 4);
             assert_eq!(conversation(&mut db, "conv-a"), (0, 0));
+        }
+
+        fn attempt_usage(db: &mut AuthorityDatabase, attempt: &str) -> u64 {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let key =
+                counter_key(&tx, RAW_ARCHIVE_ATTEMPT_USAGE_NAMESPACE, attempt.as_bytes()).unwrap();
+            read_u64(db, &mut tx, &key, "Attempt usage").unwrap()
+        }
+
+        /// Three of these exceed the per-Attempt budget; two fit.
+        const THIRD: usize = MAX_RAW_ARCHIVE_STORED_BYTES / 3 + 1;
+
+        #[test]
+        fn legacy_bodies_are_backfilled_into_the_body_age_index_from_the_age_index() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-b", "b-10", 10, 4, BUDGET);
+            put(&mut db, "conv-a", "p-15", 15, 2, 1);
+            put(&mut db, "conv-a", "a-20", 20, 4, BUDGET);
+            put(&mut db, "conv-a", "a-30", 30, 4, BUDGET);
+            assert_eq!(body_order(&mut db), ["b-10", "a-20", "a-30"]);
+            assert_eq!(
+                body_backfill_cursor(&mut db),
+                Some(vec![AGE_BACKFILL_COMPLETE])
+            );
+            forget_body_age_index(&mut db);
+
+            // The cursor walks the age index oldest first and skips placeholders.
+            for expected in [vec!["b-10"], vec!["b-10", "a-20", "a-30"]] {
+                let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+                backfill_owner_body_age_index(&db, &mut tx, 2).unwrap();
+                db.commit(tx).unwrap();
+                assert_eq!(body_order(&mut db), expected);
+                assert_eq!(
+                    body_backfill_cursor(&mut db).unwrap()[0],
+                    AGE_BACKFILL_RESUME_AFTER
+                );
+            }
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            backfill_owner_body_age_index(&db, &mut tx, 2).unwrap();
+            db.commit(tx).unwrap();
+            assert_eq!(
+                body_backfill_cursor(&mut db),
+                Some(vec![AGE_BACKFILL_COMPLETE])
+            );
+            assert_eq!(body_order(&mut db), ["b-10", "a-20", "a-30"]);
+        }
+
+        #[test]
+        fn until_the_body_age_index_is_complete_the_budget_reclaims_by_age() {
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-b", "b-10", 10, 100, 200);
+            put(&mut db, "conv-a", "a-20", 20, 100, 200);
+            forget_age_index(&mut db);
+
+            // The first put completes the age index, not yet the body index,
+            // and reclaims by age.
+            let first = put(&mut db, "conv-a", "a-30", 30, 100, 200);
+            assert_eq!(first["storedBytes"], 100);
+            assert!(!retained(&mut db, "b-10"));
+            assert_eq!(backfill_cursor(&mut db), Some(vec![AGE_BACKFILL_COMPLETE]));
+            assert_eq!(body_backfill_cursor(&mut db), None);
+            assert_eq!(body_order(&mut db), ["a-30"]);
+
+            // The next put backfills the body index and reclaims through it.
+            let second = put(&mut db, "conv-a", "a-40", 40, 100, 200);
+            assert_eq!(second["storedBytes"], 100);
+            assert!(!retained(&mut db, "a-20"));
+            assert_eq!(
+                body_backfill_cursor(&mut db),
+                Some(vec![AGE_BACKFILL_COMPLETE])
+            );
+            assert_eq!(body_order(&mut db), ["a-30", "a-40"]);
+            assert_eq!(age_order(&mut db), ["a-30", "a-40"]);
+            assert_eq!(tenant_usage(&mut db), 200);
+        }
+
+        #[test]
+        fn body_less_placeholders_never_starve_byte_reclamation() {
+            // Production 2026-11-07 23:44: a round needing about 230 KB was
+            // scrubbed after its put retired 64 of the owner's oldest archives,
+            // while no surveyed body was below 36 KB.
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            for index in 0..MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT {
+                let placeholder = put(
+                    &mut db,
+                    "conv-b",
+                    &format!("p-{index:02}"),
+                    index as u64 + 1,
+                    2,
+                    1,
+                );
+                assert_eq!(placeholder["storedBytes"], 0);
+            }
+            put(&mut db, "conv-b", "b-100", 100, 200, 400);
+            put(&mut db, "conv-b", "b-101", 101, 200, 400);
+
+            let stored = put(&mut db, "conv-a", "a-200", 200, 200, 400);
+            assert_eq!(stored["truncationReason"], "");
+            assert_eq!(stored["storedBytes"], 200);
+            assert!(!retained(&mut db, "b-100"));
+            // Placeholders hold no bytes; only the count ceilings retire them.
+            assert!(retained(&mut db, "p-00"));
+            assert_eq!(
+                age_order(&mut db).len(),
+                MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT + 2
+            );
+            assert_eq!(body_order(&mut db), ["b-101", "a-200"]);
+            assert_eq!(tenant_usage(&mut db), 400);
+        }
+
+        #[test]
+        fn a_long_attempt_retires_its_own_oldest_archives_to_keep_the_newest() {
+            let budget = 4 * MAX_RAW_ARCHIVE_STORED_BYTES as u64;
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            seed_parent(&mut db, "conv-b");
+            put(&mut db, "conv-b", "b-05", 5, 4, budget);
+            put(&mut db, "conv-a", "a-10", 10, THIRD, budget);
+            put(&mut db, "conv-a", "a-20", 20, THIRD, budget);
+
+            let newest = put(&mut db, "conv-a", "a-30", 30, THIRD, budget);
+            assert_eq!(newest["integrity"], "complete");
+            assert_eq!(newest["truncationReason"], "");
+            assert_eq!(newest["storedBytes"], THIRD as u64);
+            // Only the Attempt's own oldest goes; the owner's older archive of
+            // another Attempt is not needed for the per-Attempt budget.
+            assert!(!retained(&mut db, "a-10"));
+            assert_eq!(age_order(&mut db), ["b-05", "a-20", "a-30"]);
+            assert_eq!(attempt_usage(&mut db, "conv-a-attempt"), 2 * THIRD as u64);
+            assert_eq!(conversation(&mut db, "conv-a"), (2, 2 * THIRD as u64));
+            assert_eq!(tenant_usage(&mut db), 2 * THIRD as u64 + 4);
+            assert_eq!(owner_count(&mut db), 3);
+        }
+
+        #[test]
+        fn a_long_attempt_under_a_full_budget_keeps_every_newest_round() {
+            // Production 2026-11-08: the tenant budget was full and the
+            // Attempt reached its budget, so nothing was reclaimed and every
+            // later round became a body-less placeholder.
+            let budget = 2 * THIRD as u64;
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            put(&mut db, "conv-a", "a-10", 10, THIRD, budget);
+            put(&mut db, "conv-a", "a-20", 20, THIRD, budget);
+            for (round, created_at_ms) in [("a-30", 30), ("a-40", 40), ("a-50", 50)] {
+                let stored = put(&mut db, "conv-a", round, created_at_ms, THIRD, budget);
+                assert_eq!(stored["truncationReason"], "", "{round}");
+                assert_eq!(stored["storedBytes"], THIRD as u64, "{round}");
+            }
+            assert_eq!(age_order(&mut db), ["a-40", "a-50"]);
+            assert_eq!(tenant_usage(&mut db), budget);
+            assert_eq!(attempt_usage(&mut db, "conv-a-attempt"), budget);
+        }
+
+        #[test]
+        fn a_scrubbed_body_names_the_constraint_that_bound_it() {
+            let budget = 2 * THIRD as u64;
+            let mut db = database();
+            seed_parent(&mut db, "conv-a");
+            // Body-less placeholders (parts above the whole budget) fill the
+            // Attempt's oldest slots up to the per-put reclamation bound.
+            for index in 0..MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT {
+                let placeholder = put(
+                    &mut db,
+                    "conv-a",
+                    &format!("p-{index:02}"),
+                    index as u64 + 1,
+                    2,
+                    1,
+                );
+                assert_eq!(placeholder["truncationReason"], "quota_exhausted");
+            }
+            put(&mut db, "conv-a", "a-100", 100, THIRD, budget);
+            put(&mut db, "conv-a", "a-101", 101, THIRD, budget);
+
+            // Free-space exhaustion scrubs whatever the Attempt holds and
+            // reclaims nothing.
+            let space = commit(
+                &mut db,
+                &put_request("conv-a", "a-102", 102, THIRD, budget, 1),
+            );
+            assert_eq!(space["truncationReason"], "quota_exhausted");
+            assert_eq!(
+                age_order(&mut db).len(),
+                MAX_RAW_ARCHIVES_RECLAIMED_PER_PUT + 3
+            );
+
+            // Both the Attempt and the tenant budget are exceeded. Retiring the
+            // Attempt's oldest stops at the bound, before any of its bytes, so
+            // the Attempt budget is what bound, not the tenant budget.
+            let bound = put(&mut db, "conv-a", "a-103", 103, THIRD, budget);
+            assert_eq!(bound["integrity"], "partial");
+            assert_eq!(bound["truncationReason"], "attempt_limit");
+            assert_eq!(bound["storedBytes"], 0);
+            assert_eq!(age_order(&mut db), ["a-100", "a-101", "a-102", "a-103"]);
+
+            // The next put continues with the Attempt's oldest body.
+            let next = put(&mut db, "conv-a", "a-104", 104, THIRD, budget);
+            assert_eq!(next["truncationReason"], "");
+            assert_eq!(age_order(&mut db), ["a-101", "a-102", "a-103", "a-104"]);
+            assert_eq!(tenant_usage(&mut db), budget);
+            assert_eq!(attempt_usage(&mut db, "conv-a-attempt"), budget);
         }
     }
 }

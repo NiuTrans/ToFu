@@ -70,7 +70,7 @@ class _Resp:
 
 
 def _patch_get(monkeypatch, fn):
-    monkeypatch.setattr(requests, 'get', fn)
+    monkeypatch.setattr('lib.http_transport.client.http_get', fn)
 
 
 def test_probe_ok_requires_tofu_health_json(monkeypatch):

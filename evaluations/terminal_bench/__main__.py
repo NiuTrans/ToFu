@@ -19,6 +19,9 @@ from evaluations.terminal_bench.harness import PROTOCOLS, list_tasks
 # Context window both arms are told: the value the 2026-11-01/02 Tofu runs routed
 # with (Harbor TofuKernel envelope), so both harnesses share one model fact.
 GLM53_CONTEXT_TOKENS = 262_144
+# Context windows per run model, from the production model-routing offering the
+# run replicates. Opus 5.5's offering and Pi's built-in catalog both say 1 M.
+RUN_MODEL_CONTEXT_TOKENS = {"claude-opus-5.5": 1_000_000}
 TB21_TASK_CHECKSUMS = Path(__file__).resolve().parents[1] / "terminal_bench_21_task_checksums.json"
 
 
@@ -55,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--branch", default=INGRESS_BRANCH, help="ingress branch with the native exec channel")
     run.add_argument("--proxy", help="upstream egress proxy for the VM and the trial egress filter")
     run.add_argument("--max-alive-min", type=int, default=540)
-    run.add_argument("--context-tokens", type=int, default=GLM53_CONTEXT_TOKENS)
+    run.add_argument("--context-tokens", type=int,
+                     help="context window every arm is told (default: the run model's production offering)")
     run.add_argument("--poll-interval-sec", type=int, default=30)
     run.add_argument("--run-label", help="relay accounting label (default: work dir name)")
     summarize = commands.add_parser("summarize", help="rewrite summary.json from trial states")
@@ -96,7 +100,8 @@ def frozen_config(args) -> dict:
         "proxy": args.proxy,
         "max_alive_min": args.max_alive_min,
         "max_attempts": args.max_attempts,
-        "context_tokens": args.context_tokens,
+        "context_tokens": (args.context_tokens if args.context_tokens is not None
+                           else RUN_MODEL_CONTEXT_TOKENS.get(args.model, GLM53_CONTEXT_TOKENS)),
         "poll_interval_sec": args.poll_interval_sec,
         "run_label": args.run_label or args.work_dir.name,
         "anthropic_url": args.anthropic_url.rstrip("/") if args.anthropic_url else None,

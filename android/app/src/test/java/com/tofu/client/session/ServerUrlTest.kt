@@ -121,9 +121,9 @@ class ServerUrlTest {
     }
 
     @Test
-    fun displayLabel_returns_unparseable_input_as_typed() {
-        // A half-typed URL must still render something, not vanish.
-        assertEquals("https://", ServerUrl.displayLabel("  https://  "))
+    fun displayLabel_uses_a_safe_constant_for_unparseable_input() {
+        // Never echo an invalid string: it may contain credentials even when parsing fails.
+        assertEquals(ServerUrl.UNSAFE_LABEL, ServerUrl.displayLabel("  https://  "))
     }
 
 

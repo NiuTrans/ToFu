@@ -8,8 +8,10 @@ generated contract bindings. Read `contracts/conversation_sync_v3.yaml` and
 
 `worker_execution.py` rebuilds claimed attempts through the common task start
 path and joins execution before reporting settlement, then keeps the claim for
-the attempt's detached Swarm outside the dispatch stripe
-(`swarm/turn_handoff.own_detached_swarm`). Entered effects require
+the attempt's detached Swarm outside the attempt's dispatch lock
+(`swarm/turn_handoff.own_detached_swarm`). That lock is exact per attempt
+(`turn_lifecycle.attempt_dispatch_lock`): never share it across attempts, since
+a claimed attempt holds it for its whole execution. Entered effects require
 recovery evidence; the adapter grants no automatic replay. Its typed registration
 joins the common durable service. `worker_dispatch.py` is ordinary admission's
 atomic binding/enqueue boundary; no HTTP executor is constructed. Verify

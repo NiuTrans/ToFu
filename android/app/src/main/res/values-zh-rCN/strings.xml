@@ -114,6 +114,11 @@
     <string name="auth_none_desc">适用于在可信网络中直接暴露的 Tofu。</string>
     <string name="toast_bad_qr">该二维码不是 Tofu 服务器链接</string>
     <string name="toast_no_link">剪贴板里没有服务器链接</string>
+    <string name="toast_invalid_connection">请使用不含登录凭据的服务器地址或 tofu://connect 链接。移除令牌，通过密码框或交互登录完成认证。</string>
+    <string name="prefill_confirm_title">使用新的连接链接？</string>
+    <string name="prefill_confirm_message">替换连接信息，或保留当前表单。请检查修改后再选择“保存并连接”。</string>
+    <string name="prefill_use_link">替换表单</string>
+    <string name="prefill_keep_form">保留表单</string>
 
     <!-- 首装引导 -->
     <string name="onboard_welcome">欢迎使用 Tofu</string>

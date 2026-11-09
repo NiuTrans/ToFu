@@ -68,6 +68,7 @@ def render_worker(contract: dict, worker: dict) -> tuple[str, str]:
         f'WORKER_TERMINAL_STATES = frozenset({worker["terminalStates"]!r})',
         f'WORKER_JOB_MAX_CLOCK_MS = {maximum_clock}',
         f'WORKER_LEASE_MAX_NOW_MS = {maximum_now}',
+        f'WORKER_PROCESS_OWNER_PREFIX = {lease["processBoundOwner"]["prefix"]!r}',
         f'WORKER_LEASE_MAX_MS = {lease["maximumLeaseMilliseconds"]}',
         f'WORKER_LEASE_EPOCH_CHARACTERS = {lease["epochCharacters"]}',
         f'WORKER_SERVER_CLOCK_FORMAT = {server_clock["format"]!r}',

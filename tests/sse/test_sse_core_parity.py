@@ -165,6 +165,8 @@ class _FakeRequestsResp:
         self.headers = headers or {}
         self.encoding = 'utf-8'
         self.text = '' if status == 200 else 'error body'
+        self.tofu_network_route = {
+            'routeId': 'direct', 'routeMode': 'direct', 'decisionReason': 'fixture'}
 
     def iter_lines(self, decode_unicode=True):
         for ln in self._lines:
@@ -219,6 +221,9 @@ class _FakeAsyncStreamCtx:
         self._raw_chunks = raw_chunks
         self.status_code = status
         self.headers = headers or {}
+
+        self.extensions = {'tofu_network_route': {
+            'routeId': 'direct', 'routeMode': 'direct', 'decisionReason': 'fixture'}}
 
     async def __aenter__(self):
         return self
@@ -295,6 +300,8 @@ _VARYING = {
     # normalized message/anomaly contract rather than requiring the same path.
     '_network_route',
     '_transport_idle_ms',
+    # Route latency recorded since e4ea035201: transport timing, not an SSE output.
+    '_response_headers_ms',
 }
 
 

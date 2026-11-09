@@ -180,6 +180,31 @@ def _reset_control_text(task: dict, assistant_msg: dict, llm_round) -> None:
             contentEpoch=task.get('_contentEpoch')))
 
 
+def project_terminal_control_text(
+    task: dict, assistant_msg: dict, messages, *, llm_round,
+) -> tuple[bool, bool]:
+    """Return (deliberate silence, unrecoverable empty response).
+
+    The original declaration remains in ``assistant_msg`` for provider replay;
+    public text carries no control token. Python can retry the latter case.
+    """
+    if silent_turn_declared(task):
+        return True, False
+    content = assistant_msg.get('content') or ''
+    if not is_silent_turn(content):
+        return False, False
+    if assistant_msg.get('tool_calls'):
+        return False, False
+    if declare_silent_turn(task, assistant_msg, messages, llm_round=llm_round):
+        return True, False
+    # Ordinary END_TURN hygiene already handles its marker. A denied silence
+    # declaration must not expose a raw provider instruction in public prose.
+    if _router_task(task) and SILENT_TURN_MARKER in content:
+        _reset_control_text(task, assistant_msg, llm_round)
+        return False, True
+    return False, False
+
+
 def declare_silent_turn(task: dict, assistant_msg: dict, messages, *, llm_round) -> bool:
     """Consume an exact authorized declaration without changing ordinary assistant prose."""
     if assistant_msg.get('tool_calls') or not _router_task(task):
@@ -210,4 +235,5 @@ def declare_silent_turn(task: dict, assistant_msg: dict, messages, *, llm_round)
 
 __all__ = ['SILENT_ELIGIBILITY_FIELD', 'SILENT_NOTE_KIND', 'SILENT_NOTE_TEXT',
            'SILENT_TURN_FIELD', 'declare_silent_turn', 'hold_silent_text_delta',
+           'project_terminal_control_text',
            'silence_declaration_allowed', 'silent_turn_declared']

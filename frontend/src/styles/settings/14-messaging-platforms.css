@@ -1,0 +1,139 @@
+/* ── 消息平台 tab (settings-panels/messaging.html, features/settings/messaging-platforms.ts) ──
+   Every chat platform is one collapsible section: its name and a one-line
+   status chip in the summary, its own panel (moved in once) as the body. */
+
+.msg-platforms {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.msg-platform {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+}
+
+.msg-platform-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-md);
+  padding: var(--space-2) var(--space-4);
+  color: var(--s-ink);
+  cursor: pointer;
+  list-style: none;
+}
+
+.msg-platform-summary::-webkit-details-marker {
+  display: none;
+}
+
+.msg-platform-summary::after {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: var(--space-1);
+  border-right: 1.5px solid var(--s-ink-soft);
+  border-bottom: 1.5px solid var(--s-ink-soft);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.msg-platform[open] > .msg-platform-summary::after {
+  transform: rotate(45deg);
+}
+
+.msg-platform-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--s-radius);
+}
+
+.msg-platform-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-medium);
+}
+
+.msg-platform-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.msg-platform-status:not(:empty)::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--s-skin);
+}
+
+.msg-platform-status[data-state="connected"]::before { background: var(--s-done); }
+.msg-platform-status[data-state="connecting"]::before { background: var(--s-gold); }
+.msg-platform-status[data-state="attention"] { color: var(--error-text); }
+.msg-platform-status[data-state="attention"]::before { background: var(--s-danger); }
+
+.msg-platform-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+/* A moved platform panel is always shown inside its open section; its own
+   title repeats the summary, so the section shows only its description. */
+.msg-platform-body > .settings-tab-panel {
+  display: block;
+}
+
+.msg-platform-body > .settings-tab-panel > .settings-section-title,
+.msg-platform-body > .settings-tab-panel > .channel-page-heading > .settings-section-title {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-platform-summary::after { transition: none; }
+}
+
+/* Bot platform panels (bot-channel.ts): the pairing code, the 微信 login QR
+   code and the setup steps. */
+.channel-settings .channel-pairing-code {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  border: var(--s-border);
+  border-radius: var(--radius-xs);
+  background: var(--s-cream);
+  color: var(--s-ink);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.12em;
+  user-select: all;
+}
+
+.channel-settings .channel-login-qr {
+  align-self: flex-start;
+  width: 200px;
+  height: 200px;
+  image-rendering: pixelated;
+  border: var(--s-border);
+  border-radius: var(--radius-xs);
+  background: var(--s-white);
+}
+
+.channel-settings .channel-steps {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-steps li + li {
+  margin-top: var(--space-1);
+}

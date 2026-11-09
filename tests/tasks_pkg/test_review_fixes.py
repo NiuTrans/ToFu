@@ -6,8 +6,6 @@ review so it cannot silently regress:
   1. TestSlotInflightRelease       — lib/llm_dispatch/slot.py Slot.release()
                                       + the dispatch payload-reject paths that
                                       must release instead of leaking inflight.
-  2. TestContentRefSlice           — executor._resolve_content_ref coerces /
-                                      bounds-checks model-supplied slice indices.
   3. TestRateLimiterOrdering       — swarm RateLimiter waits out backoff BEFORE
                                       taking a permit.
   4. TestToolAdjacencyDedup        — llm_sanitize adjacency scan is bounded by
@@ -129,60 +127,6 @@ class TestSlotInflightRelease:
         assert slot.last_error_time == 0 and slot.cooldown_until == 0
         assert slot.last_success_time == 0.0
         assert dispatcher.picks == 1 and spare.total_requests == 0
-
-
-# ═══════════════════════════════════════════════════════════
-#  2. content_ref slice safety
-# ═══════════════════════════════════════════════════════════
-
-@pytest.mark.unit
-class TestContentRefSlice:
-    def _task(self, content):
-        return {'id': 'abcdef0123456', 'toolRounds': [
-            {'roundNum': 1, 'toolContent': content}]}
-
-    def test_full_content_when_no_slice(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        out = _resolve_content_ref(self._task('hello world'), {'tool_round': 1})
-        assert out == 'hello world'
-
-    def test_valid_slice(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        out = _resolve_content_ref(self._task('hello world'),
-                                   {'tool_round': 1, 'start': 0, 'end': 5})
-        assert out == 'hello'
-
-    def test_string_indices_are_coerced(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        # Model emitted JSON strings — must coerce, not silently mis-slice.
-        out = _resolve_content_ref(self._task('hello world'),
-                                   {'tool_round': 1, 'start': '0', 'end': '5'})
-        assert out == 'hello'
-
-    def test_out_of_range_end_is_clamped(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        out = _resolve_content_ref(self._task('hello'),
-                                   {'tool_round': 1, 'start': 0, 'end': 9999})
-        assert out == 'hello'
-
-    def test_negative_start_clamped_to_zero(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        # No Python-style wraparound — negative clamps to 0.
-        out = _resolve_content_ref(self._task('hello'),
-                                   {'tool_round': 1, 'start': -3})
-        assert out == 'hello'
-
-    def test_end_before_start_returns_empty(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        out = _resolve_content_ref(self._task('hello world'),
-                                   {'tool_round': 1, 'start': 8, 'end': 2})
-        assert out == ''
-
-    def test_garbage_index_falls_back_to_default(self):
-        from lib.tasks_pkg.executor import _resolve_content_ref
-        out = _resolve_content_ref(self._task('hello world'),
-                                   {'tool_round': 1, 'start': 'abc'})
-        assert out == 'hello world'  # bad start → default 0, no end → full
 
 
 # ═══════════════════════════════════════════════════════════

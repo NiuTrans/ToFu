@@ -10,8 +10,8 @@ writer therefore has to budget for the authority's *observed* end-to-end
 service time (queue wait included), not for a constant of its own. A constant
 below the authority's service tail refuses ordinary writes under congestion,
 and the refusal repeats instead of clearing: the client's attempts inside one
-congestion episode are correlated, because the availability backoff only
-engages for a caller whose aggregate budget can afford it. The same ghost
+congestion episode are correlated, so every replay re-enters the congestion
+that refused the first attempt. The same ghost
 therefore reappears under the next writer — 2026-10-14 ``credential.touch``,
 2026-10-22 ``task_results.checkpoint`` and ``event.append_batch`` — which is
 why a per-writer constant is never the fix.

@@ -34,7 +34,7 @@ def test_running_snapshot_retains_model_clock_and_tool_evidence(monkeypatch):
             'timestamp': 1000, 'status': 'done', 'preview': 'file contents',
         }]))
     master._scheduler = SimpleNamespace(
-        _running={spec.id: spec}, _pending=[],
+        _running={spec.id: spec}, _pending={},
         started_at_map=lambda: {spec.id: 1000},
     )
     monkeypatch.setattr('lib.swarm.master.resolve_model_for_tier', lambda *a, **k: '')

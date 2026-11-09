@@ -22,7 +22,7 @@ import requests
 from lib.log import get_logger
 from lib.oauth.pkce import generate_pkce_codes
 from lib.oauth.token_store import load_token, save_token, OAuthExchangeError
-from lib.http_transport.client import http_post
+from lib.oauth.http import http_post
 
 logger = get_logger(__name__)
 

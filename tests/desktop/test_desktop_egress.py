@@ -30,7 +30,7 @@ pytestmark = pytest.mark.unit
 
 from lib.desktop import egress
 from lib.desktop.egress import EgressUnavailable
-from lib.subscription_routes import ProbeResult, Route, manager as route_manager
+from lib.network_routes import ProbeResult, Route, manager as route_manager
 
 
 def _agent(agent_id='a1', user_id='1', egress_cap=True, name='box'):
@@ -112,16 +112,16 @@ class TestRouteRequest(unittest.TestCase):
     def test_probe_result_cached_per_host(self):
         # The manager, rather than the UI verdict mirror, owns reachability.
         # A second path on the same host reuses the healthy route without a
-        # second probe.
+        # second probe. A direct-only target requires no synthetic probe.
         route = Route('direct', 'direct', 'direct')
         route_manager.reset()
-        with mock.patch('lib.proxy.subscription_route_specs',
+        with mock.patch('lib.proxy.network_route_specs',
                         return_value=[route]), \
              mock.patch.object(route_manager, '_probe',
                                return_value=ProbeResult('ok', 10, 401)) as probe:
             egress.route_request('https://api.anthropic.com/a', user_id='')
             egress.route_request('https://api.anthropic.com/b', user_id='')
-        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(probe.call_count, 0)
         route_manager.reset()
 
     def test_steady_healthy_probe_logs_are_debug_only(self):
@@ -345,7 +345,7 @@ class TestAgentExecutor(unittest.TestCase):
                                   'set-cookie': 'secret=1'},
                          content=b'{"ok":true}')
         fake.elapsed = mock.Mock(total_seconds=lambda: 0.05)
-        with mock.patch('lib.desktop_agent._egress.requests.request',
+        with mock.patch('lib.desktop_agent._egress.http_request',
                         return_value=fake):
             out = ag.cmd_egress_http({
                 'url': 'https://api.anthropic.com/v1/messages',
@@ -358,7 +358,7 @@ class TestAgentExecutor(unittest.TestCase):
 
     def test_executor_network_error_status0(self):
         from lib.desktop_agent import _egress as ag
-        with mock.patch('lib.desktop_agent._egress.requests.request',
+        with mock.patch('lib.desktop_agent._egress.http_request',
                         side_effect=ConnectionError('refused')):
             out = ag.cmd_egress_http({
                 'url': 'https://api.anthropic.com/x', 'method': 'GET',
@@ -374,7 +374,7 @@ class TestAgentExecutor(unittest.TestCase):
             m = mock.Mock(status_code=200, headers={}, content=b'')
             m.elapsed = mock.Mock(total_seconds=lambda: 0.01)
             return m
-        with mock.patch('lib.desktop_agent._egress.requests.request', _fake):
+        with mock.patch('lib.desktop_agent._egress.http_request', _fake):
             ag.cmd_egress_http({'url': 'https://api.anthropic.com/x',
                                 'method': 'GET', 'proxy_mode': 'direct'})
         self.assertEqual(captured.get('proxies'), {'no_proxy': '*'})

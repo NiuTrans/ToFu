@@ -17,7 +17,8 @@ def install(monkeypatch):
     monkeypatch.setattr(root,'set_req_id',lambda *args:None)
     request=prepared();task=request.task;task['messages']=request.messages
     for name in ['snapshot_turn_input','bind_provider_and_affinity','setup_project_context',
-                 'maybe_run_memory_prefetch','apply_resume_state','_emit_startup_phase']:
+                 'maybe_run_memory_prefetch','restore_resume_view','resume_view_holds_turn_block',
+                 'apply_resume_state','_emit_startup_phase']:
         monkeypatch.setattr(root,name,lambda *args,**kwargs:None)
     monkeypatch.setattr(root,'check_autopilot_kick',lambda task:False)
     monkeypatch.setattr(root,'log_task_open',lambda *args:0)

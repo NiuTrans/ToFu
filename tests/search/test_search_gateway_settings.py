@@ -196,7 +196,23 @@ def test_route_keeps_saved_gateway_when_payload_omits_it(
     assert response.status_code == 200, response.get_data(as_text=True)
     saved = json.loads(config_file.read_text())['search']
     # Retired tuning keys from an older client are dropped, not persisted.
-    assert saved == {'skip_domains': ['spam.example'], 'gateway': saved_gateway}
+    assert saved == {'skip_domains': ['spam.example'], 'skip_domains_schema': 2,
+                     'gateway': saved_gateway}
+
+
+def test_route_keeps_optimizer_fetch_skips_and_stamps_bans(
+        flask_client, catalog_dirs, vault_key, config_file):
+    """Settings edits operator bans only: the Daily Optimizer's fetch-quality
+    skips survive a save untouched, whatever the client sends."""
+    config_file.write_text(json.dumps({'search': {
+        'skip_domains': ['tiktok.com', 'youtube.com', 'spam.example'],
+        'fetch_skip_domains': ['junk.example']}}))
+    response = flask_client.post('/api/v4/server-config', json={'search': {
+        'skip_domains': ['spam.example'], 'fetch_skip_domains': ['client.example']}})
+    assert response.status_code == 200, response.get_data(as_text=True)
+    saved = json.loads(config_file.read_text())['search']
+    assert saved == {'skip_domains': ['spam.example'], 'skip_domains_schema': 2,
+                     'fetch_skip_domains': ['junk.example']}
 
 
 def test_route_rejects_invalid_gateway_before_any_vault_write(

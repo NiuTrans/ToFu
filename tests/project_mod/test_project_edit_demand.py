@@ -19,7 +19,7 @@ def project(tmp_path,monkeypatch):
 
 
 def replacements(count,path='file.txt',unified=False):
-    return [({'path':path,'operation':'replace','anchor':f'STATE_{n:03d}',
+    return [({'path':path,'anchor':f'STATE_{n:03d}',
               'content':f'STATE_{n+1:03d}'} if unified else
              {'path':path,'search':f'STATE_{n:03d}','replace':f'STATE_{n+1:03d}'})
             for n in range(count)]
@@ -53,7 +53,7 @@ def test_atomic_preflight_includes_failure_after_old_thirtieth_edit(project):
 def test_late_invalid_edit_does_not_skip_following_valid_operation(project):
     target=project/'file.txt';target.write_text('STATE_000\n')
     edits=replacements(40,unified=True)+[{'bad':'invalid'},
-        {'path':'file.txt','operation':'replace','anchor':'STATE_040','content':'FINAL_VALID_SOURCE'}]
+        {'path':'file.txt','anchor':'STATE_040','content':'FINAL_VALID_SOURCE'}]
     result=_ops.tool_edit_file(str(project),edits,task_id='demand-task',atomic=False)
     assert result.startswith('Applied 41/42'),result
     assert '[41] FAIL' in result and '[42] OK' in result
@@ -63,16 +63,16 @@ def test_late_invalid_edit_does_not_skip_following_valid_operation(project):
     assert target.read_text()=='STATE_000\n'
 
 
-def test_all_thirty_two_insertions_keep_order_and_remain_undoable(project):
+def test_all_thirty_two_additions_keep_order_and_remain_undoable(project):
     target=project/'file.txt';target.write_text('START\n')
-    edits=[{'path':'file.txt','anchor':'START' if n==0 else f'ITEM_{n-1:03d}',
-            'content':f'ITEM_{n:03d}','position':'after'} for n in range(32)]
-    result=_ops.tool_insert_contents(str(project),edits,task_id='demand-task')
+    edits=[{'path':'file.txt','anchor':(previous:='START' if n==0 else f'ITEM_{n-1:03d}'),
+            'content':f'{previous}\nITEM_{n:03d}'} for n in range(32)]
+    result=_ops.tool_edit_file(str(project),edits,task_id='demand-task')
     assert '32/32' in result,result
     text=target.read_text()
     assert text.splitlines()==['START']+[f'ITEM_{n:03d}' for n in range(32)]
     undone=mods.undo_task_modifications(str(project),'demand-task')
-    assert undone['failed']==0 and undone['undone']==32
+    assert undone['failed']==0 and undone['undone']==1
     assert target.read_text()=='START\n'
 
 
@@ -95,7 +95,7 @@ def test_late_physical_write_failure_isolated_and_all_other_files_undo(project,m
             raise OSError('late physical write failure')
         return original_write(target,content,*args,**kwargs)
     monkeypatch.setattr(_ops,'_atomic_write_text',fail_late)
-    edits=[{'path':f'file-{number:02d}.txt','operation':'replace',
+    edits=[{'path':f'file-{number:02d}.txt',
             'anchor':'BEFORE','content':'AFTER'} for number in range(40)]
     result=_ops.tool_edit_file(str(project),edits,task_id='demand-task')
     assert result.startswith('Applied 39/40'),result

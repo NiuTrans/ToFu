@@ -26,16 +26,17 @@ struct AddEditProfileView: View {
     @State private var errors: [String: String] = [:]
     @State private var testing = false
     @State private var verdict: TofuProbe.Verdict?
+    @State private var probeTarget: String?
     /// Host whose saved password will be reused for a blank field, if any.
     @State private var reusableHost: String?
 
     init(model: AppViewModel) {
         self.model = model
         let editing = model.editing
-        _alias = State(initialValue: editing?.alias ?? "")
-        _url = State(initialValue: editing?.baseUrl ?? "")
-        _auth = State(initialValue: editing?.authType
-            ?? ServerUrl.defaultAuthType(editing?.baseUrl ?? ""))
+        let draft = model.onboardingDraft
+        _alias = State(initialValue: editing?.alias ?? draft?.alias ?? "")
+        _url = State(initialValue: editing?.baseUrl ?? draft?.baseUrl ?? "")
+        _auth = State(initialValue: editing?.authType ?? draft?.authType ?? .none)
         _secret = State(initialValue: "")
         _managed = State(initialValue: editing?.projectPath?.isEmpty == false)
         _projectPath = State(initialValue: editing?.projectPath ?? "")
@@ -50,7 +51,7 @@ struct AddEditProfileView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StatusBanner(status: model.status)
+            StatusBanner(status: model.status, onCancel: model.cancelOperation)
             Form {
                 serverSection
                 authSection
@@ -63,7 +64,7 @@ struct AddEditProfileView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel", action: model.backToList).disabled(isBusy)
+                Button("Cancel", action: model.backToList)
             }
             ToolbarItem(placement: .confirmationAction) {
                 if isBusy {
@@ -71,29 +72,62 @@ struct AddEditProfileView: View {
                 } else {
                     Button("Save", action: submit)
                         .fontWeight(.semibold)
+                        .disabled(model.pendingConnection != nil)
                 }
             }
         }
         .onChange(of: url) { newUrl in
             if !authTouched { auth = ServerUrl.defaultAuthType(newUrl) }
             verdict = nil // a probe result belongs to the URL it measured
+            probeTarget = nil
+            testing = false
+            reusableHost = nil
         }
         .task(id: url + "|" + (editing?.alias ?? "")) {
-            reusableHost = await model.reusableSecretHost(url, excludeAlias: editing?.alias)
+            let target = url
+            let excludeAlias = editing?.alias
+            reusableHost = nil
+            let host = await model.reusableSecretHost(target, excludeAlias: excludeAlias)
+            guard !Task.isCancelled, url == target, editing?.alias == excludeAlias else { return }
+            reusableHost = host
+        }
+        .task(id: probeTarget) {
+            guard let target = probeTarget, !Task.isCancelled, url == target else { return }
+            let probe = HealthProbe(
+                http: URLSessionHTTPClient(timeoutSeconds: 8),
+                cookies: WebKitCookieSink()
+            )
+            let outcome = await probe.probe(target)
+            guard !Task.isCancelled, probeTarget == target, url == target else { return }
+            verdict = outcome.verdict
+            testing = false
+            probeTarget = nil
+        }
+        .onDisappear {
+            secret = ""
+            probeTarget = nil
         }
     }
 
     private var serverSection: some View {
         Section {
-            TextField("Name (e.g. codelab training)", text: $alias)
+            TextField("Name (e.g. codelab training)", text: editable($alias))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             FieldError(errors["alias"])
-            TextField("Server URL", text: $url)
+            TextField("Server URL", text: editable($url))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             FieldError(errors["baseUrl"])
+            Button("Paste connection URL or tofu://connect link") {
+                guard let text = UIPasteboard.general.string else {
+                    errors["baseUrl"] = "Paste a full URL without embedded credentials"
+                    return
+                }
+                // The same policy as OS/QR links: never overwrite an open form.
+                model.receiveConnection(text)
+            }
             Text("Paste the full address, e.g. https://…-vscode-….mlp.internal.example.com/proxy/15000/")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -106,8 +140,10 @@ struct AddEditProfileView: View {
         Section {
             ForEach(AuthType.allCases, id: \.self) { type in
                 Button {
+                    model.formDidChange()
                     auth = type
                     authTouched = true
+                    if type != .codeServerPassword { secret = "" }
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: auth == type ? "largecircle.fill.circle" : "circle")
@@ -132,7 +168,7 @@ struct AddEditProfileView: View {
 
     private var secretSection: some View {
         Section {
-            SecureField(secretPlaceholder, text: $secret)
+            SecureField(secretPlaceholder, text: editable($secret))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             FieldError(errors["secret"])
@@ -149,9 +185,9 @@ struct AddEditProfileView: View {
 
     private var manageSection: some View {
         Section {
-            Toggle("Start/stop this server here", isOn: $managed)
+            Toggle("Start/stop this server here", isOn: editable($managed))
             if managed {
-                TextField("Project path on the host", text: $projectPath)
+                TextField("Project path on the host", text: editable($projectPath))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Text("Absolute path the supervisor runs start.sh/stop.sh from, e.g. /home/user/tofu")
@@ -199,7 +235,17 @@ struct AddEditProfileView: View {
         return "code-server password"
     }
 
+    /// Only actual control edits invalidate sign-in. Programmatic password
+    /// disposal must not cancel the operation that just consumed that field.
+    private func editable<Value>(_ binding: Binding<Value>) -> Binding<Value> {
+        Binding(get: { binding.wrappedValue }, set: { value in
+            model.formDidChange()
+            binding.wrappedValue = value
+        })
+    }
+
     private func submit() {
+        guard model.pendingConnection == nil else { return }
         let result = ProfileForm.validate(
             alias: alias,
             baseUrl: url,
@@ -207,36 +253,26 @@ struct AddEditProfileView: View {
             secret: secret,
             existingAliases: Set(model.profiles.map(\.alias)),
             editingAlias: editing?.alias,
-            secretAlreadyStored: editing.map { model.secretStoredFor($0.alias) } ?? false
+            secretAlreadyStored: (editing.map { model.secretStoredFor($0.alias) } ?? false) || reusableHost != nil
         )
         errors = result.errors
         guard result.ok else { return }
         let path = managed ? projectPath : ""
+        let submittedSecret = secret
+        secret = "" // the form draft never retains a submitted password
         if let editing {
             model.submitEdit(current: editing, alias: alias, url: url, auth: auth,
-                             secret: secret, projectPath: path)
+                             secret: submittedSecret, projectPath: path)
         } else {
-            model.submitAdd(alias: alias, url: url, auth: auth, secret: secret, projectPath: path)
+            model.submitAdd(alias: alias, url: url, auth: auth, secret: submittedSecret, projectPath: path)
         }
     }
 
     private func testConnection() {
         testing = true
         verdict = nil
-        let target = url
-        Task {
-            // 8s transport budget, same as the Android probe: long enough for
-            // a cold sandbox, short enough to fail fast on a dead tunnel.
-            let probe = HealthProbe(
-                http: URLSessionHTTPClient(timeoutSeconds: 8),
-                cookies: WebKitCookieSink()
-            )
-            let outcome = await probe.probe(target)
-            await MainActor.run {
-                verdict = outcome.verdict
-                testing = false
-            }
-        }
+        // SwiftUI cancels this probe on URL change/replacement/disappearance.
+        probeTarget = url
     }
 
     private func title(for type: AuthType) -> String {

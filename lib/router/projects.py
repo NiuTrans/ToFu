@@ -82,12 +82,47 @@ def router_projects(owner: int, arguments: dict, *, client=None) -> dict:
             try:
                 entry.update(_activity(bindings.user_id, project, binding))
                 entry['last_report'] = _last_report(bindings.user_id, project)
+                entry.update(_proactive_view(bindings.user_id, project, binding, client=client))
             except (StorageError, ValueError, PermissionError) as error:
                 # One damaged project must not hide the others; the gap is explicit.
                 entry['activity_error'] = str(error)
         projects.append(entry)
     next_cursor = rows[PAGE_ROWS - 1]['key'][len(prefix):] if len(rows) > PAGE_ROWS else None
     return {'projects': projects, 'next_cursor': next_cursor}
+
+
+def _proactive_view(owner: int, project: str, binding: dict, *, client=None) -> dict:
+    """Board summary, open/overdue commitments and open owner questions (R10).
+
+    Deterministic reads from the board head and the question index; no model
+    call. The digest assembles from the same reads.
+    """
+    from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+    from lib.router.proactive.questions import open_questions
+    import time
+    view = {}
+    progress = CoordinatorTaskProgress(owner, project, client=client)
+    row = progress._head()
+    if row is not None:
+        head = row['value']
+        board = head['board']
+        view['board_summary'] = board['summary']
+        view['board_revision'] = board['revision']
+        open_commitments = [r for r in head.get('commitments', []) if r['state'] == 'open']
+        now_ms = int(time.time() * 1000)
+        view['open_commitments'] = len(open_commitments)
+        overdue = [r for r in open_commitments if r['dueAt'] < now_ms and 'wake' in r]
+        view['overdue_commitments'] = len(overdue)
+        if overdue:
+            view['overdue_titles'] = [r['title'] for r in overdue]
+    questions = [q for q in open_questions(owner, client=client)
+                 if q['coordinatorId'] == binding['conversationId']]
+    if questions:
+        view['open_questions'] = len(questions)
+        view['oldest_question_age_hours'] = int(
+            (time.time() * 1000 - min(q['createdAt'] for q in questions)) / 3_600_000)
+        view['blocking_questions'] = sum(1 for q in questions if q.get('blocking'))
+    return view
 
 
 __all__ = ['router_projects']

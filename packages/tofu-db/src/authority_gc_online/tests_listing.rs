@@ -169,19 +169,21 @@ fn scan_reclaims_a_store_above_the_retired_listing_total_one_shard_at_a_time() {
     assert!(metrics(&collector).total_reclaimed_blocks >= orphans.len() as u64);
 }
 
-/// Victims are unlinked one per hold and admitted by count alone, so the scan
-/// never sizes one; only compaction candidates are sized, one read each.
+/// Victims are unlinked during the scan, one per hold, shard by shard, and
+/// admitted by their two observations alone: no count bounds what an epoch
+/// reclaims (`maximum_blocks_per_round` sizes the offline round only). The
+/// scan never sizes a victim beyond the one open its unlink makes; only
+/// compaction candidates are sized, one read each.
 #[test]
-fn scan_sizes_only_compaction_candidates_and_stats_no_listed_file() {
-    const VICTIMS_PER_ROUND: usize = 4;
+fn scan_unlinks_every_confirmed_victim_and_sizes_only_compaction_candidates() {
+    const OFFLINE_VICTIMS_PER_ROUND: usize = 4;
     let (_inner, vfs, database) = listing_authority();
     let budget = AuthorityGarbageCollectionBudget {
-        maximum_blocks_per_round: VICTIMS_PER_ROUND,
+        maximum_blocks_per_round: OFFLINE_VICTIMS_PER_ROUND,
         ..test_budget()
     };
     let mut collector = OnlineGarbageCollector::new(budget);
-    // Observed unmarked by the first epoch, so the second confirms them; the
-    // round admits only VICTIMS_PER_ROUND of the 10.
+    // Observed unmarked by the first epoch, so the second confirms all 10.
     let confirmed = write_orphans(&database, "listing-confirmed-garbage", 10);
     run_epoch(&mut collector, &database);
     // Unmarked for the first time in the second scan: suspects only.
@@ -221,14 +223,13 @@ fn scan_sizes_only_compaction_candidates_and_stats_no_listed_file() {
             .sum()
     };
     // A staged payload is sized without I/O; every other candidate is one
-    // size read of its loose file. Admitted victims cost no read at all.
+    // size read of its loose file. A victim costs the one open of its unlink.
     let candidates_on_disk: Vec<BlockId> = epoch
         .compaction_ids
         .iter()
         .copied()
         .filter(|id| blocks.pending_payload(*id).unwrap().is_none())
         .collect();
-    assert_eq!(epoch.confirmed_loose.len(), VICTIMS_PER_ROUND);
     assert!(epoch.compaction_ids.len() >= live_payloads.len());
     let size_reads: u64 = log.block_read_opens.values().sum();
     assert_eq!(
@@ -241,14 +242,24 @@ fn scan_sizes_only_compaction_candidates_and_stats_no_listed_file() {
         ),
         (
             0,
-            0,
+            confirmed.len() as u64,
             0,
             candidates_on_disk.len() as u64,
-            candidates_on_disk.len() as u64,
+            (candidates_on_disk.len() + confirmed.len()) as u64,
         ),
-        "(metadata calls, confirmed-garbage size reads, fresh-garbage size reads, \
-         candidate size reads, all size reads) for {listed} listed loose entries"
+        "(metadata calls, confirmed-garbage opens, fresh-garbage opens, \
+         candidate size reads, all opens) for {listed} listed loose entries"
     );
     assert!(size_reads < listed as u64, "{size_reads} size reads for {listed} listed entries");
+    {
+        let database_guard = database.lock().unwrap();
+        for victim in &confirmed {
+            assert_eq!(database_guard.read_block_for_test(*victim).unwrap_err().kind(),
+                io::ErrorKind::NotFound, "a confirmed victim outlived the scan");
+        }
+        for suspect in &fresh {
+            assert!(database_guard.read_block_for_test(*suspect).is_ok(), "a first-observed suspect was unlinked");
+        }
+    }
     collector.cleanup_epoch(&mut epoch);
 }

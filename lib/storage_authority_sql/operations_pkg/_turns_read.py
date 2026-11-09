@@ -18,6 +18,7 @@ from lib.storage_authority_sql.operations_pkg._common import (
     _required_text,
 )
 from lib.turn_projection_patch import build_projection_patch
+from lib.storage.turn_projection_pages import stale_turn_projection_page, turn_projection_page
 from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
 from lib.storage_authority_sql.turn_projection_write import (
     advance_unchanged_projection_revision,
@@ -204,6 +205,27 @@ def _turn_image_get(session: Session, payload: Mapping[str, Any]) -> Any:
         "mediaType": image.media_type,
         "base64": image.base64_data,
     }
+
+
+def _turn_projection_page(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Read one frame-bounded page of a public Turn at one projection revision."""
+    page = _integer(payload, "page", minimum=0, maximum=2**63 - 1)
+    expected_revision = None
+    if payload.get("projection_revision") is not None:
+        expected_revision = _integer(
+            payload, "projection_revision", minimum=1, maximum=2**63 - 1)
+    turn = _turn_get(session, {
+        key: payload.get(key) for key in ("conversation_id", "user_id", "turn_id")})
+    if turn is None:
+        return None
+    revision = int(turn["projectionRevision"])
+    if expected_revision is not None and expected_revision != revision:
+        return stale_turn_projection_page(revision)
+    result = turn_projection_page(turn, page)
+    if result is None:
+        raise StorageError(
+            "database_protocol_error", "Turn projection page is outside its revision")
+    return result
 
 
 def _turn_list(session: Session, payload: Mapping[str, Any]) -> Any:

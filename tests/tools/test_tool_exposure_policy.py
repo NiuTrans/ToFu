@@ -35,7 +35,7 @@ EAGER = frozenset({
     'search_memories', 'create_memory', 'read_working_facts',
     'search_skills', 'load_skill', 'read_skill_resource',
     'inspect_tool_effect', 'read_tool_artifact', 'search_tool_artifact',
-    'spawn_agents', 'get_agent_result', 'evolution_source',
+    'spawn_agents', 'evolution_source',
     'await_project_workers', 'cancel_project_work', 'create_conversation',
     'control_conversation', 'get_conversation_status',
     'delegate_project_work', 'dispatch_project_assignment',
@@ -79,7 +79,7 @@ DEFERRED = frozenset({
     'request_skill_install', 'todo_write',
     'schedule_create', 'schedule_list', 'schedule_manage', 'timer_manage',
     'record_working_fact',
-    'send_agent_message', 'get_agent_messages', 'set_approval_delegate',
+    'get_agent_result', 'send_agent_message', 'get_agent_messages', 'set_approval_delegate',
     'get_exploration', 'manage_exploration',
     'evolution_teach', 'evolution_material', 'evolution_reindex',
     'evolution_explore', 'list_agents', 'manage_agents',
@@ -103,7 +103,7 @@ DEFERRED = frozenset({
 GATEWAY = frozenset(GATEWAY_TOOL_NAMES)
 # Dispatch-only names that no current builder emits.
 COMPATIBILITY = frozenset({
-    'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents',
+    'apply_diff', 'apply_diffs',
     'check_background_command', 'kill_background_command', 'grep_search',
     'await_task', 'await_agents',
     'search_mcp_tools', 'call_mcp_read_tool', 'call_mcp_write_tool',

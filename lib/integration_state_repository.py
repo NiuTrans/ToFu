@@ -13,7 +13,14 @@ import json
 from typing import Any
 
 from lib.storage import get_storage_client
+from lib.storage.deadline_policy import storage_write_deadline
 from lib.storage.errors import StorageError
+
+# The budget these calls always had. The shared service policy raises it when
+# the authority is observed slower: a fixed budget below the service tail
+# refused every attempt of one congestion episode (2026-11-06 18:03, a task
+# start failed on its workspace registration with database_timeout).
+_DEADLINE_FLOOR_SECONDS = 5.0
 
 
 class IntegrationStateError(RuntimeError):
@@ -30,8 +37,8 @@ def _command_id(operation: str, payload: dict[str, Any]) -> str:
 def _command(operation: str, payload: dict[str, Any]) -> Any:
     try:
         return get_storage_client(write=True).command(
-            operation, payload,
-            _command_id(operation, payload), deadline=5.0)
+            operation, payload, _command_id(operation, payload),
+            deadline=storage_write_deadline(operation, floor_seconds=_DEADLINE_FLOOR_SECONDS))
     except StorageError as exc:
         if exc.code == 'database_conflict':
             raise IntegrationStateError(exc.message) from exc
@@ -40,7 +47,8 @@ def _command(operation: str, payload: dict[str, Any]) -> Any:
 
 def _query(operation: str, payload: dict[str, Any]) -> Any:
     try:
-        return get_storage_client().query(operation, payload, deadline=5.0)
+        return get_storage_client().query(operation, payload, deadline=storage_write_deadline(
+            operation, kind='query', floor_seconds=_DEADLINE_FLOOR_SECONDS))
     except StorageError as exc:
         if exc.code == 'database_conflict':
             raise IntegrationStateError(exc.message) from exc

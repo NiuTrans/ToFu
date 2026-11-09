@@ -30,10 +30,9 @@ verification.
   reset generated files to unblock it. If it refuses, nothing was changed;
   follow its printed instruction (merge the current branch into the worktree
   branch to resolve a real conflict, or rerun after another writer's
-  overlapping lines are committed). Before publishing it runs the test files
-  the merged result can affect (recorded runs say which; a fast-forward counts
-  too) and refuses if one that passes on the current branch now fails
-  reproducibly; tests already failing there never block.
+  overlapping lines are committed). It runs no tests (owner decision
+  2026-11-08): the verification done in the lane is the landing's evidence,
+  so land verified work promptly instead of rerunning a test ladder.
   A `[Concurrent change]` notice means another conversation's unlanded work
   or a landing touches your files: read their change (the notice prints the
   command) and merge the current branch before verifying. A task is
@@ -89,6 +88,14 @@ verification.
 - Add or update the smallest executable specification for the behavior, then
   use a test ladder: smallest relevant tests first, then neighboring contracts,
   then broad gates once the worktree is stable. Do not rerun an unchanged suite.
+  Default Python development checks use `make test TESTS="tests/<owner>/..."`
+  (or `.venv/bin/python3 scripts/verify.py run <paths>`); bare `make test` selects current changes
+  and `make test-plan` explains them. Use direct pytest for case-level debugging
+  or specialized markers; domain, coverage and release gates remain required.
+  In a clean, committed lane, run final test files through
+  `python3 -m lib.project_mod.landing_verification record <test files>` from
+  that lane; it checks the committed revision and records the runs, so later
+  verification of unchanged inputs reuses them.
   With concurrent writers, report that a full-suite result is a moving target.
 - Update the owning current-state document with the change; delete superseded
   plans instead of leaving an archive beside authoritative documentation.
@@ -151,9 +158,11 @@ Runtime facts that shortcut diagnosis:
 
 - Tasks run in two processes: the API host (`server.py`) and the resident
   execution host (`serverctl_pkg/execution_host.py`). Process-local state
-  (steers, background-command registries, idle checks) does not cross them.
-  Locate a task's process (`py-spy dump --nonblocking <pid>`) and read both
-  processes' logs before blaming a tool. Search logs with `rg -a`.
+  (steers, background-command registries, idle checks, swarm sessions) does
+  not cross them; an API route that must reach it uses the private execution
+  control (`lib/tasks_pkg/command_control_runtime.py`). Locate a task's
+  process (`py-spy dump --nonblocking <pid>`) and read both processes' logs
+  before blaming a tool. Search logs with `rg -a`.
 - Restart and lifecycle outcomes are recorded only in
   `logs/server-manager.log`; a browser-initiated restart cannot report them.
 - A merged fix is live only after the owning process restarts; storage also
@@ -230,6 +239,10 @@ Five long-term product constraints govern every change in this repo.
    - Lifecycle, concurrency, subprocess, and teardown work follows
      `docs/DEFENSIVE_PATTERNS.md`.
    - Small, verifiable increments following the test ladder above.
+   - All Tofu-owned outbound networking uses the shared network authority
+     (`docs/NETWORK.md`). New subscriptions, SDK clients and integrations
+     inherit its proxy/bypass, route-health and recovery policy; never add
+     another domain-local route selector or blind request retry loop.
 
 3. **Hardware never limits work.** Owner decision 2026-10-24; a fixed policy,
    not a tuning opportunity (`docs/RESOURCE_CONTROL.md`, "Hardware never

@@ -137,6 +137,32 @@ class ConversationWorkers:
             self.complete(context, 'cancelled')
 
 
+def run_admitted_attempt(owner, attempt_id, monkeypatch, probe):
+    """Claim one admitted attempt and run the ordinary task start for real.
+
+    Only the model loop is substituted: it records ``probe(task)`` for the live
+    task the start path prepared, then settles it with a fixed reply. Returns
+    the settled Turn and the recorded probe results.
+    """
+    from lib.tasks_pkg.manager import append_event, persist_task_result, stamp_chat_task_terminal
+    probed = []
+
+    def run(task):
+        probed.append(probe(task))
+        task['content'] = 'Noted.'
+        append_event(task, {'type': 'delta', 'content': task['content']})
+        stamp_chat_task_terminal(task, status='done', finish_reason='stop')
+        append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        assert persist_task_result(task)
+
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', run)
+    workers = ConversationWorkers(owner)
+    try:
+        return workers.run(attempt_id), probed
+    finally:
+        workers.close()
+
+
 @pytest.fixture
 def worker_attempts(chat_sidecar, monkeypatch):
     monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor',

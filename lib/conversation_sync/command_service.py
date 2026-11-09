@@ -75,6 +75,17 @@ from lib.turn_projection_segments import (
 
 logger = get_logger(__name__)
 
+def _bind_accepted_dispatch(result, trusted_dispatch):
+    """A replay acknowledges its attempt without rolling a newer grant back."""
+    if trusted_dispatch is None:
+        return
+    turn, attempt = result['turn'], result['attempt']
+    if (result.get('idempotentReplay')
+            and turn.get('currentAttemptId') != attempt['attemptId']):
+        return
+    trusted_dispatch.continue_execution(turn['turnId'], attempt['attemptId'])
+
+
 def _owes_input_translation(
     projection: Any, config: Mapping[str, Any],
 ) -> bool:
@@ -238,6 +249,63 @@ def attempt_start_error_envelope(
         raw=str(error),
         hint=cause["hint"],
     )
+
+
+def _worker_turn_binding(conversation_id: str, turn_id: str, user_id: Any):
+    """The assignment binding a resumed Worker Turn runs under, or ``None``.
+
+    A Turn whose current attempt was dispatched carries its binding in that
+    attempt's accepted config. A UI Continue without it ran the Worker as an
+    ordinary chat: another task identity, no grant fence and no assignment
+    association, so the Coordinator never saw the result. This resumes it the
+    way ``control_conversation`` does (lib/conversations/session_control.py),
+    and refuses with an explanation when the grant can no longer authorize it.
+    """
+    from lib.project_dispatch.admission import turn_dispatch
+    from lib.project_dispatch.repository import ProjectDispatchError, transient_dispatch_failure
+
+    turn = get_turn(conversation_id, turn_id, user_id=user_id, include_projection=False)
+    current = turn.get('currentAttemptId')
+    if not current:
+        return None
+    accepted = get_attempt(current, user_id=user_id, include_execution_config=True).get('config')
+    trusted = turn_dispatch(conversation_id, turn, accepted, user_id=user_id)
+    if trusted is None:
+        return None
+    try:
+        trusted.checked()
+    except (ProjectDispatchError, PermissionError) as error:
+        if transient_dispatch_failure(error):
+            raise
+        raise LifecycleConflict(
+            'worker_binding_refused',
+            'This Worker conversation runs under its Coordinator assignment, which can '
+            f'no longer authorize a resume: {error}. Ask its Coordinator to continue or '
+            're-dispatch the work; a Continue here would run it outside its grant.',
+            turn) from error
+    return trusted
+
+
+def _refuse_scheduled_execution_identity(config: Mapping[str, Any]) -> None:
+    """Refuse, before any durable write, a start whose identity is still scheduled.
+
+    Every attempt of a dispatched assignment reuses its deterministic task
+    identity. Its previous carrier keeps that identity in the agent executor
+    until it has finished finalizing, after its Turn settled; a start accepted
+    meanwhile is refused by the executor only after its attempt became the
+    Turn's current one, which then settles the Turn failed (2026-11-06,
+    lane 27ce29e9). ``lane_busy`` is the existing verdict for an occupied lane:
+    dispatch defers it and the next wake starts the continuation.
+    """
+    from lib.project_dispatch.admission import WORKSPACE_TASK_KEY
+    from lib.tasks_pkg.spawn import task_identity_scheduled
+
+    identity = str(config.get(WORKSPACE_TASK_KEY) or '')
+    if identity and task_identity_scheduled(identity):
+        raise LifecycleConflict(
+            'lane_busy',
+            f'Execution {identity} has not finished in this process yet; its '
+            'continuation can start once that attempt has exited.')
 
 
 def executor_start_error_envelope(exc, config):
@@ -431,6 +499,7 @@ class ConversationTurnCommandService:
             if not isinstance(trusted_dispatch, TrustedDispatch):
                 raise PermissionError('Project dispatch requires internal validated admission')
             config = trusted_dispatch.capture(config, user_id, principal, conversation_id)
+            _refuse_scheduled_execution_identity(config)
         else:
             config = _capture_task_principal_tenant(config, user_id, principal)
 
@@ -629,9 +698,7 @@ class ConversationTurnCommandService:
                     'turn_id': result['turn']['turnId'],
                     'attempt_id': result['attempt']['attemptId'],
                 }
-                if trusted_dispatch is not None:
-                    trusted_dispatch.continue_execution(
-                        result['turn']['turnId'], result['attempt']['attemptId'])
+                _bind_accepted_dispatch(result, trusted_dispatch)
                 bind_identity(turn_identity)
         except LifecycleConflict as exc:
             if (exc.code != "lane_busy" or trusted_dispatch is not None
@@ -958,9 +1025,30 @@ class ConversationTurnCommandService:
             return CommandOutcome(_public_result(result))
         _refuse_turn_after_shutdown_quiesce()
         config = data.get("config") or {}
-
         if not isinstance(config, Mapping):
             raise BadRequest("config object required", field="config")
+        # Reject request-only faults before reading the Turn or its grant so
+        # worker binding preserves the command's authored 400 responses.
+        human_response = data.get("humanResponse")
+        if operation == "answer_guidance":
+            if not isinstance(human_response, str) or not human_response.strip():
+                raise BadRequest(
+                    "humanResponse required for answer_guidance", field="humanResponse")
+            if len(human_response) > 32768:
+                raise BadRequest(
+                    "humanResponse exceeds the 32768-character limit", field="humanResponse")
+        elif human_response is not None:
+            raise BadRequest(
+                "humanResponse is only valid for answer_guidance", field="humanResponse")
+        if trusted_dispatch is None:
+            trusted_dispatch = _worker_turn_binding(conversation_id, turn_id, user_id)
+            if trusted_dispatch is not None:
+                from lib.identity import PrincipalContext
+                if (principal is None or (isinstance(principal, PrincipalContext)
+                        and principal.kind == 'user' and principal.owner_user_id == user_id)):
+                    principal = trusted_dispatch.principal
+                # Synthetic callers retain their identity; capture below must
+                # match it to the explicit grant, never borrow owner authority.
         config = dict(config)
         config.pop('_goalRecoverySourceRunId', None)
         config.pop('_goalRecoveryAbortAfterTs', None)
@@ -971,6 +1059,7 @@ class ConversationTurnCommandService:
                 raise PermissionError('Project dispatch requires internal validated admission')
             config = trusted_dispatch.capture(
                 normalize_interaction_mode_runtime_config(config), user_id, principal, conversation_id)
+            _refuse_scheduled_execution_identity(config)
         else:
             config = _capture_task_principal_tenant(
                 normalize_interaction_mode_runtime_config(config),user_id,principal)
@@ -991,14 +1080,7 @@ class ConversationTurnCommandService:
 
         if isinstance(input_update, Mapping):
             input_update = _without_client_plan_authority(input_update)
-        human_response = data.get("humanResponse")
         if operation == "answer_guidance":
-            if not isinstance(human_response, str) or not human_response.strip():
-                raise BadRequest(
-                    "humanResponse required for answer_guidance", field="humanResponse")
-            if len(human_response) > 32768:
-                raise BadRequest(
-                    "humanResponse exceeds the 32768-character limit", field="humanResponse")
             answer_turn = get_turn(conversation_id, turn_id, user_id=user_id)
             answer_anchor = _answer_guidance_anchor(answer_turn)
             # The durable command may have committed while its HTTP ACK was
@@ -1040,9 +1122,6 @@ class ConversationTurnCommandService:
                 "toolCallId": str(answer_anchor.get("toolCallId") or ""),
                 "response": human_response,
             }
-        elif human_response is not None:
-            raise BadRequest(
-                "humanResponse is only valid for answer_guidance", field="humanResponse")
         # A new attempt retains only the server-accepted review scope. Public
         # config was stripped above and cannot select another task's review.
         from lib.acceptance.continuity import review_source
@@ -1068,8 +1147,7 @@ class ConversationTurnCommandService:
 
             user_id=user_id,
         )
-        if trusted_dispatch is not None:
-            trusted_dispatch.continue_execution(turn_id, result['attempt']['attemptId'])
+        _bind_accepted_dispatch(result, trusted_dispatch)
         try:
             self._start_accepted_attempt(
                 result,
@@ -1546,7 +1624,7 @@ class ConversationTurnCommandService:
         execution_clock: ExecutionClock | None = None,
         recovered: bool = False,
     ) -> None:
-        """Claim, bind, and launch while this process owns the attempt stripe."""
+        """Claim, bind, and launch while this process holds the attempt's dispatch lock."""
         turn = result["turn"]
         attempt = result["attempt"]
         if not claim_attempt_start(attempt["attemptId"], user_id=user_id):
@@ -1598,7 +1676,7 @@ class ConversationTurnCommandService:
                 return
             logger.exception(
                 "Attempt %s executor startup raised before task binding",
-                str(attempt["attemptId"])[:16],
+                str(attempt["attemptId"]),
             )
             envelope = executor_start_error_envelope(exc, config)
             self._fail_attempt_start(attempt, user_id, envelope)
@@ -1688,7 +1766,11 @@ class ConversationTurnCommandService:
             attempt_id = str((conflict.turn or {}).get("currentAttemptId") or "")
             committed: dict[str, Any] | None = None
             from lib.tasks_pkg.committed_steers import executes_attempt_here
-            if not attempt_id:
+            if not steer_text.strip():
+                # Both authorities keep a steer by its text; a message without
+                # any (an image alone) waits as the next turn, images intact.
+                steer_fallback_reason = "no_steer_text"
+            elif not attempt_id:
                 steer_fallback_reason = "no_live_attempt"
             elif not executes_attempt_here(attempt_id, user_id=user_id):
                 # Another server process executes this attempt. A wakeup in
@@ -1772,7 +1854,7 @@ class ConversationTurnCommandService:
                     logger.warning(
                         "Committed steer presentation unavailable conv=%s; "
                         "retaining acceptance for sync recovery",
-                        conversation_id[:8],
+                        conversation_id,
                     )
                 return {
                     "steered": True,
@@ -1785,7 +1867,7 @@ class ConversationTurnCommandService:
                 }
             logger.info(
                 "Conversation %s steer unavailable (%s); using durable queue",
-                conversation_id[:8], steer_fallback_reason or "unknown",
+                conversation_id, steer_fallback_reason or "unknown",
             )
 
         from lib.message_queue import (
@@ -2043,6 +2125,36 @@ def _resume_checkpoint_progress_fields(
     }
 
 
+def _resume_checkpoint_note_fields(
+    projection: Mapping[str, Any],
+    rounds: list[Any],
+) -> dict[str, Any]:
+    """Carry earlier attempts' display notes (their context records) forward.
+
+    A resumed attempt rebuilds the Turn projection from its own task state;
+    without this hand-off the records of what earlier attempts injected vanish
+    while their retained rounds stay visible. A note anchors only beside its
+    own attempt's rounds, so only attempts that keep a retained round carry
+    their notes; an orphan would otherwise render after the new reply.
+    """
+    attempts = {row.get("attemptId") for row in rounds
+                if isinstance(row, Mapping) and row.get("attemptId")}
+    notes = []
+    for segment in projection.get("segments") or []:
+        if (not isinstance(segment, Mapping) or segment.get("type") != "system_note"
+                or not isinstance(segment.get("text"), str)
+                or (segment.get("attemptId") and segment["attemptId"] not in attempts)):
+            continue
+        note = {"kind": segment.get("noteKind") or "system-intervention",
+                "text": segment["text"], "llmRound": segment.get("llmRound"),
+                "action": segment.get("action") or "prompt"}
+        for key in ("reason", "attemptId", "taskId", "blockId"):
+            if isinstance(segment.get(key), str) and segment[key]:
+                note[key] = segment[key]
+        notes.append(note)
+    return {"checkpointInjectedNotes": notes} if notes else {}
+
+
 def _resume_executor_config(
     operation: str,
     projection: Mapping[str, Any],
@@ -2071,23 +2183,20 @@ def _resume_executor_config(
             retained_rounds = [tool_rounds[p] for p in retained]
             if retained_rounds:
                 config["checkpointToolRounds"] = retained_rounds
-        config.update(_resume_checkpoint_file_fields(projection))
-        config.update(_resume_checkpoint_progress_fields(projection))
-        return config
-    if operation == "checkpoint_resume":
+    elif operation == "checkpoint_resume":
         config = {
             "checkpointToolRounds": projection.get("toolRounds") or [],
             "checkpointImages": projection.get("images") or [],
         }
-        config.update(_resume_checkpoint_file_fields(projection))
-        config.update(_resume_checkpoint_progress_fields(projection))
-        return config
-    if operation == "answer_guidance":
+    elif operation == "answer_guidance":
         config = _answer_guidance_executor_config(projection, human_answer)
-        config.update(_resume_checkpoint_file_fields(projection))
-        config.update(_resume_checkpoint_progress_fields(projection))
-        return config
-    return {}
+    else:
+        return {}
+    config.update(_resume_checkpoint_file_fields(projection))
+    config.update(_resume_checkpoint_progress_fields(projection))
+    config.update(_resume_checkpoint_note_fields(
+        projection, config.get("checkpointToolRounds") or []))
+    return config
 
 
 def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:

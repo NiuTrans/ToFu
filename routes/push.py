@@ -30,7 +30,7 @@ from quart import Blueprint, websocket
 from lib.quart_sync import owned_sync_command, request_json
 
 from lib.api_response import api_error, api_ok
-from lib.log import get_logger, resolve_inbound_rid, set_principal
+from lib.log import get_logger, resolve_inbound_rid, set_principal, task_log_tag
 from lib.agent_core.push import PushClient, hub
 from lib.control_rpc import ControlRpcSession
 
@@ -416,7 +416,7 @@ def _handle_client_frame(client: PushClient, raw) -> None:
     if action == 'subscribe' and channel:
         hub.subscribe(client, channel, task_id)
         logger.debug('[Push] Subscribe: channel=%s taskId=%s rid=%s',
-                     channel, task_id[:8], client.req_id)
+                     channel, task_log_tag(task_id), client.req_id)
     elif action == 'unsubscribe' and channel:
         hub.unsubscribe(client, channel, task_id)
     elif action == 'abort' and channel == 'chat' and task_id != '*':
@@ -490,15 +490,15 @@ def _handle_abort(task_id: str, *, user_id: int | str, req_id: str = ''):
             outcome = 'signalled' if tombstoned else 'missing'
     if outcome == 'missing':
         logger.info('[Push] Client abort for unknown task %s (rid=%s)',
-                    task_id[:8], req_id)
+                    task_log_tag(task_id), req_id)
         return
     if outcome == 'forbidden':
         logger.warning('[Push] Client abort refused for foreign task %s '
-                       '(user=%s, rid=%s)', task_id[:8], user_id, req_id)
+                       '(user=%s, rid=%s)', task_log_tag(task_id), user_id, req_id)
         return
     if outcome == 'signalled':
         logger.info('[Push] Client abort tombstoned registry-missing task %s '
-                    '(rid=%s)', task_id[:8], req_id)
+                    '(rid=%s)', task_log_tag(task_id), req_id)
         return
     logger.info('[Push] Client abort for task %s (rid=%s)',
-                task_id[:8], req_id)
+                task_log_tag(task_id), req_id)

@@ -48,6 +48,11 @@ every exclusion that survives a reset; never create another exception ladder.
 The facade's historical `_StreamRetryState` name remains a reference to the
 common state owner, not another implementation.
 
+Streaming loops keep local waits and terminal settlement outside transport
+retry handling. `_settle_stream_result` records the outcome before route/usage
+receipts and cache observations; later failures must never settle again.
+Verify this boundary through `test_stream_settlement_failures.py` with another
+reservation held on the same real slot.
 
 `service.py` is the `LLMService` adapter (`DispatchLLMService` +
 `resolve_llm_service`). It must not import dispatcher state or HTTP at module

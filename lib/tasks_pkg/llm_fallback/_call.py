@@ -6,7 +6,7 @@ fallback through concrete owners; callers retain task, messages and ledger."""
 from lib.llm import AbortedError
 from lib.llm.llm_error_format import format_llm_error_for_user
 from lib.llm.llm_errors import _ERR_BODY_LIMIT, ModelRefusalError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
 
 from . import (
@@ -36,7 +36,7 @@ def _call_primary(
     on_tool_call_ready,
 ):
     """Adopt a provider response or bill and retire a refused attempt."""
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     stream_result = _transport.stream_attempt(
         task, body, tag=f'R{round_num + 1}', on_tool_call_ready=on_tool_call_ready
     )
@@ -154,7 +154,7 @@ def _llm_call_with_fallback(
     admission/durability failures and cancellation never become model failures.
     Results retain the loop's model/preset and typed settlement contract.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     fallback_model = _retry._get_fallback_model(task)
     # An explicit opt-out also forbids pool rescue and has its own error context.
     fallback_disabled = False

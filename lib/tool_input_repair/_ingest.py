@@ -27,6 +27,7 @@ from lib.tool_input_repair._rejection import (
     report_tool_name_aliased,
 )
 from lib.tool_input_repair._repair import (
+    edit_batch_operation_refusal,
     edit_batch_path_gap,
     schema_hint,
     validate_then_repair,
@@ -62,7 +63,8 @@ def contract_rejection_text(fn_name: str, exc: ToolContractError,
 # The retired insert tools documented ``position`` as optional (default
 # ``after``). Their emitted name is the only evidence of insert intent and is
 # known only here, so the default is applied before shape repair, which never
-# guesses an insertion for an anchored item without a position.
+# guesses an insertion for an anchored item without a position; the operation
+# refusal then tells the model how to send that insert as a replace.
 _LEGACY_INSERT_TOOL_NAMES = frozenset({'insert', 'insert_content', 'insert_contents'})
 
 
@@ -446,12 +448,36 @@ def ingest_tool_call(
             logger.warning('[ingest] document bounds clamp failed for %s '
                            '(passing args through): %s', fn_name, e)
 
+    # ── Stage 5a: retired edit operations ──
+    # Refused before the contract so the model learns the replace that
+    # expresses its insert, not a generic schema error.
+    contract_error = None
+    if parse_error is None:
+        _retired = edit_batch_operation_refusal(fn_name, fn_args)
+        if _retired:
+            contract_error = {
+                'code': 'invalid_argument_value',
+                'message': 'edit_file only replaces; `operation` is retired.',
+                'path': '$.edits',
+                'retryable': True,
+                'nextAction': 'Resend each edit as {anchor, content}.',
+            }
+            parse_error = (f'ERROR: Tool call `{fn_name}` was NOT executed. '
+                           f'[invalid_argument_value] {_retired}')
+            logger.warning(
+                '[ToolContract] rejected tool=%s code=invalid_argument_value '
+                'path=$.edits model=%s conv=%s', fn_name, model, conv_id)
+            if emit_audit:
+                audit_log(
+                    'tool_contract_rejected', tool=fn_name,
+                    code='invalid_argument_value', path='$.edits',
+                    retryable=True, model=model, conv_id=conv_id)
+
     # ── Stage 5b: authoritative ToolContractV2 execution validation ──
     # Curated repair may recover syntax/shape, but the request-owned contract
     # is the final authority. This check deliberately runs after repair and
     # before every dispatcher so a searched/dynamic schema cannot bypass the
     # same bounds used to generate provider and discovery representations.
-    contract_error = None
     if parse_error is None:
         before_contract = fn_args
         try:

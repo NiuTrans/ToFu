@@ -42,6 +42,8 @@ impl ReadOptions {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            // Queries never write a Turn; only command paths take or publish.
+            resident_projections: Default::default(),
             published_query_options: None,
             published_query_results: None,
         }

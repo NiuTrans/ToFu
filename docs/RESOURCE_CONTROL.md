@@ -152,6 +152,15 @@ work.
   CPU. These are security bounds on untrusted processes, never derived from
   the host; its probe is diagnostic.
 
+**The test harness is not user work.** `tests/conftest.py` sizes `-n auto`
+from the launch probe (one worker per effective CPU and per GiB of memory
+headroom, at most four, never more than the selected test files), and every
+pytest process runs at nice 19 in the idle I/O class so it yields to the live
+server and its TofuDB (owner decision 2026-11-08). The guard does not scan
+`tests/`: harness sizing decides how fast the suite runs, never what a user
+can run. Decisions and measurement: [TESTING_STRATEGY.md](TESTING_STRATEGY.md),
+"Parallel execution policy".
+
 ## Optional local search ranking
 
 **Problem:** an optional CPU relevance model can retain large allocator/primitive
@@ -1980,3 +1989,11 @@ Thirty uninstrumented samples after five warm-ups showed mixed latency changes
 The evidence establishes bounded traversal, not an end-user frame-time or RUM
 improvement. The deterministic regression compares equal working sets at two
 history sizes; existing fresh-process GC probes verify retired-graph release.
+
+
+Shared outbound route health (2026-11-07): the common network authority reuses
+netpath's 64-origin/24-hour cache retention; in-flight probes are protected and
+active requests remain unlimited. A controlled 1,000-origin replay reduced
+retained traced memory from 411,898 to 77,888 bytes (1,000 to 64 cached origins).
+Proxy generations retire idle transports; streaming leases defer retirement
+until the response closes. See `NETWORK.md` and `test_unified_network.py`.

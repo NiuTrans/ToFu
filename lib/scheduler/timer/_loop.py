@@ -141,7 +141,7 @@ def _execute_continuation(timer: dict[str, Any]) -> TimerContinuationOutcome:
     continuation_msg = timer['continuation_message']
     log_prefix = f'[Timer:{timer_id}]'
 
-    logger.info('%s 🚀 Executing continuation in conv=%s', log_prefix, conv_id[:12])
+    logger.info('%s 🚀 Executing continuation in conv=%s', log_prefix, conv_id)
 
     # Build the timer-specific user message
     user_message = {
@@ -518,7 +518,7 @@ def start_timer_loop(timer_id: str, *, user_id: int) -> bool:
                 outcome = await run_blocking(_execute_continuation, current)
                 if outcome.kind != 'retry':
                     logger.info('[Timer:%s] Continuation settled: %s %s', tid,
-                                outcome.kind, (outcome.task_id or outcome.queue_id)[:8])
+                                outcome.kind, (outcome.task_id or outcome.queue_id))
                     break
                 latest = await run_blocking(_get_timer_row, tid, user_id=user_id)
                 if not latest or latest.get('status') != 'active':

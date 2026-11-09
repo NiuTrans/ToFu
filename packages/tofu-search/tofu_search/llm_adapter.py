@@ -11,6 +11,7 @@ The adapter normalizes both into a simple: call(messages, **kwargs) -> str
 import requests
 
 from tofu_search.log import get_logger
+from tofu_search.network_transport import request
 
 logger = get_logger(__name__)
 
@@ -117,7 +118,7 @@ def _call_openai_compatible(messages, *, api_key, base_url, model,
     logger.debug('[LLMAdapter] POST %s model=%s msgs=%d', url[:80], model, len(messages))
 
     try:
-        resp = requests.post(url, headers=headers, json=body,
+        resp = request('POST', url, headers=headers, json=body,
                              timeout=(10, timeout))
         resp.raise_for_status()
         data = resp.json()

@@ -107,24 +107,27 @@ Idle → Snapshot → Segment lane → Mark → Scan → (first epoch: rotate ma
 4. **Confirm**: suspects from the previous completed scan that are *still*
    unmarked in this epoch's mark become *confirmed garbage*, except blocks
    a deletion hold unlinked after that scan (rule S10). Confirmation reads
-   no file age (rule S4).
+   no file age (rule S4). It happens per shard during the scan: a shard's
+   confirmed victims are validated and unlinked once the shard is listed,
+   one short hold each in the scan's paced run, which first makes both
+   CONTROL slots name the current physical roots (rule S8; see "One file
+   per deletion hold" and "Loose victims go with their shard"). No count
+   bounds them.
    First epoch after startup confirms nothing; it only establishes the
    first mark. This is the two-mark rule.
-5. **Delete** (bounded rounds, short holds): per maintenance round delete
-   at most `MAX_AUTHORITY_GC_BLOCKS_PER_ROUND` blocks /
-   `MAX_AUTHORITY_GC_VICTIM_BYTES` and one segment rewrite, reusing the
-   offline collector's hard caps (orphan segment files belong to step 1b). Every batch that mutates
-   catalog/CONTROL takes the authority mutex only for the publish
-   (`publish_payload_manifest` / `stabilize_control_slots`), after the
-   off-mutex file work + fsync chain completed. Each loose victim is
-   validated and unlinked under its own short hold, which first makes both
-   CONTROL slots name the current physical roots (rule S8; see "One file
-   per deletion hold").
+5. **Delete** (short holds): one segment rewrite and, under catalog
+   pressure, one consolidation (orphan segment files belong to step 1b).
+   Every batch that mutates catalog/CONTROL takes the authority mutex only
+   for the publish (`publish_payload_manifest` / `stabilize_control_slots`),
+   after the off-mutex file work + fsync chain completed. A scan lane that
+   failed ends the epoch here, before any publication, with the scan's
+   first error.
 6. Rotate marks (current becomes previous), persist epoch metrics, back off.
    The completed scan's suspects rotate as soon as the deletion holds ran,
    even when one failed, together with the blocks they unlinked (rule S10);
-   temporary-file, segment-dead and catalog-window memory rotate only after
-   a completed epoch.
+   a scan that stops after unlinking adds its unlinks to the set the next
+   epoch confirms against. Temporary-file, segment-dead and catalog-window
+   memory rotate only after a completed epoch.
 
 The daemon schedules an epoch when the maintenance lane reports idle, with
 exponential backoff when no garbage is found (never while the payload catalog
@@ -585,7 +588,8 @@ Decision.
   per-epoch file cap. Observations are at least one epoch interval
   (≥120 s) apart; a failed observation clears the memory, so confirmation
   restarts from two fresh observations.
-- Each removal takes its own short `try_lock` hold and re-validates: the
+- Each removal takes its own short hold, waiting for the mutex ("Collector
+  holds wait for the mutex"), and re-validates: the
   authority is usable, no publication owns the physical lane, the installed
   catalog and the protected set (unpublished packs, parked retirements) do
   not name the file, no pack is active for a temporary file, and, for a
@@ -701,7 +705,9 @@ MAX_SEGMENT_PAYLOAD_BYTES)`. When the next admitted block would exceed
 `MAX_SEGMENT_BLOCKS` or that byte limit, the open segment is packed before the
 block joins the next one: it is built and verified off the authority mutex (the
 stop flag is checked before every source read and between segments) and
-published under one short `try_lock` hold through `online_gc_finish_compaction`,
+published under one short hold through `online_gc_finish_compaction`, which
+waits for a contended mutex like every collector hold instead of discarding
+the built segment,
 which checks the physical publication lane and publishes the catalog with
 `publish_payload_manifest` (both CONTROL slots name it on return); only then
 are the loose copies removed, one short hold each (rule S8; see "One file per
@@ -1552,7 +1558,7 @@ search projection's local disk (about 10–50 µs per unlink) hid them.
 
 Decision.
 
-- Each loose victim gets its own short `try_lock` hold
+- Each loose victim gets its own short hold
   (`AuthorityDatabase::online_gc_delete_loose_victim`) with the checks of the
   former batch hold, applied to that one file: a usable authority and an idle
   physical lane; a staged copy keeps the file, then the relink fence does
@@ -1575,26 +1581,21 @@ Decision.
   redundant copy. Every attempt waits until the collector has stayed off the
   mutex at least as long as its previous hold took: the collector's 50%
   duty-cycle rule applied to authority occupancy, measured, with no constant.
-  A contended `try_lock` postpones the hold and retries; the collector never
-  blocks in `lock()`. A stop ends the run, and rule S10 keeps exactly the
-  files unlinked so far. Copy removal also retries `WouldBlock`, so a run
-  finishes in its epoch; a copy that a stop or an error leaves waits for the
-  next epoch's scan.
-- A retry after a contended or refused attempt waits the larger of that pause
-  and the time the run has already spent contended or refused, so a streak of
-  retries thins out geometrically from the loop's own cost. Without it, a
-  garbage run whose first hold found the authority held had no measured hold
-  to pace it and retried 80 ns after each failure: a busy spin for as long as
-  the foreground held the mutex. A copy run refused while a publication keeps
-  the slots apart re-took the mutex at the pace of its own refused holds
-  (65.6 us), for as long as the publication lasted. A retry overshoots the
-  end of a contention by at most as long as the contention lasted.
-  `a_contended_first_deletion_hold_backs_off_instead_of_spinning` and
-  `refused_deletion_holds_back_off_like_a_contended_authority` fail before the
-  change. Alternatives rejected: a fixed retry delay or retry cap is a tuning
-  knob; seeding the pause with an earlier hold of the epoch (the capture) can
-  be a few microseconds, which still polls the mutex; blocking in `lock()`
-  gives up stop responsiveness behind a wedged holder.
+  A contended hold waits for the mutex ("Collector holds wait for the mutex"
+  below). A stop ends the run, also one raised while a hold waits, and rule
+  S10 keeps exactly the files unlinked so far. Copy removal also retries
+  `WouldBlock`, so a run finishes in its epoch; a copy that a stop or an error
+  leaves waits for the next epoch's scan.
+- A retry after a refused attempt waits the larger of that pause and the time
+  the run has already spent refused, so a streak of retries thins out
+  geometrically from the loop's own cost. Without it, a copy run refused while
+  a publication keeps the slots apart re-took the mutex at the pace of its own
+  refused holds (65.6 us), for as long as the publication lasted. A retry
+  overshoots the end of a refusal by at most as long as the refusal lasted.
+  `refused_deletion_holds_back_off_geometrically` pins it. Alternatives
+  rejected: a fixed retry delay or retry cap is a tuning knob; seeding the
+  pause with an earlier hold of the epoch (the capture) can be a few
+  microseconds, which still polls the mutex.
 
 Why each unlink stays exact.
 
@@ -1645,7 +1646,7 @@ Alternatives rejected.
   directory syncs per file instead of per shard, under the mutex.
 
 Cost. The same opens and unlinks as before and one directory barrier per shard
-run, now off the mutex; per file one `try_lock`, the in-memory checks and a
+run, now off the mutex; per file one acquisition, the in-memory checks and a
 pause, so a run takes about twice its unlink time, half of it off the mutex. No
 hold keeps a foreground request out for longer than one unlink, and the mutex
 is free at least half of a run. CONTROL is republished once more for each
@@ -1665,10 +1666,10 @@ go after it (before, the mutex was held there).
 history pruning between two victims publishes CONTROL once, the next hold
 republishes it before its unlink, both slots name the pruned manifest and the
 fallback slot recovers.
-`contended_deletion_holds_retry_until_every_file_goes_while_foreground_commits_land`:
-before every other attempt a foreground thread holds the authority across the
-collector's `try_lock` and commits; every copy and victim still goes in its
-epoch, one per hold, and every commit lands.
+`contended_deletion_holds_wait_for_each_foreground_commit_and_every_file_goes`:
+before every attempt a foreground thread takes the authority and commits; each
+hold waits for that commit, every copy and victim still goes in its epoch, one
+per hold, and every commit lands.
 `stop_between_deletion_holds_records_exactly_the_unlinked_victims`: a stop
 raised during the third unlink ends the run before the fourth hold,
 `unlinked_loose` holds exactly those three, and the next epoch reclaims the
@@ -1679,6 +1680,69 @@ attempt waited at least as long as the hold before it. All six fail on the
 previous code; the existing rebirth, fallback-slot, publication-window,
 segment-reclaim, fault, capture, listing and backlog specifications pass
 unchanged.
+
+## Collector holds wait for the mutex (2026-11-08)
+
+Problem. Every collector hold sampled its database mutex with `try_lock`, and
+a contended attempt retried after waiting as long as the run had already been
+contended. That bounds the overshoot only when the contention is one
+continuous span. A holder that keeps the mutex most of the time and lets go
+briefly in between is invisible between two samples: each attempt fails with
+the probability p that the mutex is held at that instant, and every failure
+doubles the next wait, so the expected wait (the sum of 2^k p^k) is infinite
+once p reaches 1/2. On 2026-11-08 the maintenance thread was inside the search
+projection's `append_conversation_page` or `finalize_conversation_rebuild`,
+which run under the projection mutex and read loose blocks over FUSE, in 53 of
+60 stack samples. The search collector's mark completed at 22:53 UTC; at
+03:23 UTC its first redundant-copy run was in a single 13,249 s sleep, a wait
+as long as its retry streak had already lasted (3.7 hours). No search epoch
+had completed in the previous engine's 5.8 hours either. The search store's
+payload-segments directory held 3,448 segment files (the catalog admits at
+most 4,096 entries), and consolidation at catalog pressure is that collector's
+work. The
+compaction publish made one `try_lock` of its own and discarded the segment it
+had just built off the mutex whenever the mutex was held.
+
+Decision. Every collector hold that waits for its database mutex, the
+compaction publish included, waits in `lock()` after the run's pause
+(`SingleFileHolds::attempt`): each attempt is one hold, and the 50% duty pause
+still precedes it. A refused hold (`WouldBlock`) keeps the geometric backoff.
+The attempt checks the stop flag again once it holds the mutex, so a stop
+raised while it waited ends the run before that hold acts. Every pause wakes
+on a stop: `stop_and_join` unparks the driver thread, so a run paused by its
+backoff ends at once instead of being detached. The epoch's capture still
+uses `try_lock` and defers a contended epoch, which retries after the minimum
+epoch interval with no growing wait.
+
+Waiting cannot deadlock. A collector thread holds no other lock when it calls
+`lock()`: `visit_block_shards` runs its visitor with no lock held, and a built
+segment is an open file. Nothing waits for the collector while holding a
+database mutex, because the collector handle only rings a doorbell. The daemon
+stops every driver before its shutdown checkpoint takes the mutex. Behind a
+wedged holder a stop no longer ends the run at once; the bounded stop join
+detaches the driver as for any slow phase, the run then acts on nothing, and
+shutdown's own checkpoint waits for the same holder.
+
+Alternatives rejected: keeping `try_lock` with the geometric backoff, whose
+expectation diverges at the observed load; polling `try_lock` at a fixed rate
+or capping the backoff, both tuning knobs; restarting the backoff whenever the
+mutex changed hands in between, which needs a handoff counter kept by every
+lock site of both database ports. Reading the search worker's posting blocks
+off the projection mutex would remove most of its occupancy and remains worth
+doing, but the collector must not depend on how long another owner holds the
+mutex.
+
+Verification (`authority_gc_online/tests_short_holds.rs`).
+`deletion_holds_wait_for_an_authority_held_at_every_attempt_instead_of_backing_off`:
+a foreground thread takes the mutex right before each of the first eight holds
+and lets go 5 ms later; each attempt waits and then holds, eight attempts for
+eight victims. Before the change every one of those attempts failed and was
+retried: 16 attempts for eight victims.
+`contended_deletion_holds_wait_for_each_foreground_commit_and_every_file_goes`,
+`a_stop_raised_while_a_hold_waits_for_the_mutex_ends_the_run_before_it_acts`
+and `a_stop_wakes_a_run_paused_by_its_backoff` pin the commit, stop and pause
+rules; the contended orphan-removal and consolidation specifications in
+`tests_reclaim_throughput.rs` keep those passes moving.
 
 ## One mark-run pass per segment window (2026-10-31)
 
@@ -1968,9 +2032,9 @@ of magnitude:
   victim only to apply it.
 
 Decision. Every collector hold that waits for the authority shares one paced
-attempt (`SingleFileHolds::attempt`): the duty-cycle pause after a hold, and
-geometric backoff from the run's own retry time after a contended or refused
-attempt; it never blocks in `lock()`.
+attempt (`SingleFileHolds::attempt`): the duty-cycle pause after a hold, a
+wait for the mutex, and geometric backoff from the run's own retry time after
+a refused attempt ("Collector holds wait for the mutex").
 
 - The segment lane retries a contended or refused removal instead of ending
   the pass; only a stop or an error ends it. Each removal still re-validates
@@ -1988,18 +2052,14 @@ attempt; it never blocks in `lock()`.
   WARN line, and each completed epoch logs `step=epoch_complete` at INFO, as
   this document always claimed. `deferred_epochs` keeps counting failures,
   so existing consumers see the same values.
-- Online loose victims are admitted by count alone
-  (`maximum_blocks_per_round`, which bounds the in-memory victim list); the
-  scan sizes only compaction candidates. The offline collector keeps both
-  caps.
+- Online loose victims carry no byte cap; the scan sizes only compaction
+  candidates. The offline collector keeps its caps. (Since 2026-11-08 no
+  count bounds them either: "Loose victims go with their shard" below.)
 
 Alternatives rejected. A separate lane thread: the paced retries already let
 one pass remove every confirmed file, and a second driver would duplicate
 lifecycle, stop-join and pacing owners. A larger lane cadence or retry count:
-knobs that leave the first contended hold ending the pass. Unbounded online
-deletion per epoch by streaming victims per shard: it changes the
-confirmation/unlink ordering that rules S1–S10 pin, for a further gain the
-count cap does not block yet (65,536 victims per completed epoch).
+knobs that leave the first contended hold ending the pass.
 
 Verification (`tests_reclaim_throughput`, each failing before the change):
 `contended_orphan_removals_retry_until_every_confirmed_file_goes` (a
@@ -2014,7 +2074,66 @@ reported, a stop is not, a completed epoch clears it),
 stayed unreferenced), and
 `one_epoch_deletes_every_confirmed_loose_victim_beyond_the_victim_byte_cap`
 (eight 2 KiB victims under a 4 KiB byte cap; before, one per epoch).
-`scan_sizes_only_compaction_candidates_and_stats_no_listed_file` now pins
-zero size reads for admitted victims. These are deterministic-VFS
-specifications; the live reclamation rate needs a deployed engine and is not
-measured here.
+`scan_unlinks_every_confirmed_victim_and_sizes_only_compaction_candidates`
+pins zero size reads for victims beyond the open of their unlink. These are
+deterministic-VFS specifications; the live reclamation rate needs a deployed
+engine and is not measured here.
+
+## Loose victims go with their shard (2026-11-08)
+
+Problem. On the live main authority every epoch since 2026-11-07 ended with
+`reclaimed_blocks=0` (`step=epoch_complete` lines; the 11-08 16:54 engine's
+first epoch: 3.03 h, 7.96 MB reclaimed, all of it 462 redundant copies) while
+the loose store grew about 85K files and 80 GB an hour to some 33M files.
+
+- A victim's hold refuses with `WouldBlock` while a publication (history
+  compaction, WAL rotation, pack adoption) owns the physical lane, which on
+  that store is most of the time. Victim deletion ended at the first refusal;
+  orphan segments and redundant copies already retried it, which is why copies
+  were removed and victims never were.
+- The victims of an epoch were a list admitted under `maximum_blocks_per_round`
+  (65,536) and deleted after the whole scan; the store holds tens of millions
+  of garbage files, so even a successful epoch could not keep up.
+- The search projection's collector failed every epoch from 12:23 UTC with
+  "payload segment block count is outside its bounded range": pressured
+  consolidation bounded its victims' retained union by the temporary-byte
+  budget only, and two posting segments of tiny blocks exceeded
+  `MAX_SEGMENT_BLOCKS`.
+
+Decision.
+
+- The scan unlinks each shard's confirmed victims once that shard is listed,
+  one short hold each, in the same paced run (`SingleFileHolds`) as the
+  shard's redundant copies, so the 50% duty rule covers both. Memory stays one
+  shard; no count bounds an epoch. A refused hold is retried after the run's
+  backoff; only a stop or an error ends deletion, and the victims left behind
+  stay suspects that confirm again next epoch.
+- Every hold keeps its checks (staged copy, relink fence, both CONTROL slots
+  naming the current physical roots), and the fence stays open from the
+  capture to the epoch's last hold, so S1–S9 are unchanged. For S10 every
+  in-scan unlink is recorded at once; a completed scan rotates its suspects
+  with those unlinks as before, and a scan that stops or fails after
+  unlinking adds them to the unlinked set the next epoch confirms against,
+  since that epoch still confirms from the older suspects.
+- A lane that fails during the scan (loose compaction, copy removal or victim
+  deletion) closes only itself; the scan completes and the epoch then ends
+  before any catalog publication with the scan's first error. A failed hold
+  can leave the authority uncertain, so later lanes' errors are consequences
+  and the first one is the cause (`crash_before_the_epochs_catalog_publication_keeps_the_fallback_slot_recoverable`).
+- A pressured consolidation admits a victim only while the retained union
+  still fits one segment's block and payload bounds.
+
+Alternatives rejected. Keeping deletion after the scan with a larger or
+probe-derived count: a knob, and a victim list of tens of millions of IDs in
+memory. Retrying refused holds without moving deletion into the scan: still a
+per-epoch count. Splitting a consolidation's union into several replacement
+segments: more catalog entries under pressure, the opposite of its purpose.
+
+Verification (each failing before the change unless noted):
+`refused_loose_victim_deletions_retry_until_every_confirmed_victim_goes`,
+`one_epoch_deletes_every_confirmed_loose_victim_beyond_the_offline_round_count`,
+`scan_unlinks_every_confirmed_victim_and_sizes_only_compaction_candidates`,
+`pressured_consolidation_plans_only_unions_one_segment_can_hold` (fails with
+the live error text), and the guard
+`victims_a_stopped_scan_unlinked_never_confirm_from_the_older_suspects`.
+The live reclamation rate needs the deployed engine.

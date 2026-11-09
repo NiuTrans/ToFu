@@ -20,6 +20,9 @@ cache/protocol translation remain later stages. Preserve diagnostics and latches
 - Incremental parsers tolerate documented frame fragmentation but fail clearly
   on invalid or truncated terminal data. Never manufacture successful
   settlement after a broken stream.
+- `_stream_text.py` owns attempt-local content/reasoning/signature buffers.
+  Preserve live string snapshots, replacement/clearing and failed-append
+  atomicity; verify stream-text accumulation and common SSE parity tests.
 - Transport owns connection reuse, TLS/proxy behavior, timeouts, idle-stream
   detection, decompression, response bounds, and safe teardown—not model
   fallback policy.
@@ -41,6 +44,11 @@ cache/protocol translation remain later stages. Preserve diagnostics and latches
   private identity/ports never enter provider JSON.
 
 ## Verification
+
+Context source ranges are carried by `lib/llm_sanitize/lineage.py` and mapped
+by the actual outbound emitters. `request.py` seals their off-wire evidence;
+never put lineage into provider payloads or infer positions by text search.
+The schema and coverage contract live in `docs/CONTEXT_INJECTIONS.md`.
 
 Run focused outbound adapter and stream/non-stream parity tests, then transport
 reuse, timeout, cancellation, tool/reasoning, and usage-accounting neighbors

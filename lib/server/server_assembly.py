@@ -55,6 +55,12 @@ def pop_boot_orchestration_continuity_candidates() -> list:
     candidates = _BOOT_ORCHESTRATION_CONTINUITY_CANDIDATES
     _BOOT_ORCHESTRATION_CONTINUITY_CANDIDATES = []
     return candidates
+
+
+# Boot-scoped handoff: how the previous server generation stopped (manual
+# shutdown, restart storm), read once by task recovery, for the post-ready
+# restart resume pass.
+_boot_previous_shutdown: dict = {}
 _start_log_aggregate_runtime_after_recovery = None
 
 
@@ -381,6 +387,12 @@ def _init_database():
     _run_boot_recovery_step(
         'orphaned command retirement', retire_orphaned_foreground_commands,
         attempts=1)
+    # Lock files the previous generation's killed holders left behind are
+    # reclaimed off the boot path; release reclaims every later one.
+    from lib.project_mod.workspace_lease import start_lock_file_reclamation
+    _run_boot_recovery_step(
+        'workspace lock-file reclamation', start_lock_file_reclamation,
+        attempts=1)
 
     from lib.tasks_pkg.manager import (
         record_boot_interrupted_conversations,
@@ -406,6 +418,11 @@ def _init_database():
         lambda: record_boot_interrupted_conversations(recovery_result),
         attempts=2,
     )
+    # The post-ready restart resume pass continues the Turns it settled.
+    from lib.conversations.restart_resume import set_boot_recovered
+    set_boot_recovered(recovery_result)
+    _boot_previous_shutdown.clear()
+    _boot_previous_shutdown.update(previous_shutdown or {})
     # Durable background commands: deliver finished results, reattach to
     # surviving processes, report ones that died with the server.
     from lib.tasks_pkg.background_commands import (
@@ -497,6 +514,19 @@ def _run_post_ready_deferred():
             _server_log.warning('[Server] MCP declaration compaction failed to start: %s', exc)
     from lib.swarm.integration import rehydrate_swarms_on_startup
     _run_boot_recovery_step('swarm rehydration', rehydrate_swarms_on_startup)
+    if (not _DEPLOYMENT_CONFIGURATION.distributed_preview_read_only
+            and process_role_has(_DEPLOYMENT_CONFIGURATION.process_role,
+                                 CAPABILITY_TASK_RECOVERY)):
+        # After the owners that resume their own work (project dispatch,
+        # background batches, swarms), every Turn the restart interrupted
+        # continues from its checkpoint; then the restart's requester hears
+        # the outcome with each conversation's resume result.
+        from lib.conversations.restart_resume import resume_restart_paused_turns
+        from lib.server.restart_notice import deliver_restart_notices
+        _run_boot_recovery_step(
+            'restart resume', lambda: resume_restart_paused_turns(
+                previous_shutdown=dict(_boot_previous_shutdown) or None), attempts=2)
+        _run_boot_recovery_step('restart notices', deliver_restart_notices, attempts=1)
     try:
         from lib.swarm.integration import start_swarm_output_cleanup
         start_swarm_output_cleanup()

@@ -74,6 +74,43 @@ cannot carry; `failed` — adapters would turn an ordinary provider refusal
 into a server error; resending to the same model — Anthropic documents that
 it usually refuses again.
 
+#### What the owner can see when the fallback answered
+
+The switch is not silent in a chat. `call_configured_fallback` emits
+`EventType.MODEL_FALLBACK` with `fallbackModel` / `fallbackFrom` /
+`fallbackKind` / `fallbackReason` plus a RETRYING phase before the fallback
+streams, and the settled Turn keeps those four fields. The browser projects
+them in `view-model/turn-metadata.ts` (`metadata.fallback`) and the fixed
+composer notice (`ui/composer-model-notice.ts`) renders "Automatically
+switched: {from} → {to}" with the refusal reason, alongside the actual
+serving route resolved from the last round (`turn-serving-route.ts`). The
+turn's `model`/`preset` fields keep the REQUESTED primary; the per-round
+`apiRounds` and the serving-route resolver carry the model that actually
+answered, so the two are not conflated in presentation.
+
+Measured 2026-11-04 → 11-07 (robustness census, 272 conversations): 379
+provider usage-policy refusals on `claude-opus-5.5` switched to
+`kimi-k3.1-pro` — 249 in Workers, 70 in the Global Router, 40 in other
+Coordinators, 20 in chats. Categories came from the provider's own
+`stop_details`: `frontier_llm` 366, `cyber` 7, `user_sensitive_words` 4,
+`reasoning_extraction` 2. Request size does not predict them: on the Router,
+refused primary attempts had a median 454k prompt tokens against 419k for
+answered ones on the same conversation, and 66 of 70 events refused at a
+later round, after tool results and quoted conversation transcripts entered
+the prompt. The classification itself is faithful — `stop_reason: refusal`
+plus a verified complete `content_filter` finish, never an empty or
+truncated stop, and an HTTP 450 gateway block is a separate class that never
+switches models.
+
+Open gap (proposal, not built): a Worker / Coordinator / Router lane has no
+composer model notice, and the project surfaces show the lane's configured
+model rather than the model that answered, so an owner watching a project
+cannot tell that a refusal moved a lane onto the fallback. Smallest change:
+project the settled turn's existing `fallback` metadata into the lane
+header / worker detail view through the same `turn-metadata.ts` projection
+the chat uses, reusing `turn-serving-route.ts` for the answering model — no
+new event, no new settlement field, and no second route resolver.
+
 An `interrupted/user_abort` verdict is reserved for stops the user (or a
 superseding task) actually requested. Internal storage/attempt fences —
 `_abort_reason` in `INTERNAL_FENCE_ABORT_REASONS` (`storage_authority_integrity`,
@@ -82,7 +119,10 @@ superseding task) actually requested. Internal storage/attempt fences —
 `lib/tasks_pkg/manager/_events.py` when the authority deterministically
 rejects this turn's writes, e.g. `database_integrity`, or refuses to grow a
 Turn into its settleable reserve, which also stamps the `storage_fence`
-envelope before the producer unwinds; see `docs/TASK_EVENT_DELIVERY.md`) — settle as
+envelope before the producer unwinds; see `docs/TASK_EVENT_DELIVERY.md`; and
+`worker_lease_lost`, planted by `lib/conversation_sync/worker_recovery.py` when
+a takeover joins a worker whose claim authority ended, with a non-retryable
+`storage_fence` envelope and unknown external outcome) — settle as
 `failed/internal_fence_abort` with `evidence: external_authority` and a
 `storage_fence` error envelope (warning, retryable). Mislabeling these as
 `user_abort` once rendered turns as unexplained stops with no recovery path;
@@ -133,6 +173,19 @@ internal error envelope before signaling physical abort. They settle as
 and usage/tool receipts stay truthful; diagnostics expose numeric silence and
 threshold only. Explicit Stop is checked first and remains `interrupted/user_abort`
 (Swarm `cancelled`), with no cancelled-only automatic wake or new UI taxonomy.
+
+The stuck-task reaper force-fails a wedged root from outside its worker
+(`_abort_reason` `stuck_no_progress`, a `worker_lost` envelope). Its Turn settles
+`failed/worker_lost` with `generation_error` evidence, the root counterpart of a
+child's `failed/invocation_stalled`; the reaper only judges tasks no person has
+stopped, so an earlier Stop keeps `interrupted/user_abort`. Problem (2026-11-09,
+the autoharness Coordinator): read as `interrupted/user_abort`, the reaped Turn
+showed a phantom Stop while its task result said `error`, and durable worker
+recovery, which requires both to agree, retried `settlement_unconfirmed` for
+hours. Alternatives rejected: settling the task result `aborted` would hide a
+system failure behind a Stop; stamping the child's `_invocationStopReason` on a
+root would give the reaper the invocation guard's cooperative-abort semantics.
+Verify `test_reaped_root_settles_its_turn_failed_never_as_a_user_stop`.
 
 Tool admission refusals raise `ToolAdmissionRefused`, an `AbortedError`
 subclass, so every abort fence still halts model and tool effects. The fatal
@@ -251,8 +304,15 @@ or the last complete tool result — and resending that exact request. Nothing
 synthetic is appended to model context; the unfinished tail (prose, reasoning,
 unverified tool arguments) is regenerated. Live retries leave `messages`
 untouched, so the resend is byte-identical and reuses the provider prompt cache
-written by the interrupted request; resume replays the retained checkpoint in
-the same canonical form as settled history. A tool call interrupted after
+written by the interrupted request. A resume (Continue, checkpoint resume,
+guidance answer) restores the interrupted attempt's checkpointed working view,
+rewound to the same boundary, before any context is composed, so the resent
+request keeps every context carrier, steer and tool result in place and only
+genuinely changed context is appended at the resume point; the retained rounds
+settled after that boundary replay in the same canonical form as settled
+history. Without a valid checkpoint the resume restores the storage-validated
+completed prefix and replays the retained checkpoint rounds
+([details](../CONTEXT_COMPACTION.md#continuation-checkpoints)). A tool call interrupted after
 entry is closed with its effect receipt (see
 [tool effect recovery](TOOL_EFFECT_RECOVERY.md)), never re-executed blindly.
 The cost is regenerating the cut output tokens.
@@ -490,6 +550,34 @@ user Stop. The session is durably restart-paused rather than terminated, and
 cooperative child cancellation does not publish a terminal cancellation or end
 a retained assignment. Startup alone does not authorize execution.
 
+Restart recovery is the same cause seen from the executor's side. A stale-attempt
+fence reads the Turn's settlement before it stamps the task:
+`server_restart` stamps `restart_recovery`, which gets the same interrupted
+`system_recovery` verdict. A Stop recorded elsewhere stamps
+`attempt_stopped_by_user`, which keeps the user_abort reading. Anything else,
+such as a newer attempt, keeps the failed fence stamp. Both storage authorities
+settle restart-recovered Turns with `system_recovery` evidence. The fatal path
+builds a revoked or system-stopped delivery's envelope from the stamp
+(`storage_fence`, or the dispatch-authority kinds), never from the exception
+class, which reads every cancelled or revoked delivery as `aborted` ("Stopped
+by user"). A command killed by a system stop says who stopped it
+(`[Command interrupted by server restart]`). Project Brain boot recovery leaves
+restart-paused work items active for their resumed attempt.
+
+Problem: on 2026-11-06, the D1 backstop kills were persisted as "Stopped by
+user", restart settlements carried `evidence=user_abort`, and paused lanes
+reported that their commands had been aborted by a user. A consumer that reads
+an owner Stop delivered early, and 18 resumed lanes' work items were closed as
+cancelled. Decision: the abort site stamps the cause, and `derive_turn_verdict`
+maps it next to `server_shutdown`. Delivery reads the same verdict (the
+representation from the restart publication fix). Alternatives rejected: a
+second cause field beside `_abort_reason`; reclassifying `EventDeliveryRevoked`
+globally (the class alone cannot say who revoked the lane); mapping the
+conversation-wide `superseded_by_new_task` stamp, which the HTTP
+abort-by-conversation route also plants for a real Stop. Guards:
+`tests/tasks_pkg/test_system_abort_cause.py` and the SQL restart-recovery
+contract test.
+
 Problem: the settlement drain of an attempt interrupted by that shutdown ran
 project-dispatch recovery and queued/background dispatch at once, so the
 stopping process started a Worker Continue that nothing quiesced; it ran until
@@ -501,6 +589,28 @@ through its startup queue drain. Alternatives rejected: quiescing successors
 again re-creates the same race one step later; a process-wide shutdown flag adds
 state that a task-scoped cause already carries. Guard:
 `test_shutdown_interrupted_settlement_leaves_successors_to_startup_recovery`.
+
+Problem: the shutdown quiesce also kills a paused lane's handed-off commands,
+and each completion woke its conversation in the stopping process (2026-11-06
+14:10:52, lane 27ce29e9). The wake resumed the Worker's settled Turn under its
+deterministic task identity while the aborted carrier was still finalizing.
+The agent executor refused the duplicate job only after the new attempt had
+become the Turn's current one, and that refusal settled the Turn failed.
+Restart recovery skips failed Turns, so the lane ended. Decision: the
+background-completion wake starts no successor for a conversation that has a
+carrier paused by this server's shutdown. A trusted start whose task identity
+this process still schedules (a registered carrier has not exited, or the
+executor still holds its job) is refused as `lane_busy` before any durable
+write. Dispatch defers it, and the next maintenance tick starts the
+continuation after the predecessor has exited. Chat task registration never
+replaces a live carrier of the same identity, so the predecessor's task row is
+never rewritten. Only the task-recovery owner rebuilds collective background
+wakes on the maintenance tick, as at boot: a personal API host sees neither
+the execution host's commands nor its carriers. Alternatives rejected: waiting
+inside the wake for the previous carrier blocks a command thread without a
+bound; treating the executor's refusal as a deferral still leaves an accepted
+attempt that has to be unwound; a process-wide shutdown flag (as above).
+Guard: `tests/background/test_restart_duplicate_start.py`.
 
 For a Project-dispatch Worker, the already-authorized grant is the resume
 authority: startup recovery accepts an existing execution only when its attempt

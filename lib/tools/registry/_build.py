@@ -1155,18 +1155,16 @@ def build_builtin_specs() -> list[ToolSpec]:
                  category='project', description='Zoom/rotate/crop image viewer',
                  gate='常开（无需项目）'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
-                 compatibility_tools=frozenset({'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'check_background_command', 'kill_background_command', 'grep_search'}),
+                 compatibility_tools=frozenset({'apply_diff', 'apply_diffs', 'check_background_command', 'kill_background_command', 'grep_search'}),
                  provides=frozenset({
                      'search_files', 'grep_search', 'find_files',
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
-                     'insert_content', 'insert_contents',
                      'run_command',
                      'check_background_command', 'kill_background_command',
                      'repo_map',
                  }),
                  write_tools=frozenset({
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
-                     'insert_content', 'insert_contents',
                      'run_command', 'kill_background_command',
                  }),
                  idempotent_tools=frozenset({
@@ -1187,14 +1185,12 @@ def build_builtin_specs() -> list[ToolSpec]:
                          'locate filenames glob config files 查找文件 配置文件'),
                      'write_file': 'create overwrite save file 写入 保存文件',
                      'edit_file': (
-                         'edit insert before after replace patch source code '
+                         'edit insert add replace patch source code '
                          '修改代码 插入内容 替换'),
                      'apply_diff': (
                          'edit change modify fix implementation source code '
                          '修改代码 修复实现'),
                      'apply_diffs': 'edit modify fix several files 批量修改代码',
-                     'insert_content': 'insert append text into file 插入内容',
-                     'insert_contents': 'insert append several files 批量插入',
                      'run_command': 'shell terminal execute command 运行命令',
                      'check_background_command': (
                          'check background command output status 后台命令状态'),
@@ -1510,7 +1506,9 @@ def build_builtin_specs() -> list[ToolSpec]:
         ToolSpec('swarm', _build_swarm, phase='capability',
                  compatibility_tools=frozenset({'await_agents'}),
                  contextual_tools=frozenset({'store_artifact', 'read_artifact', 'list_artifacts'}),
-                 discovery_policy_by_name={name: 'searchable' for name in ('send_agent_message', 'get_agent_messages', 'set_approval_delegate')},
+                 discovery_policy_by_name={name: 'searchable' for name in (
+                     'get_agent_result', 'send_agent_message',
+                     'get_agent_messages', 'set_approval_delegate')},
                  # Sub-agents and approval delegates register in, and report
                  # into, a saved conversation; the handlers refuse a stray
                  # spawn_agents call as well.
@@ -1539,6 +1537,9 @@ def build_builtin_specs() -> list[ToolSpec]:
                  }),
                  write_tools=frozenset({'send_agent_message'}),
                  search_hints={
+                     'get_agent_result': (
+                         'recover completed subagent results reread earlier wave '
+                         '重新读取子代理结果 恢复历史结果'),
                      'send_agent_message': 'send message running child subagent steer context 给子agent发消息 补充指令',
                      'get_agent_messages': 'child message input receipt delivery confirmation 子agent 消息 回执',
                  },

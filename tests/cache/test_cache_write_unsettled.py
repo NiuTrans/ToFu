@@ -1,40 +1,15 @@
 #!/usr/bin/env python3
-"""Cache WRITE-VISIBILITY (cold-write) settle + detector attribution suite.
+"""Opt-in cold-write settle gate (lib/llm_dispatch/cache_settle.py) timing suite.
 
-BACKGROUND (LIVE evidence, gathered this turn via real gateway probes — see the
-JOURNAL entry):
-  A freshly-WRITTEN Anthropic cache entry is not readable for ~15–20s after the
-  write (the documented anthropic-sdk-python #1451 write-visibility race). In a
-  fast tool loop the next round fires ~8s later — INSIDE that window — so it
-  misses and re-writes the whole prefix, and cache_read pins at the static
-  floor until the loop slows enough for the write to settle. Measured live:
-    • resend identical COLD prefix every 4s → miss at t=3s, miss at t=10s,
-      HIT at t≈16s;
-    • settle sweep (cold write → wait S → continue) → MISS at S≤14s, HIT at S≥17s.
-  The strip/thinking hypotheses were FALSIFIED first: sending an identical
-  tool-loop body (with a signed thinking block in history) twice read the FULL
-  prefix back on the 2nd send (cache_read == the whole prefix), so thinking
-  blocks ARE cached in a pure tool_result loop.
+The gate is off by default (TOFU_CACHE_SETTLE / TOFU_CACHE_SETTLE_COLD). These cases pin
+its windows, caps and first-request behaviour when an owner enables it.
 
-THE DEFECT:
-  lib/llm_dispatch/cache_settle.py already implements the settle gate and is
-  wired into dispatch (api.py), BUT its window is 1500ms / cap 4000ms — ~10x
-  too short to bridge the measured ~15–20s cold-write latency. On an 8s-gap
-  loop elapsed(8s) > window(1.5s) → it waits ZERO and never helps.
-
-THE FIX under test:
-  A. cache_settle gains a COLD-WRITE-AWARE window. record_stream_end learns
-     whether the finishing round was a COLD WRITE (large cache_write, ~0 read —
-     the entry that actually needs time to become visible). Only THEN does the
-     next same-conv send wait the long cold window (default 18000ms, capped at
-     20000ms). A warm round (prefix already cached / merely extended) keeps the
-     original short window so tool-loop throughput is not crippled. Env knobs:
-     TOFU_CACHE_SETTLE_COLD_MS / TOFU_CACHE_SETTLE_COLD_MAX_MS.
-  B. detect_cache_break names an in-window floor-miss cache_write_unsettled
-     (its own bucket) instead of laundering it into upstream_identical /
-     body_change: a byte-identical, same-routing read-collapse that arrives
-     within the cold-write settle window since this conv's prior COLD write is
-     the visibility race, NOT a server fault.
+Its premise, a ~15-20 s write-visibility window after a cold write, was refuted on
+2026-11-08: after a cold write the next round's read rate falls with the gap instead of
+recovering past the window, and single writes probed again at +150 s were not read. The
+detector therefore no longer names ``cache_write_unsettled``; that attribution lives in
+tests/cache/test_cache_sequential_cold_write_attribution.py and
+docs/LLM_COST_OPTIMIZATION.md ("Cache-break attribution corrections").
 
 Run DIRECTLY (env-guarded):
     PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python tests/cache/test_cache_write_unsettled.py
@@ -189,112 +164,6 @@ def test_observed_miss_gated_with_cold_window(spy_sleep):
     waited = cs.settle_before_send('convCold', OBSERVED_MISS, now=1000.5)
     assert 17.0 <= waited <= 18.0
     assert len(spy_sleep) == 1
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Part B — detector: name the in-window floor-miss cache_write_unsettled
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _identical_body():
-    from lib.tasks_pkg.wire_fingerprint import (
-        canonical_messages, static_prefix_hash, wire_byte_prefix,
-    )
-    msgs = [{'role': 'system', 'content': 'STATIC SYSTEM'},
-            {'role': 'user', 'content': 'hello'},
-            {'role': 'assistant', 'content': 'hi there'}]
-    return (msgs, canonical_messages(msgs), static_prefix_hash(msgs),
-            wire_byte_prefix(msgs))
-
-
-def test_detector_names_write_unsettled_not_upstream():
-    """★ CORE (B). Body byte-identical, routing identical, the read collapsed,
-    the previous round was a COLD WRITE and this round arrived within the
-    cold-write settle window → the miss must be NAMED cache_write_unsettled,
-    NEVER laundered into upstream_identical / server_side."""
-    from lib.tasks_pkg.cache_tracking._state import _cache_states
-    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-    from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
-
-    _cache_states.clear()
-    conv = 'writeunsettled'
-    msgs, fp, st, wb = _identical_body()
-    r_same = routing_fingerprint(key_hash='keyAAA',
-                                 anthropic_beta='prompt-caching-2024',
-                                 endpoint='https://gw/claude/messages')
-    # R1: a COLD WRITE (large write, ~0 read).
-    u1 = {'cache_read_tokens': 0, 'cache_creation_input_tokens': 120000,
-          '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
-          '_wire_routing': dict(r_same)}
-    # R2: byte-identical prefix, arriving only ~8s later (within the window),
-    # read collapsed to zero while re-writing the whole prefix (the exact live
-    # probe signature: cold write then a fast follow-up misses entirely).
-    u2 = {'cache_read_tokens': 0, 'cache_creation_input_tokens': 120000,
-          '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
-          '_wire_routing': dict(r_same), '_prev_cold_write_gap_s': 8.0}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
-    assert r is not None, 'expected a break (read collapsed after a cold write)'
-    assert 'cache_write_unsettled' in r, (
-        f'a byte-identical read-collapse within the cold-write settle window '
-        f'must be named cache_write_unsettled — got: {r}')
-    assert 'server_side' not in r, f'must NOT enter server_side: {r}'
-    import json
-    blob = json.dumps(r).lower()
-    assert 'visib' in blob or 'settle' in blob or 'not yet visible' in blob, (
-        f'the verdict must name the write-visibility race: {r}')
-    # Structured sibling fields for the parameterized frontend rendering
-    # (finish_info.js _cacheBreakReason) — the string cause above is retained,
-    # these numbers let the zh/en UI interpolate instead of substring-matching
-    # dynamic digits.
-    assert r.get('cold_gap_s') == 8.0, f'cold_gap_s must be structured: {r}'
-    assert isinstance(r.get('gap_s'), float), f'gap_s must be a float: {r}'
-    assert r.get('read') == 0, f'read must be structured: {r}'
-    assert r.get('prev_read') == 0, f'prev_read must be structured: {r}'
-
-
-def test_detector_NEUTER_without_cold_gap_launders_to_upstream():
-    """NEUTER control — proves the cold-gap signal is load-bearing. The SAME
-    collapse, but WITHOUT the _prev_cold_write_gap_s marker (prior round was not
-    a cold write, or the gap is unknown) → the miss launders back into the
-    byte-identical upstream verdict and cache_write_unsettled is never named."""
-    from lib.tasks_pkg.cache_tracking._state import _cache_states
-    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
-    from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
-
-    _cache_states.clear()
-    conv = 'writeunsettled-neuter'
-    msgs, fp, st, wb = _identical_body()
-    r_same = routing_fingerprint(key_hash='keyAAA',
-                                 anthropic_beta='prompt-caching-2024',
-                                 endpoint='https://gw/claude/messages')
-    u1 = {'cache_read_tokens': 260000, 'cache_creation_input_tokens': 8000,
-          '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
-          '_wire_routing': dict(r_same)}
-    # No _prev_cold_write_gap_s marker → detector can't see the race.
-    u2 = {'cache_read_tokens': 79615, 'cache_creation_input_tokens': 190000,
-          '_wire_fp': fp, '_wire_static': st, '_wire_bytes': wb,
-          '_wire_routing': dict(r_same)}
-    detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u1), user_id=1)
-    r = detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=dict(u2), user_id=1)
-    assert r is not None
-    assert 'cache_write_unsettled' not in r, (
-        f'NEUTER: without the cold-gap marker the write-visibility race MUST '
-        f'NOT be named (this is exactly the blind spot the marker closes) — got: {r}')
-    import json
-    blob = json.dumps(r).lower()
-    assert 'upstream cache miss' in blob, (
-        f'NEUTER: without the cold-gap marker the miss launders to the '
-        f'byte-identical upstream verdict — got: {r}')
-
-
-def test_classify_verdict_maps_write_unsettled_bucket():
-    """The single-source bucketer maps the new verdict key to its own bucket so
-    live records + offline replay count it identically (never as upstream)."""
-    from lib.tasks_pkg.cache_tracking._detect import (
-        BUCKET_WRITE_UNSETTLED, classify_verdict,
-    )
-    assert classify_verdict(
-        {'cache_write_unsettled': 'x'}) == BUCKET_WRITE_UNSETTLED
 
 
 if __name__ == '__main__':

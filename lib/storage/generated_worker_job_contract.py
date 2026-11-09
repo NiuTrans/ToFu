@@ -5,6 +5,7 @@ WORKER_JOB_STATES = frozenset(['queued', 'running', 'suspended', 'succeeded', 'f
 WORKER_TERMINAL_STATES = frozenset(['succeeded', 'failed', 'cancelled'])
 WORKER_JOB_MAX_CLOCK_MS = 9223372036854775000
 WORKER_LEASE_MAX_NOW_MS = 9223372036854475000
+WORKER_PROCESS_OWNER_PREFIX = 'tofu.worker-process/v1:'
 WORKER_LEASE_MAX_MS = 300000
 WORKER_LEASE_EPOCH_CHARACTERS = 32
 WORKER_SERVER_CLOCK_FORMAT = 'tofu.worker-lease-clock/v1'

@@ -38,7 +38,7 @@ from lib.tasks_pkg.segments import (
     tool_use_segment_from_round,
 )
 from lib.swarm.presentation_budget import swarm_snapshot_for_browser
-from lib.storage.storage_projection import trim_tool_round_for_persist
+from lib.task_replay.persistence_projection import trim_tool_round_for_persist
 from lib.tool_results.tool_round_identity import execution_identity, execution_llm_round
 from lib.turn_image_transport import (
     MAX_TURN_IMAGES,

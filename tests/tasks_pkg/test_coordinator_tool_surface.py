@@ -75,18 +75,27 @@ def test_default_routed_wire_exposes_core_on_new_turns_and_retries(coordinator):
 
 
 @pytest.mark.parametrize('search_mode', ['off', 'local', 'native'])
-def test_discovery_budget_and_replayed_visibility_cannot_hide_role_tools(coordinator, search_mode):
+def test_discovery_budget_and_replayed_visibility_cannot_hide_the_role_core(coordinator, search_mode):
+    """Only the usage-derived core is protected (docs/LLM_COST_OPTIMIZATION.md section 6).
+
+    An explicit schema budget or a narrower replayed visibility may leave the
+    role's other tools off the wire; they stay executable by exact name.
+    """
+    from lib.tasks_pkg.coordinator_policy import COORDINATOR_DIRECT_TOOLS
+    from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
+
     task, _ = coordinator
     tools = assemble(task, tools={'toolSearch': search_mode, 'schemaBudgetTokens': 1},
                      _toolInitialVisibleNames=['get_conversation'])
     expected = names(task['_executable_tool_catalog'])
     assert expected == COORDINATOR_TOOLS - {'search_tools', 'execute_tools'}
-    assert expected <= names(task['_tool_schema'])
-    assert expected == set(task['_requiredDirectToolNames'])
+    assert COORDINATOR_DIRECT_TOOLS <= names(task['_tool_schema'])
+    assert COORDINATOR_DIRECT_TOOLS == set(task['_requiredDirectToolNames'])
     assert set(task['_toolDiscoveryPolicyByName'].values()) == {'eager'}
     body = wire(task, tools)
-    assert expected <= names(body['tools'])
+    assert COORDINATOR_DIRECT_TOOLS <= names(body['tools'])
     assert names(body['tools']) <= COORDINATOR_TOOLS
+    assert expected <= _known_tool_names(task)
 
 
 @pytest.mark.parametrize('selection', [
@@ -207,3 +216,15 @@ def test_role_visibility_never_restores_empty_or_failed_authority(coordinator, m
     assert not assemble(task, expected_available=False, **config)
     assert not task['_executable_tool_catalog']
     assert not task['_requiredDirectToolNames']
+
+
+def test_partial_result_recovery_is_callable_by_the_role(coordinator):
+    """An oversized result is a partial envelope whose recovery names read_tool_artifact."""
+    from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
+
+    task, _ = coordinator
+    tools = assemble(task)
+    readers = {'read_tool_artifact', 'search_tool_artifact'}
+    assert readers <= names(task['_executable_tool_catalog'])
+    assert readers <= names(wire(task, tools)['tools'])
+    assert all(coordinator_call_rejection(task, name, {}) is None for name in readers)

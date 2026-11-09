@@ -2,13 +2,16 @@
 """Inventory and conservatively reclaim merged Git branches and worktree debris.
 
 Entry point: ``python3 scripts/git_hygiene.py --repo MAIN_CHECKOUT``. Standard
-library only; every Git call runs with ``GIT_OPTIONAL_LOCKS=0`` and without
-ambient ``GIT_*`` routing variables.
+library plus ``serverctl_pkg.local_placement`` (itself standard library only);
+every Git call runs with ``GIT_OPTIONAL_LOCKS=0`` and without ambient ``GIT_*``
+routing variables.
 
 The default run is read-only. It reports registered worktrees, unregistered
-integration-pool directories, local branches classified against HEAD and every
-``--also-merged-into`` revision (ancestor-merged, patch-equivalent or
-unmerged), and per-namespace ``refs/tofu/*`` counts.
+integration-pool directories (under the data root's pool and under every local
+placement root task checkouts of that data root may use), local branches
+classified against HEAD and every ``--also-merged-into`` revision
+(ancestor-merged, patch-equivalent or unmerged), and per-namespace
+``refs/tofu/*`` counts.
 
 ``--apply`` first writes a restore manifest to ``data/git-hygiene/<UTC>.json``
 and prints the restore command. It then deletes only:
@@ -43,6 +46,11 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from serverctl_pkg.local_placement import local_workspace_roots  # noqa: E402
 
 FORMAT = 'tofu.git-hygiene/v1'
 GIT_TIMEOUT_SECONDS = 900
@@ -305,11 +313,24 @@ def _classify_pool_directory(path: Path) -> dict:
             'modifiedAt': _iso(modified)}
 
 
-def _pool_directories(top: Path, pool_root: Path, registered: set[str]) -> dict:
+def _pool_roots(pool_dir: str | None, top: Path) -> list[Path]:
+    """Every root integration_control may have put this data root's checkouts under.
+
+    The data root's pool (``--pool-dir``, by default <repo>/data/integration/worktrees)
+    and the local placement roots of that same data root.
+    """
+    data_pool = Path(pool_dir).resolve() if pool_dir else top / 'data' / 'integration' / 'worktrees'
+    return list(dict.fromkeys([data_pool, *local_workspace_roots(data_pool.parent.parent)]))
+
+
+def _pool_directories(top: Path, pool_roots: list[Path], registered: set[str]) -> dict:
     # Same key as integration_control: sha256 of the canonical checkout path.
-    base = pool_root / hashlib.sha256(str(top).encode('utf-8')).hexdigest()[:12]
+    key = hashlib.sha256(str(top).encode('utf-8')).hexdigest()[:12]
+    bases = [pool_root / key for pool_root in pool_roots]
     items = []
-    if base.is_dir() and not base.is_symlink():
+    for base in bases:
+        if not base.is_dir() or base.is_symlink():
+            continue
         for owner in sorted(base.iterdir()):
             if owner.is_symlink() or not owner.is_dir():
                 continue
@@ -318,7 +339,7 @@ def _pool_directories(top: Path, pool_root: Path, registered: set[str]) -> dict:
                         or os.path.realpath(candidate) in registered):
                     continue
                 items.append(_classify_pool_directory(candidate))
-    return {'root': str(base), 'items': items}
+    return {'roots': [str(base) for base in bases], 'items': items}
 
 
 # ── Branch classification ────────────────────────────────────────────────
@@ -591,8 +612,7 @@ def inventory(repo: str, also_merged_into: list[str], pool_dir: str | None,
         item['headReachable'] = bool(item['head']) and item['head'] not in unreachable
         item['removable'] = include_worktrees and _removable(item)
     registered = {os.path.realpath(item['path']) for item in raw_worktrees}
-    pool = _pool_directories(top, Path(pool_dir).resolve() if pool_dir
-                             else top / 'data' / 'integration' / 'worktrees', registered)
+    pool = _pool_directories(top, _pool_roots(pool_dir, top), registered)
     report = {
         'format': FORMAT,
         'repository': str(top),
@@ -850,8 +870,8 @@ def _render(report: dict) -> str:
                  f'HEAD unreachable from kept refs {worktrees["headUnreachable"]}; '
                  f'clean+idle+reachable {worktrees["cleanIdleReachable"]}; '
                  f'removable with --remove-clean-worktrees {worktrees["removable"]}')
-    lines.append(f'Integration pool {pool["root"]}: unregistered {pool["unregistered"]}, '
-                 f'rebuildable-only {pool["rebuildableOnly"]}')
+    lines.append(f'Integration pools {", ".join(pool["roots"])}: unregistered '
+                 f'{pool["unregistered"]}, rebuildable-only {pool["rebuildableOnly"]}')
     lines.append('refs/tofu (report only): ' + ('; '.join(
         f'{name[len("refs/tofu/"):]} {entry["count"]} [{(entry["oldest"] or "?")[:10]} .. '
         f'{(entry["newest"] or "?")[:10]}]' for name, entry in report['tofuRefs'].items()) or 'none'))
@@ -881,8 +901,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--repo', required=True, help='main worktree of the repository')
     parser.add_argument('--also-merged-into', action='append', default=[], metavar='REV',
                         help='also treat branches merged into REV as merged (repeatable)')
-    parser.add_argument('--pool-dir', help='integration worktree pool '
-                        '(default: <repo>/data/integration/worktrees)')
+    parser.add_argument('--pool-dir', help='integration worktree pool of the data root '
+                        '(default: <repo>/data/integration/worktrees); that data root\'s '
+                        'local placement roots are always scanned too')
     parser.add_argument('--apply', action='store_true',
                         help='write a restore manifest, then delete the plan (default: dry run)')
     parser.add_argument('--remove-clean-worktrees', action='store_true',

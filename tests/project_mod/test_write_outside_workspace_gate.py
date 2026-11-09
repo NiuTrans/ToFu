@@ -51,7 +51,6 @@ from lib.project_mod.write_tools import (
     drain_root_added_signals,
     tool_apply_diffs,
     tool_edit_file,
-    tool_insert_contents,
     tool_write_file,
 )
 
@@ -341,17 +340,6 @@ class MetaStampTest(_Base):
         self.assertIn('outside every registered workspace root',
                       summary['detail'])
 
-    def test_insert_contents_failure_stamps_structured_refusal(self):
-        from lib.tools.meta import build_project_tool_meta
-        target = os.path.join(self._sibling, 'mod.py')
-        args = {'edits': [{'path': target, 'anchor': 'a', 'content': 'b'}]}
-        content = tool_insert_contents(self._proj, args['edits'],
-                                       conv_id='c1', task_id='t1')
-        meta = build_project_tool_meta('insert_contents', args, content)
-        self.assertEqual(meta['refusal']['kind'], 'outside_workspace')
-        self.assertEqual(meta['refusal']['paths'], [target])
-        self.assertIs(meta['editSummaries'][0].get('outsideWorkspace'), True)
-
     def test_ordinary_failure_stamps_no_refusal(self):
         from lib.tools.meta import build_project_tool_meta
         args = {'edits': [{'path': 'a.py', 'operation': 'replace',
@@ -363,11 +351,10 @@ class MetaStampTest(_Base):
         self.assertNotIn('outsideWorkspace', meta['editSummaries'][0])
 
 class WireSchemaTest(unittest.TestCase):
-    def test_all_six_write_schemas_expose_the_flag(self):
+    def test_all_four_write_schemas_expose_the_flag(self):
         from lib.tools import project as P
         for name in ('PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_APPLY_DIFF',
-                     'PROJECT_TOOL_APPLY_DIFFS', 'PROJECT_TOOL_INSERT_CONTENT',
-                     'PROJECT_TOOL_INSERT_CONTENTS', 'PROJECT_TOOL_EDIT_FILE'):
+                     'PROJECT_TOOL_APPLY_DIFFS', 'PROJECT_TOOL_EDIT_FILE'):
             props = getattr(P, name)['function']['parameters']['properties']
             self.assertIn('allow_outside_workspace', props, name)
             self.assertEqual(props['allow_outside_workspace']['type'], 'boolean', name)

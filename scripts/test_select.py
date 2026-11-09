@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +24,7 @@ TESTS_DIR = os.path.join(ROOT, 'tests')
 CACHE_PATH = os.path.join(ROOT, '.tofu', 'test_select_index.json')
 
 _REPO_MODULE_ROOTS = ('lib', 'routes', 'tests')
+UNKNOWN_PLUGIN_INPUT = '::pytest_plugins:unknown'
 
 _LITERAL_REF_RE = re.compile(
     r"""(?x)['"`]((?:frontend/src|static/vite|lib|routes|docs|scripts|tests|contracts|\.github)/[\w.\-]+(?:/[\w.\-]+)*\.(?:js|mjs|ts|py|md|json|yaml|yml|toml))['"`]""")
@@ -37,14 +39,14 @@ BLAST_RADIUS = {
     'tests/_jsdom_harness.js': 'test_frontend_',
     'tests/_runtime_sections.py': 'test_frontend_',
     'pyproject.toml': 'ALL',
-    'Makefile': 'ALL',
-    'scripts/test_select.py': 'ALL',
+    'scripts/test_execution.py': 'ALL',
     'frontend/src/api/transport.ts': 'test_frontend_',
     'lib/vite_assets.py': 'test_frontend_',
 }
 
-# Cross-cutting guards that always run — cheap (seconds), and they are the
-# net for indirect edges the static index cannot see.
+# Cross-cutting guards the inner loop always runs. Landing verification skips a
+# recorded guard only when its whole run was observed and none of its
+# dependencies changed; a guard that starts other programs always runs.
 GUARD_CORE_BASENAMES = (
     'test_frontend_backend_contract.py',
     'test_frontend_api_contract.py',
@@ -55,7 +57,15 @@ GUARD_CORE_BASENAMES = (
     'test_jsdom_runner_structured.py',
 )
 
-_RUN_ALL_FRACTION = 0.40
+# Execution inputs are separate from selection implementation. Legacy selectors
+# without this declaration retain their whole-file execution dependency.
+EXECUTION_POLICY = 'scripts/test_execution.py'
+_execution_spec = importlib.util.spec_from_file_location(
+    '_tofu_test_execution', os.path.join(os.path.dirname(__file__), 'test_execution.py'))
+_execution = importlib.util.module_from_spec(_execution_spec)
+_execution_spec.loader.exec_module(_execution)
+build_pytest_command = _execution.build_pytest_command
+_parallel_workers = _execution._parallel_workers
 
 
 # ─── Index (pure) ──────────────────────────────────────────────────────
@@ -69,6 +79,44 @@ def _module_to_path_candidates(module: str) -> list[str]:
     return [f'{base}.py', f'{base}/__init__.py']
 
 
+def _import_statements(tree):
+    """Visit statement containers; expression payloads cannot contain imports."""
+    pending = [tree]
+    containers = (ast.stmt, ast.ExceptHandler, ast.match_case)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        else:
+            pending.extend(child for child in ast.iter_child_nodes(node)
+                           if isinstance(child, containers))
+
+
+def _plugin_modules(tree):
+    """Literal pytest plugin imports; None means unknown Python dependencies."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == 'pytest_plugins'
+                   for target in targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError):
+            yield None
+            continue
+        if isinstance(value, str):
+            value = value.split(',')
+        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+            yield None
+        else:
+            yield from value
+
+
 def refs_of_test_file(source: str) -> set[str]:
     """Extract the repo files a test file can SEE: AST imports of in-repo
     modules + literal repo-path references. Pure — no resolution, so a
@@ -80,7 +128,14 @@ def refs_of_test_file(source: str) -> set[str]:
     except SyntaxError:
         tree = None
     if tree is not None:
+        for plugin in _plugin_modules(tree):
+            refs.update(_module_to_path_candidates(plugin) if plugin is not None
+                        else (UNKNOWN_PLUGIN_INPUT,))
         for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                command = node.value.split()
+                if node.value == 'Makefile' or (command and command[0] in ('make', 'gmake')):
+                    refs.add('Makefile')
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     refs.update(_module_to_path_candidates(alias.name))
@@ -90,6 +145,55 @@ def refs_of_test_file(source: str) -> set[str]:
                     refs.update(_module_to_path_candidates(f'{node.module}.{alias.name}'))
     refs.update(_LITERAL_REF_RE.findall(source))
     return refs
+
+
+def source_references(source: str, path: str, *, tree=None) -> set[str]:
+    """Static inputs of any Python owner, including relative imports and parents.
+
+    Keep absent candidates: deleted modules still affect their importers. No
+    imports execute, and external modules simply have no in-repository edges.
+    """
+    refs = set()
+    if tree is None:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return refs
+
+    def module(parts):
+        if not parts:
+            return
+        name = '/'.join(parts)
+        refs.update((name + '.py', name + '/__init__.py'))
+        refs.update('/'.join(parts[:end]) + '/__init__.py' for end in range(1, len(parts)))
+
+    package = path.split('/')[:-1]
+    for plugin in _plugin_modules(tree):
+        if plugin is None:
+            refs.add(UNKNOWN_PLUGIN_INPUT)
+        else:
+            module(plugin.split('.'))
+    for node in _import_statements(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module(alias.name.split('.'))
+        elif isinstance(node, ast.ImportFrom):
+            prefix = package[:len(package) - node.level + 1] if node.level else []
+            parts = prefix + (node.module.split('.') if node.module else [])
+            module(parts)
+            for alias in node.names:
+                if alias.name != '*':
+                    module(parts + alias.name.split('.'))
+    return refs
+
+
+def expand_dependencies(root, tree, changed, cache_path):
+    """Opt this repository into cached import and declared-fixture selection."""
+    from types import SimpleNamespace
+    from lib.project_mod.verification_dependencies import expand_changes
+    policy = SimpleNamespace(__file__=__file__, source_references=source_references,
+                             UNKNOWN_PLUGIN_INPUT=UNKNOWN_PLUGIN_INPUT)
+    return expand_changes(root, tree, changed, policy, cache_path)
 
 
 def build_index(tests_dir: str = TESTS_DIR, cache_path: str | None = CACHE_PATH) -> dict:
@@ -113,7 +217,7 @@ def build_index(tests_dir: str = TESTS_DIR, cache_path: str | None = CACHE_PATH)
         try:
             with open(cache_path, encoding='utf-8') as fh:
                 saved = json.load(fh)
-            if isinstance(saved, dict) and saved.get('version') == 2:
+            if isinstance(saved, dict) and saved.get('version') == 3:
                 cache = saved.get('index', {})
                 if not isinstance(cache, dict):
                     cache = {}
@@ -140,7 +244,7 @@ def build_index(tests_dir: str = TESTS_DIR, cache_path: str | None = CACHE_PATH)
                                          dir=parent, delete=False) as fh:
             tmp = fh.name
             try:
-                json.dump({'version': 2, 'index': index}, fh)
+                json.dump({'version': 3, 'index': index}, fh)
                 fh.close()
                 os.replace(tmp, cache_path)
             finally:
@@ -164,11 +268,13 @@ def select_tests(index: dict, changed: list[str]):
 
     selected: dict[str, str] = {}
     changed_set = set(changed)
+    if any(path.endswith('.py') for path in changed):
+        changed_set.add(UNKNOWN_PLUGIN_INPUT)
     all_tests = set(index)
 
-    for f in changed_set:
-        if f in all_tests:
-            selected.setdefault(f, 'self')
+    for f in all_tests & changed_set:
+        selected[f] = 'self'
+    for f in sorted(changed_set):
         if f.endswith('/conftest.py'):
             for t in all_tests:
                 if t.startswith(f.rsplit('/', 1)[0] + '/'):
@@ -181,9 +287,10 @@ def select_tests(index: dict, changed: list[str]):
             for t in all_tests:
                 if os.path.basename(t).startswith(blast):
                     selected.setdefault(t, f'blast:{f}')
-        for t, v in index.items():
-            if f in refs_of(v):
-                selected.setdefault(t, 'direct')
+    if changed_set:
+        for test, entry in index.items():
+            if changed_set & refs_of(entry):
+                selected.setdefault(test, 'direct')
 
     for name in GUARD_CORE_BASENAMES:
         matches = [path for path in all_tests if os.path.basename(path) == name]
@@ -214,46 +321,6 @@ def changed_files(base: str | None) -> list[str]:
                              text=True, check=True, timeout=30).stdout
         paths.update(filter(None, out.split('\0')))
     return sorted(paths)
-
-
-def _parallel_workers(existing: list[str] | None,
-                      jobs: str | None) -> str | None:
-    """Return the requested/adaptive xdist worker count, or ``None``.
-
-    A pytest controller and every worker import the full test bootstrap. For a
-    one-file inner loop that startup costs more than the tests, so the implicit
-    default stays serial. Larger selections request ``auto``; the repository's
-    xdist hook then applies the shared resource probe and selected-file cap. An
-    explicit ``--jobs`` remains authoritative.
-    """
-    if jobs is not None:
-        return None if jobs == '0' else jobs
-    if existing is not None and len(existing) <= 1:
-        return None
-    return 'auto'
-
-
-def build_pytest_command(existing: list[str] | None,
-                         jobs: str | None) -> list[str]:
-    """Build the hermetic selected-test command.
-
-    ``main`` disables pytest entry-point autoload to keep host-only plugins out
-    of the inner loop. pyproject.toml explicitly loads xdist and owns the
-    ``worksteal`` scheduler, so this command only selects the worker count.
-    """
-    if existing == []:
-        raise ValueError('empty selection must not launch unscoped pytest')
-    workers = _parallel_workers(existing, jobs)
-    cmd = [sys.executable, '-m', 'pytest', '-p', 'no:napari']
-    if existing is not None:
-        cmd += existing
-    cmd += ['-m', '(unit or api) and not (visual or slow or live_llm)']
-    if workers is not None:
-        cmd += ['-n', workers]
-    cmd += ['--timeout=300', '--tb=short', '-q']
-    return cmd
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base')
@@ -274,11 +341,6 @@ def main(argv: list[str]) -> int:
     selected, reasons = select_tests(index, changed)
     existing = sorted(selected)
     n_all = len(index)
-    if len(existing) > _RUN_ALL_FRACTION * n_all:
-        print(f'[test-select] selection is {len(existing)}/{n_all} suites '
-              f'(>{_RUN_ALL_FRACTION:.0%}) — broadening to all offline unit/API test files')
-        existing = sorted(index)
-        reasons.update({f: reasons.get(f, 'broad') for f in existing})
     print(f'[test-select] changed: {len(changed)} file(s)')
     for f in changed[:12]:
         print(f'  ~ {f}')

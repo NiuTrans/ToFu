@@ -17,22 +17,26 @@ import org.junit.Test
 
 /** Observable gateway contracts: credential destination, cookies, handoff and stale writes. */
 class SessionManagerGatewayTest {
-    @Test fun editing_auth_or_alias_during_password_post_blocks_late_session_promotion() = runTest {
-        for (edit in listOf("auth", "alias", "delete")) {
+    @Test fun editing_auth_alias_or_kind_during_password_post_blocks_late_session_promotion() = runTest {
+        for (edit in listOf("auth", "alias", "delete", "local", "ssh")) {
             lateinit var h: Harness
             h = Harness(profile()) { request ->
                 if (request.method == "POST") {
                     h.dao.row = when (edit) {
                         "auth" -> h.profile.copy(authType = AuthType.NONE)
                         "alias" -> h.profile.copy(alias = "renamed")
+                        "local" -> h.profile.copy(kind = KernelKind.LOCAL)
+                        "ssh" -> h.profile.copy(kind = KernelKind.SSH, ssh = SshEndpoint(host = "ssh.example", user = "me"))
                         else -> null
                     }
                     reply(request, 302, cookie = "code-server-session=late; Path=/dev/")
                 } else if (request.url.encodedPath.endsWith("api/v4/meta")) reply(request, 404)
                 else reply(request, body = """<form class="login-form" method="post"><input type="hidden" name="base" value="."><input type="password" name="password"></form>""")
             }
-            assertTrue(edit, h.manager.login(h.profile) is LoginResult.NeedsInteractiveSso)
+            val outcome = h.manager.login(h.profile)
+            assertTrue("$edit: $outcome", outcome is LoginResult.Error)
             assertTrue(edit, h.dao.stamps.isEmpty())
+            assertTrue("a stale completion cannot inject its cookie", h.cookies.jar.isEmpty())
         }
     }
 
@@ -42,14 +46,15 @@ class SessionManagerGatewayTest {
             h.dao.row = null
             reply(request, body = """<form class="login-form" method="post"><input type="hidden" name="base" value="."><input type="password" name="password"></form>""")
         }
-        assertTrue(h.manager.login(h.profile) is LoginResult.NeedsInteractiveSso)
+        assertTrue(h.manager.login(h.profile) is LoginResult.Error)
         assertFalse(h.requests.any { it.method == "POST" })
+        assertTrue(h.dao.stamps.isEmpty())
     }
 
     private val base = "https://host.example:8443/dev/proxy/15000/"
     private fun profile(auth: AuthType = AuthType.CODE_SERVER_PASSWORD) = Profile(id = 1, alias = "test", baseUrl = base, authType = auth)
 
-    private class Dao(var row: Profile?) : ProfileDao {
+    private class Dao(var row: Profile?) : ProfileDaoFixture {
         val stamps = mutableListOf<String>()
         override fun observeAll(): Flow<List<Profile>> = flowOf(listOfNotNull(row))
         override suspend fun getById(id: Long) = row?.takeIf { it.id == id }
@@ -60,7 +65,8 @@ class SessionManagerGatewayTest {
         override suspend fun deleteById(id: Long) { row = null }
         override suspend fun setCookieHost(id: Long, host: String?): Int { row = row?.copy(cookieHost = host); return 1 }
         override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
-            if (row?.id != id || row?.baseUrl != expectedUrl || row?.alias != expectedAlias || row?.authType != expectedAuthType) return 0
+            if (row?.id != id || row?.kind != KernelKind.REMOTE_URL || row?.baseUrl != expectedUrl ||
+                row?.alias != expectedAlias || row?.authType != expectedAuthType) return 0
             stamps += host; row = row?.copy(cookieHost = host); return 1
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long) = 1
@@ -235,6 +241,28 @@ class SessionManagerGatewayTest {
         val count = h.requests.size
         assertNull(h.manager.resumePasswordSignIn(h.profile, "https://host.example:8443/dev/login"))
         assertEquals(count, h.requests.size)
+    }
+
+    @Test fun browser_password_completion_stamps_the_saved_choice_not_the_display_mode() = runTest {
+        val h = Harness(profile(), secret = null) { req -> reply(req, body = tofuSessionProbeJson()) }
+        val browser = InteractiveSso.profileForWebView(h.profile, LoginResult.NeedsInteractiveSso(base))
+        h.cookies.jar += Cookie.parse(base.toHttpUrl(), "code-server-session=browser; Path=/dev/")!!
+        assertTrue(h.manager.noteInteractiveSignIn(browser, base))
+        assertEquals(AuthType.CODE_SERVER_PASSWORD, h.dao.row!!.authType)
+        assertEquals(listOf("host.example"), h.dao.stamps)
+        assertFalse("browser completion never replays a password", h.requests.any { it.method == "POST" })
+    }
+
+    @Test fun browser_display_mode_cannot_hide_a_saved_auth_or_kind_change_during_verification() = runTest {
+        for (replacement in listOf(profile(AuthType.NONE), profile(AuthType.INTERACTIVE_SSO), profile().copy(kind = KernelKind.SSH))) {
+            lateinit var h: Harness
+            h = Harness(profile()) { req -> h.dao.row = replacement; reply(req, body = tofuSessionProbeJson()) }
+            val browser = InteractiveSso.profileForWebView(h.profile, LoginResult.NeedsInteractiveSso(base))
+            h.cookies.jar += Cookie.parse(base.toHttpUrl(), "code-server-session=browser; Path=/dev/")!!
+            assertFalse(h.manager.noteInteractiveSignIn(browser, base))
+            assertTrue(h.dao.stamps.isEmpty())
+            assertEquals(replacement, h.dao.row)
+        }
     }
 
     @Test fun supervisor_can_verify_the_gateway_while_tofu_is_stopped() = runTest {

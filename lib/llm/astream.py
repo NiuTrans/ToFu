@@ -49,7 +49,6 @@ from lib.llm.llm_errors import (
     REQUEST_REPAIR_ERRORS,
     RateLimitError,
     RetryableAPIError,
-    SubscriptionConnectionError,
     _RETRYABLE,
 )
 from lib.llm.request_repair import RequestRepairState, repair_rejected_request
@@ -110,14 +109,14 @@ async def _abortable_stream_open(context, abort_check, log_prefix: str = ''):
     Register response cleanup before the opening task completes, so Stop or
     caller cancellation racing with headers cannot abandon a socket or POST.
     """
-    if abort_check is None:
-        async with context as opened:
-            yield opened
-        return
-
+    # The header wait is transport silence too: no response headers within the
+    # silent-stream liveness contract raises its typed ``stream_silence``
+    # timeout, so a gateway that buffers headers cannot hold the attempt.
     from lib.llm import _transport as _tp
 
     def check_abort():
+        if abort_check is None:
+            return
         try:
             aborted = abort_check()
         except Exception as exc:
@@ -127,13 +126,22 @@ async def _abortable_stream_open(context, abort_check, log_prefix: str = ''):
             raise AbortedError('Aborted by user')
 
     check_abort()  # A pre-stopped request must not open a connection.
+    silence_deadline = time.monotonic() + _tp.silent_stream_deadline_seconds()
     async with contextlib.AsyncExitStack() as stack:
         opening = asyncio.create_task(stack.enter_async_context(context))
         try:
             while not opening.done():
                 check_abort()
-                await asyncio.wait(
-                    {opening}, timeout=max(0.01, _tp.ABORT_POLL_INTERVAL))
+                remaining = silence_deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        '%s Provider sent no response headers for %.0fs; '
+                        'abandoned the attempt', log_prefix,
+                        _tp.silent_stream_deadline_seconds())
+                    raise _tp.silent_stream_timeout_error()
+                wait = (remaining if abort_check is None
+                        else min(remaining, _tp.ABORT_POLL_INTERVAL))
+                await asyncio.wait({opening}, timeout=max(0.01, wait))
             opened = opening.result()
             check_abort()  # Stop wins a simultaneous header arrival.
             yield opened
@@ -145,88 +153,19 @@ async def _abortable_stream_open(context, abort_check, log_prefix: str = ''):
 
 @contextlib.asynccontextmanager
 async def _open_server_stream(plan, log_prefix: str = ''):
-    """Open response headers over the shared subscription route plan.
-
-    The probe race is synchronous network I/O, so it runs in a worker.  Real
-    requests remain native-httpx and sequential: only a connect-phase error
-    advances to the next route; once headers arrive the response is final.
-    """
-    from lib.proxy import (
-        report_subscription_route,
-        subscription_route_candidates,
-    )
-
+    """Model budgets wrap the shared HTTP transport, including route recovery."""
     from lib.llm.request import mark_model_request_dispatched
 
-    routes = await asyncio.to_thread(subscription_route_candidates, plan.url)
-    if not routes:
-        proxy_url, route_metadata = _resolve_async_route(plan.url)
-        client = get_async_client(proxy_url)
-        started = time.monotonic()
-        try:
-            stream_context = client.stream(
-                'POST', plan.url, headers=plan.hdrs,
-                **transport_body_arguments(plan.body, transport='httpx'))
-            mark_model_request_dispatched(plan)
-            async with stream_context as resp:
-                if not isinstance(getattr(resp, 'extensions', None), dict):
-                    resp.extensions = {}
-                resp.extensions['tofu_network_route'] = route_metadata
-                resp.extensions['tofu_network_latency_ms'] = (
-                    time.monotonic() - started) * 1000.0
-                yield resp, None
-        except (httpx.ConnectTimeout, httpx.ConnectError) as error:
-            _proxy_report_outcome(
-                plan.url, False,
-                pool_id=route_metadata.get('poolId') or '')
-            try:
-                error.network_route = dict(route_metadata)
-                error.failure_stage = 'connect'
-            except Exception as annotate_error:
-                logger.debug('%s generic route annotation failed: %s',
-                             log_prefix, annotate_error)
-            raise
-        return
-
-    attempted = set()
-    for route in routes:
-        attempted.add(route.route_id)
-        client = get_async_client(route.async_proxy_url())
-        stream_context = client.stream(
-            'POST', plan.url, headers=plan.hdrs, **transport_body_arguments(plan.body, transport='httpx'))
-        started = time.monotonic()
-        try:
-            mark_model_request_dispatched(plan)
-            response = await stream_context.__aenter__()
-        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ProxyError) as error:
-            report_subscription_route(plan.url, route, False)
-            logger.info('%s connection failed via %s (%s) — trying next '
-                        'subscription route', log_prefix, route.label, type(error).__name__)
-            known = {item.route_id for item in routes}
-            refreshed = await asyncio.to_thread(
-                subscription_route_candidates, plan.url)
-            for candidate in refreshed:
-                if (candidate.route_id not in attempted
-                        and candidate.route_id not in known):
-                    routes.append(candidate)
-                    known.add(candidate.route_id)
-            continue
+    client = get_async_client(automatic=True)
+    stream_context = client.stream(
+        'POST', plan.url, headers=plan.hdrs,
+        extensions={'tofu_network_scope': getattr(plan, 'network_scope', None)},
+        **transport_body_arguments(plan.body, transport='httpx'))
+    mark_model_request_dispatched(plan)
+    async with stream_context as response:
         if not isinstance(getattr(response, 'extensions', None), dict):
             response.extensions = {}
-        response.extensions['tofu_network_route'] = {
-            'routeId': str(route.route_id)[:160],
-            'routeMode': str(route.mode)[:24],
-            'decisionReason': 'subscription_route_race',
-            **({'poolId': str(route.pool_id)[:160]} if route.pool_id else {}),
-        }
-        response.extensions['tofu_network_latency_ms'] = (
-            time.monotonic() - started) * 1000.0
-        try:
-            yield response, route
-        finally:
-            await stream_context.__aexit__(None, None, None)
-        return
-    raise SubscriptionConnectionError(base_url=plan.url) from None
+        yield response, response.extensions.get('tofu_route')
 
 
 async def async_stream_chat(body, *, on_thinking=None, on_content=None,
@@ -705,6 +644,9 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
                 _adapter_service.note_adapter_quota_observed(
                     adapter.get('agent_id'), user_id=_owner_scope)
             usage['_network_route'] = dict(_network_route)
+            if _network_latency_ms is not None:
+                # Request send -> response headers on the route that answered.
+                usage['_response_headers_ms'] = round(_network_latency_ms)
             stream_state = stream_result.state
             if stream_state is ProviderStreamState.NO_ACTIONABLE_OUTPUT:
                 usage['_failure_stage'] = 'no_actionable_output'

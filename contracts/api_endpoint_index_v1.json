@@ -2392,6 +2392,222 @@
       "handler": "discard_channel_outbox_v1"
     },
     {
+      "method": "GET",
+      "path": "/api/v4/channels/qq",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the QQ bot account: status, owner, pairing code or login code",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "account_qq_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/qq",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable/disable the QQ bot account, set its app ID and secret, pair its owner or start a login",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_account_qq_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/qq/threads",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List QQ threads with their ingress mode and reply policy",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "threads_qq_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/qq/threads/<thread_key>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set a QQ thread's ingress mode or reply policy (null restores the default)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_thread_qq_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/wechat",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the 微信 bot account: status, owner, pairing code or login code",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "account_wechat_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/wechat",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable/disable the 微信 bot account, set its app ID and secret, pair its owner or start a login",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_account_wechat_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/wechat/threads",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List 微信 threads with their ingress mode and reply policy",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "threads_wechat_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/wechat/threads/<thread_key>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set a 微信 thread's ingress mode or reply policy (null restores the default)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_thread_wechat_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/wecom",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the 企业微信 bot account: status, owner, pairing code or login code",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "account_wecom_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/wecom",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Enable/disable the 企业微信 bot account, set its app ID and secret, pair its owner or start a login",
+      "tags": [
+        "channels"
+      ],
+      "scope": "admin",
+      "public": false,
+      "requiredScopes": [
+        "admin"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_account_wecom_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/channels/wecom/threads",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List 企业微信 threads with their ingress mode and reply policy",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "threads_wecom_v1"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v4/channels/wecom/threads/<thread_key>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set a 企业微信 thread's ingress mode or reply policy (null restores the default)",
+      "tags": [
+        "channels"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/channels.py",
+      "handler": "update_thread_wecom_v1"
+    },
+    {
       "method": "POST",
       "path": "/api/v4/chat/abort-conv/<conv_id>",
       "transport": "http",
@@ -6895,6 +7111,182 @@
       "documented": true,
       "owner": "routes/_task_routes.py",
       "handler": "register_task_routes.<locals>._poll"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/myday/goals",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the owner's My Day goals with item states and progress",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goals_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/myday/goals",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Create an owner goal",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v4/myday/goals/<goal_id>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Edit, archive or restore a goal",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_update"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/myday/goals/<goal_id>/decompose",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Run or join the decomposition of a goal into suggested items",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_decompose"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/myday/goals/<goal_id>/items",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Add an owner item to a goal",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_item_add"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v4/myday/goals/<goal_id>/items/<item_id>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Remove an owner item or dismiss a suggestion",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_item_remove"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v4/myday/goals/<goal_id>/items/<item_id>",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set an item status (manual), edit it, accept a suggestion or follow Worker evidence",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_item_update"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v4/myday/goals/<goal_id>/link",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Remove a goal's request mapping",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_unlink"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/myday/goals/<goal_id>/link",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Map a goal to one of the owner's Coordinator requests",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_link"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/myday/goals/<goal_id>/suggestions",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Accept or dismiss every pending suggestion of a goal",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_goal_suggestions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/myday/requests",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "List the owner's recent Coordinator requests a goal can map to",
+      "tags": [
+        "myday"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/api_v1/myday.py",
+      "handler": "myday_requests_read"
     },
     {
       "method": "POST",

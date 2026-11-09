@@ -120,10 +120,10 @@ def test_startup_recovery_records_a_restart_pause_not_a_stop(monkeypatch, stored
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kw: Client())
     monkeypatch.setattr(delivery, 'record_task_workspace_intents',
                         lambda task, root: outcomes.append(delivery.workspace_outcome(task)))
-    assert startup.recover_active_work_items() == 1
+    # The paused work stays active for its resumed attempt (same task identity).
+    assert startup.recover_active_work_items() == 0
     assert outcomes == ['interrupted']
-    # Project Brain keeps its own work statuses.
-    assert finishes[0]['status'] == work_status
+    assert finishes == []
 
 
 def test_result_metadata_persists_the_abort_cause():

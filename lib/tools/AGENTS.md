@@ -9,6 +9,7 @@ Read `docs/modules/tools_execution.md`.
 
 `result_projection_text.py` owns shared exact text framing for model views.
 Verify error reconstruction and artifact/gateway delivery with canonical retention.
+Error-observation recovery tests cover JSON/text framing and application-data isolation.
 Partial-summary framing also verifies observation and launch-snapshot reconstruction,
 program inputs, aggregate budgets and backend restart in the partial-text suites.
 `nonretryable_batch_error` in result_envelope.py shares all-terminal classification;

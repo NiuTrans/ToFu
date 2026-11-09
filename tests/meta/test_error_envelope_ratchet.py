@@ -30,7 +30,8 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # 2026-10-25: the census reads 82; locked in the shrink.
 # 2026-11-02: the census reads 83 after the typed-fault route migration;
 # authored client messages remain, while raw builtin-to-400 handlers are gone.
-PINNED_LEGACY_STRING_ERROR_CALLS = 83
+# 2026-11-08: the census reads 81 after typing the new billing/auth-source faults.
+PINNED_LEGACY_STRING_ERROR_CALLS = 81
 
 
 def _legacy_string_error_calls() -> dict[str, list[int]]:

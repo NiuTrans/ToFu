@@ -135,6 +135,13 @@ class TestPointers:
         item = _item('fp1', 1, 2, 0, sample='[Task bf9d7f8b][R20] broke')
         assert _build([item])['new'][0]['rid'] == 'bf9d7f8b'
 
+    def test_whole_attempt_id_tags_are_extracted(self):
+        attempt = '55f61236-291d-41f2-a573-4aed35636e26'
+        for sample in (f'[Task {attempt}][R20] broke',
+                       f'[{attempt}] conv=worker-1f0e9a2b3c4d5e6f708192a3 broke'):
+            item = _item('fp1', 1, 2, 0, sample=sample)
+            assert _build([item])['new'][0]['rid'] == attempt, sample
+
     def test_grep_hint_stops_at_placeholder(self):
         item = _item('fp1', 1, 2, 0,
                      template='[SyncDrift] STALLED conv=<hex> kind=rev')

@@ -86,6 +86,7 @@ function stateHint(account: ChannelAccountView): string {
     case 'authorizing': return t('settings.dx.hint.authorizing', { mis: account.loginMis ?? '' });
     case 'needs_login': return account.loginMis ? t('settings.dx.hint.needsLogin') : t('settings.dx.hint.needsMis');
     case 'kicked': return t('settings.dx.hint.kicked');
+    case 'runtime_unavailable': return t('settings.dx.hint.runtimeUnavailable');
     default: return '';
   }
 }

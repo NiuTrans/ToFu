@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -230,8 +230,8 @@ def maybe_check_task_log(task: dict) -> None:
             task_id, allow_open_tail=bool(task.get('aborted')))
     except Exception as exc:  # the audit itself must never fail a turn
         logger.warning('[event-invariants] audit failed for task=%s: %s',
-                       task_id[:8], exc)
+                       task_log_tag(task_id), exc)
         return
     for violation in violations:
         logger.error('[event-invariants] task=%s %s: %s',
-                     task_id[:8], violation.rule, violation.detail)
+                     task_log_tag(task_id), violation.rule, violation.detail)

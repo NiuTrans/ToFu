@@ -218,7 +218,7 @@ def _hold_for_warm_sticky_key(state, dispatcher, *, prefer_model, abort_check,
                                 '%s dispatch_stream: holding %.2fs for '
                                 'conv=%s warm key %s (%s) to keep prompt '
                                 'cache warm',
-                                log_prefix, _wait, _conv[:8], _warm_key, _kind)
+                                log_prefix, _wait, _conv, _warm_key, _kind)
                             if abort_check and abort_check():
                                 from lib.llm import AbortedError as _AE
                                 raise _AE('Aborted during warm-key hold')
@@ -513,6 +513,12 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 tag,
                 defer=defer_on_shared_contention,
             )
+        except BaseException:
+            slot.release()
+            raise
+
+        # Only attempt failures enter provider retry and health policy.
+        try:
             t0 = time.time()
             (ttft_value, _on_thinking_wrapper,
              _on_content_wrapper,
@@ -557,42 +563,43 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     **({'first_byte_timeout': first_byte_timeout}
                        if first_byte_timeout is not None else {}),
                 ))
-            if _provider_reported_network_failure(stream_result, msg, finish):
-                _rotate_slot_for_provider_network_failure(
-                    state, slot, log_prefix, max_retries, on_retry,
-                    strict_model, _fire_attempt_restart)
-                continue
-            latency = (time.time() - t0) * 1000
-            _settle_stream_result(
-                slot, usage, latency=latency, ttft=ttft_value[0],
-                state=state, cache_conv_id=_cache_conv_id, tag=tag,
-                dispatcher=dispatcher, stream_result=stream_result,
-                route_snapshot=attempt_observer.route_trace.snapshot())
-            if stream_result.is_verified_complete:
-                state.credential_outage.note_success(slot)
-            state.route_unavailable.note_success(slot)
-            settled_state = stream_result.state.value
-            if state._429_count > 0:
-                logger.info(
-                    '%s dispatch_stream settled after %d 429-retries: '
-                    'state=%s finish_reason=%s model=%s provider=%s '
-                    'latency=%.0fms', log_prefix, state._429_count,
-                    settled_state, finish, slot.model, slot.provider_id,
-                    latency)
-            else:
-                logger.debug(
-                    '%s dispatch_stream settled: state=%s '
-                    'finish_reason=%s model=%s provider=%s '
-                    'latency=%.0fms attempt=%d/%d',
-                    log_prefix, settled_state, finish, slot.model,
-                    slot.provider_id, latency, state.hard_attempts + 1,
-                    max_retries)
-            return stream_result
-
         except BaseException as error:
             retry_delay = failure_policy.handle(error, slot, tag=tag)
             if retry_delay > 0:
                 _sleep_and_record_queue_wait(state, retry_delay, abort_check=abort_check)
+            continue
+
+        if _provider_reported_network_failure(stream_result, msg, finish):
+            _rotate_slot_for_provider_network_failure(
+                state, slot, log_prefix, max_retries, on_retry,
+                strict_model, _fire_attempt_restart)
+            continue
+        latency = (time.time() - t0) * 1000
+        _settle_stream_result(
+            slot, usage, latency=latency, ttft=ttft_value[0],
+            state=state, cache_conv_id=_cache_conv_id, tag=tag,
+            dispatcher=dispatcher, stream_result=stream_result,
+            route_trace=attempt_observer.route_trace)
+        if stream_result.is_verified_complete:
+            state.credential_outage.note_success(slot)
+        state.route_unavailable.note_success(slot)
+        settled_state = stream_result.state.value
+        if state._429_count > 0:
+            logger.info(
+                '%s dispatch_stream settled after %d 429-retries: '
+                'state=%s finish_reason=%s model=%s provider=%s '
+                'latency=%.0fms', log_prefix, state._429_count,
+                settled_state, finish, slot.model, slot.provider_id,
+                latency)
+        else:
+            logger.debug(
+                '%s dispatch_stream settled: state=%s '
+                'finish_reason=%s model=%s provider=%s '
+                'latency=%.0fms attempt=%d/%d',
+                log_prefix, settled_state, finish, slot.model,
+                slot.provider_id, latency, state.hard_attempts + 1,
+                max_retries)
+        return stream_result
 
     _raise_dispatch_exhausted(state.last_err, max_retries=max_retries,
                               capability=capability, prefer_model=prefer_model,
@@ -733,7 +740,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                                     '%s async_dispatch_stream: holding %.2fs '
                                     'for conv=%s warm key %s (%s) to keep '
                                     'prompt cache warm',
-                                    log_prefix, _wait, _conv[:8], _warm_key,
+                                    log_prefix, _wait, _conv, _warm_key,
                                     _kind)
                                 if abort_check and abort_check():
                                     raise AbortedError(
@@ -867,6 +874,12 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 log_prefix=tag,
                 defer=defer_on_shared_contention,
             )
+        except BaseException:
+            slot.release()
+            raise
+
+        # Only attempt failures enter provider retry and health policy.
+        try:
             t0 = time.time()
             (ttft_value, _on_thinking_wrapper, _on_content_wrapper,
              _on_tool_call_ready_wrapper) = _first_output_callbacks(
@@ -890,49 +903,32 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 on_stream_wait=_on_stream_wait,
                 api_protocol=slot.protocol or 'openai',
                 owner_user_id=owner_user_id))
-            if _provider_reported_network_failure(stream_result, msg, finish):
-                # Same provider-signalled transport failure as the sync loop:
-                # bounded non-429 retry, no pair/model exclusion.
-                state.hard_attempts += 1
-                state.last_err = ProviderReportedNetworkError(
-                    'provider stream ended with finish_reason=network_error '
-                    'and zero actionable content')
-                slot.record_error(is_rate_limit=False,
-                                  error='provider network_error')
-                logger.warning(
-                    '%s Provider reported network_error on %s:%s with no '
-                    'actionable content — rotating slot (attempt %d/%d)',
-                    log_prefix, slot.key_name, slot.model,
-                    state.hard_attempts, max_retries)
-                _notify_retry(
-                    on_retry, slot, strict_model=strict_model,
-                    attempt=state.hard_attempts,
-                    reason='Provider network error', status_code=0)
-                _notify_attempt_restart(
-                    on_attempt_restart,
-                    'provider network_error — rotating slot',
-                    log_prefix=log_prefix)
-                continue
-            latency = (time.time() - t0) * 1000
-            _settle_stream_result(
-                slot, usage, latency=latency, ttft=ttft_value[0], state=state,
-                cache_conv_id=_cache_conv_id, tag=tag, dispatcher=dispatcher,
-                stream_result=stream_result,
-                route_snapshot=attempt_observer.route_trace.snapshot())
-            if stream_result.is_verified_complete:
-                state.credential_outage.note_success(slot)
-            state.route_unavailable.note_success(slot)
-            logger.debug('%s async_dispatch_stream settled: state=%s '
-                         'finish=%s model=%s latency=%.0fms', log_prefix,
-                         stream_result.state.value, finish, slot.model, latency)
-            return stream_result
-
         except BaseException as error:
             retry_delay = failure_policy.handle(error, slot, tag=tag)
             if retry_delay > 0:
                 wait_started = time.monotonic()
                 await async_abortable_sleep(retry_delay, abort_check)
                 state.record_queue_wait(wait_started)
+            continue
+
+        if _provider_reported_network_failure(stream_result, msg, finish):
+            _rotate_slot_for_provider_network_failure(
+                state, slot, log_prefix, max_retries, on_retry,
+                strict_model, _fire_attempt_restart)
+            continue
+        latency = (time.time() - t0) * 1000
+        _settle_stream_result(
+            slot, usage, latency=latency, ttft=ttft_value[0], state=state,
+            cache_conv_id=_cache_conv_id, tag=tag, dispatcher=dispatcher,
+            stream_result=stream_result,
+            route_trace=attempt_observer.route_trace)
+        if stream_result.is_verified_complete:
+            state.credential_outage.note_success(slot)
+        state.route_unavailable.note_success(slot)
+        logger.debug('%s async_dispatch_stream settled: state=%s '
+                     'finish=%s model=%s latency=%.0fms', log_prefix,
+                     stream_result.state.value, finish, slot.model, latency)
+        return stream_result
 
     _raise_dispatch_exhausted(state.last_err, max_retries=max_retries,
                               capability=capability, prefer_model=prefer_model,

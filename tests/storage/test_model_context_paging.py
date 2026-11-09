@@ -5,6 +5,7 @@ import pytest
 
 from lib.storage.errors import StorageError
 from lib.storage.model_continuation import ModelContinuationStore
+from lib.storage.turn_projection_pages import stale_turn_projection_page, turn_projection_page
 
 pytestmark = pytest.mark.unit
 
@@ -105,3 +106,94 @@ def test_cursor_that_does_not_advance_fails_without_restart():
         read(client)
     assert caught.value.code == 'database_protocol_error'
     assert len(client.calls) == 1
+
+
+def _paged_turn(*, revision=4, content='answer', status='completed'):
+    """A Turn whose tool rounds span more than one turn.projection.page page."""
+    return {'turnId': 'paged', 'projectionRevision': revision, 'status': status,
+            'projection': {'model': 'm', 'content': content,
+                           'toolRounds': [{'toolContent': f'{index}:' + 'x' * 1_000_000}
+                                          for index in range(9)]}}
+
+
+def paged_context(turn, *, digest='a'):
+    rows = [{'turnId': 'request', 'projection': {'content': 'ask'}}]
+    if turn is not None:
+        rows.append({'pagedTurn': turn_projection_page(turn, 0)['turn']})
+    rows.append({'turnId': 'target', 'projection': {}})
+    return page([], digest=digest) | {'turns': rows}
+
+
+class PagedAuthority:
+    """Scripted context reads; turn.projection.page serves the Turn it holds now."""
+
+    def __init__(self, contexts, turn, *, on_page=None):
+        self.contexts = iter(contexts)
+        self.turn = turn
+        self.on_page = on_page
+        self.calls = []
+
+    def query(self, operation, payload, **kwargs):
+        self.calls.append((operation, dict(payload)))
+        if operation == 'turn.context.read':
+            return deepcopy(next(self.contexts))
+        assert operation == 'turn.projection.page'
+        if self.on_page is not None:
+            self.on_page(self, payload)
+        if self.turn is None:
+            return None
+        revision = self.turn['projectionRevision']
+        if payload.get('projection_revision') not in (None, revision):
+            return stale_turn_projection_page(revision)
+        return deepcopy(turn_projection_page(self.turn, payload['page']))
+
+
+def test_a_paged_row_becomes_its_turn_read_by_page_at_the_head_revision():
+    turn = _paged_turn()
+    authority = PagedAuthority([paged_context(turn)], turn)
+    result = read(authority)
+    assert [row['turnId'] for row in result['turns']] == ['request', 'paged', 'target']
+    assert result['turns'][1] == turn
+    count = turn_projection_page(turn, 0)['pageCount']
+    assert count > 1
+    assert [payload for operation, payload in authority.calls
+            if operation == 'turn.projection.page'] == [
+        {'user_id': 11, 'conversation_id': 'conv', 'turn_id': 'paged', 'page': index,
+         'projection_revision': 4} for index in range(count)]
+
+
+@pytest.mark.parametrize('change', ['moved', 'deleted', 'head'])
+def test_a_paged_turn_that_changed_restarts_the_whole_read(change):
+    old = _paged_turn()
+    new = {'moved': _paged_turn(revision=5, content='edited'), 'deleted': None,
+           # A public Turn can change without a projection revision (native
+           # execution-epoch presentation); its pages must carry the read head.
+           'head': _paged_turn(status='interrupted')}[change]
+
+    def change_once(authority, payload):
+        if authority.turn is old and (payload['page'] == 1 or change != 'moved'):
+            authority.turn = new
+
+    authority = PagedAuthority([paged_context(old), paged_context(new, digest='b')], old,
+                               on_page=change_once)
+    result = read(authority)
+    assert result['historyProof']['digest'] == 'b' * 64
+    expected = ['request', 'target'] if new is None else ['request', 'paged', 'target']
+    assert [row['turnId'] for row in result['turns']] == expected
+    if new is not None:
+        assert result['turns'][1] == new
+    assert sum(operation == 'turn.context.read' for operation, _ in authority.calls) == 2
+
+
+def test_a_paged_turn_that_keeps_moving_exhausts_the_bounded_restarts():
+    turn = _paged_turn()
+
+    def move(authority, payload):
+        authority.turn = authority.turn | {
+            'projectionRevision': authority.turn['projectionRevision'] + 1}
+
+    authority = PagedAuthority([paged_context(turn)] * 3, turn, on_page=move)
+    with pytest.raises(StorageError, match='changed during paging') as caught:
+        read(authority)
+    assert caught.value.code == 'database_conflict'
+    assert sum(operation == 'turn.context.read' for operation, _ in authority.calls) == 3

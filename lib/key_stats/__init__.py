@@ -28,7 +28,7 @@ Quota/billing errors (HTTP 402 / 429-insufficient_quota) are recorded at
 **(key, model)** granularity (``exhausted_models``) whenever the observing
 slot names a model — on an aggregating gateway one key proxies several
 upstream vendors, so a billing-stop on one model must not cross-poison the
-others (2026-07-28: qwen→Aliyun quota-death on a sankuai key must not stop
+others (2026-07-28: qwen→Aliyun quota-death on a example-corp key must not stop
 kimi→Moonshot on the same key). Callers that cannot name a model still flip
 the key-wide ``exhausted`` flag. Manual overrides keep winning over BOTH for
 ordinary interactive admission (user supremacy); the Settings card surfaces
@@ -40,8 +40,8 @@ before minting a slot through ``is_key_refused_for_optional_work``.
 
 Namespace fold (account/face separation, charter #23):
   History may have been recorded under an absorbed duplicate face CARD
-  (``sankuai_anthropic::…``) while the UI renders one card per ACCOUNT
-  (``sankuai::…``). At every load and commit, ``_fold_namespaces`` folds such
+  (``example_corp_anthropic::…``) while the UI renders one card per ACCOUNT
+  (``example-corp::…``). At every load and commit, ``_fold_namespaces`` folds such
   namespaces into their account using
   ``lib.llm_dispatch.provider_face.account_namespace_map`` — so a
   billing-stop or a PERSISTENT manual override can never be orphaned onto
@@ -49,13 +49,18 @@ Namespace fold (account/face separation, charter #23):
   total-outage).
 
 Last-resort guard:
-  The auto-disable logic (exhausted flag + success-rate threshold) will NEVER
+  The credential-health auto-disable logic (success-rate threshold) will NEVER
   leave a provider with zero usable keys.  If disabling a key would remove the
   last raw-enabled key from its provider, it is kept enabled as a "last resort"
   (see :func:`is_key_enabled`). A provider's keys are the credentials of its
   live dispatcher slots, which the slot pool indexes as slots are published
   and withdrawn.  Explicit user overrides ``set_key_override(..,
   False)`` still take precedence and can force-disable even the last key.
+  A recorded BILLING stop (key-wide ``exhausted``, or a per-model stop for the
+  model being picked) is never last-resort promoted, under either admission
+  policy: the provider has already refused that credential's credit, so a
+  retry only buys another live 402. It returns on a provider reset time, a
+  new day or an owner re-enable — never on a reprieve.
 
 Persistence:
   data/config/key_stats.json

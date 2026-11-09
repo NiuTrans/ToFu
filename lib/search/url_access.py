@@ -1,4 +1,4 @@
-"""Host-side application of the ``search.skip_domains`` URL blocklist.
+"""Host-side application of the ``search.skip_domains`` URL blocklist (operator bans).
 
 Responsibility: the single refusal message the browser tools and the
 pre-tool hook return when a tool call names a blocked URL. The matching rule
@@ -52,13 +52,16 @@ def blocked_text_message(text: str) -> str | None:
 
 
 def url_argument_blocklist_hook(tool_name: str, args: dict, task: dict):
-    """Pre-tool hook: refuse tool calls that transfer a blocked URL.
+    """Pre-tool hook: refuse tool calls whose arguments name a banned URL.
 
     Covers the paths a fetch-only gate misses: ``run_command`` (curl, wget,
     ``python -c urlopen``, ``git clone``) and the browser tools that navigate
-    rather than read. Matching is on absolute URLs only — a command that
-    merely mentions a host name is not refused, so local files and directory
-    names keep working.
+    rather than read. An absolute URL anywhere in a command counts: the hook
+    cannot tell a transfer from a mention (``echo``, a commit message, a
+    string handed to a parser), which is acceptable only because every entry
+    is an operator ban — fetch-quality skips never reach this list
+    (:mod:`lib.search.saved_domain_lists`). A command that merely mentions a
+    host name is not refused, so local files and directory names keep working.
     """
     if tool_name not in _GUARDED_TOOLS:
         return None

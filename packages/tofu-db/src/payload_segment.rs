@@ -1445,6 +1445,8 @@ const LOCATION_POSITION_BITS: u32 = 16;
 const LOCATION_ORDINAL_BITS: u32 = 12;
 const LOCATION_PREFIX_MASK: u64 = u64::MAX << (LOCATION_ORDINAL_BITS + LOCATION_POSITION_BITS);
 const LOCATION_ORDINAL_MASK: u64 = ((1 << LOCATION_ORDINAL_BITS) - 1) << LOCATION_POSITION_BITS;
+/// The most entries one table can hold: every ordinal at every position.
+const MAX_LOCATION_ENTRIES: usize = 1 << (LOCATION_ORDINAL_BITS + LOCATION_POSITION_BITS);
 const _: () = assert!(MAX_SEGMENT_BLOCKS <= 1 << LOCATION_POSITION_BITS);
 const _: () = assert!(crate::payload_manifest::MAX_PAYLOAD_SEGMENTS <= 1 << LOCATION_ORDINAL_BITS);
 
@@ -1517,6 +1519,17 @@ impl CatalogLocationTable {
             + self.byte_starts.capacity() * std::mem::size_of::<usize>()
             + self.segments.capacity()
                 * std::mem::size_of::<crate::payload_manifest::PayloadSegmentReference>()
+    }
+
+    /// The address of the entries allocation, to tell reuse from allocation.
+    #[cfg(test)]
+    pub(crate) fn entries_allocation_for_test(&self) -> usize {
+        self.entries.as_ptr() as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entries_capacity_for_test(&self) -> usize {
+        self.entries.capacity()
     }
 
     /// Every entry as (ID prefix, segment, index position), independent of
@@ -1598,17 +1611,25 @@ impl PayloadSegmentStore {
     /// unindexed in `previous`) is read once exactly as `build_location_table`
     /// reads it. Kept entries leave `previous` in prefix order and merge with
     /// the new ones in one sequential pass; no kept index is read again.
+    /// `spare`, a table no reader holds any more, lends its allocations and
+    /// loses its contents, so a derivation into it maps and faults no fresh
+    /// memory: on the live store that was 1.86 GB every two minutes.
     pub(crate) fn derive_location_table(
         &self,
         previous: &CatalogLocationTable,
         catalog: &[crate::payload_manifest::PayloadSegmentReference],
+        spare: Option<CatalogLocationTable>,
     ) -> io::Result<CatalogLocationTable> {
         if catalog.len() > 1 << LOCATION_ORDINAL_BITS {
             return Err(invalid_data("payload catalog exceeds its segment bound"));
         }
         let named: HashMap<Uuid, &crate::payload_manifest::PayloadSegmentReference> =
             catalog.iter().map(|reference| (reference.segment_id, reference)).collect();
-        let mut segments = Vec::with_capacity(catalog.len());
+        let (mut segments, mut entries) = match spare {
+            Some(spare) => (spare.segments, spare.entries),
+            None => (Vec::with_capacity(catalog.len()), Vec::new()),
+        };
+        segments.clear();
         let mut renumbered = vec![None; previous.segments.len()];
         for (ordinal, reference) in previous.segments.iter().enumerate() {
             if named.get(&reference.segment_id).is_some_and(|current| *current == reference) {
@@ -1628,7 +1649,18 @@ impl PayloadSegmentStore {
             }
         }
         added.sort_unstable();
-        let mut entries = Vec::with_capacity(kept_blocks + added.len());
+        let needed = kept_blocks + added.len();
+        entries.clear();
+        if entries.capacity() < needed {
+            // `Vec`'s own amortized doubling: a slowly growing catalog
+            // reallocates only when its table doubles, and pages no fill
+            // reaches are never touched. The spare's allocation goes first,
+            // so a derivation never holds three tables, and nothing copies
+            // it as `reserve` on the cleared vector would.
+            let doubled = entries.capacity().saturating_mul(2).min(MAX_LOCATION_ENTRIES);
+            drop(std::mem::take(&mut entries));
+            entries = Vec::with_capacity(needed.max(doubled));
+        }
         let mut fresh = added.into_iter().peekable();
         for entry in &previous.entries {
             let Some(ordinal) = renumbered[CatalogLocationTable::ordinal(*entry)] else {
@@ -2850,6 +2882,9 @@ mod tests {
     /// 4,096) full segments of `..._BLOCKS` (default 56,000) entries, the live
     /// 2026-11-07 shape, derived for a catalog that drops one segment. No
     /// segment is added, so the figure is the merge alone, without index I/O.
+    /// Round 0 derives into a fresh allocation, later rounds into the table
+    /// the round before derived, as the published table and its spare
+    /// alternate; each round reports this process's minor page faults.
     #[test]
     #[ignore]
     fn location_table_derivation_measurement() {
@@ -2891,15 +2926,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = PayloadSegmentStore::initialize(directory.path()).unwrap();
         let catalog = &references[1..];
+        let minor_faults = || {
+            // SAFETY: getrusage fills the caller-owned structure.
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+            usage.ru_minflt
+        };
+        let mut spare = None;
         for round in 0..4 {
+            let reused = spare.is_some();
+            let faults = minor_faults();
             let started = std::time::Instant::now();
-            let derived = store.derive_location_table(&previous, catalog).unwrap();
+            let derived = store.derive_location_table(&previous, catalog, spare.take()).unwrap();
             let elapsed = started.elapsed();
+            let faults = minor_faults() - faults;
             assert_eq!(derived.located_blocks(), (segments - 1) * blocks);
             eprintln!(
-                "location_derive round={round} entries={} derived={} setup_ms={} derive_ms={}",
+                "location_derive round={round} reused_allocation={reused} entries={} derived={} setup_ms={} \
+                 derive_ms={} minor_faults={faults}",
                 previous.located_blocks(), derived.located_blocks(), setup.as_millis(), elapsed.as_millis(),
             );
+            spare = Some(derived);
         }
     }
 

@@ -495,8 +495,8 @@ def apply_cost_experiment(task: dict, request_config: dict, *,
         return request_config
     task['config'] = updated
     logger.debug('[CostExperiment] task=%s conv=%s experiment=%s arm=%s',
-                 str(task.get('id') or '')[:8],
-                 str(task.get('convId') or '')[:8],
+                 str(task.get('id') or ''),
+                 str(task.get('convId') or ''),
                  assignment['experiment_id'], assignment['arm'])
     return dict(updated)
 

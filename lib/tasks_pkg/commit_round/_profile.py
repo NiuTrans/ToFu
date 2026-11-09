@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager._events import append_event
 
 logger = get_logger(__name__)
@@ -46,17 +46,17 @@ def _spawn_async_profile_consolidation(task: dict, messages: list,
         threading.Thread(
             target=_run_profile_consolidation_async,
             args=(task, messages),
-            name=f'profile-consolidate-{task["id"][:8]}',
+            name=f'profile-consolidate-{task_log_tag(task["id"])}',
             daemon=True,
         ).start()
     except Exception as e:
         logger.warning('[Task:%s] failed to spawn consolidation thread: %s',
-                       task['id'][:8], e, exc_info=True)
+                       task_log_tag(task['id']), e, exc_info=True)
 
 
 def _run_profile_consolidation_async(task: dict, messages: list) -> None:
     """Daemon-thread body: run consolidation, emit + persist learned prefs."""
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     try:
         from lib.memory.profile_consolidate import run_profile_consolidation
         learned = run_profile_consolidation(messages, task=task)
@@ -144,7 +144,7 @@ def _patch_turn_with_prefs(task: dict, learned: list) -> None:
                     )
                     logger.info(
                         '[Task:%s] persisted %d preference_learned to turn=%s',
-                        task_id[:8], len(learned), turn_id[:8],
+                        task_log_tag(task_id), len(learned), turn_id[:8],
                     )
                     break
                 except LifecycleConflict:
@@ -153,5 +153,5 @@ def _patch_turn_with_prefs(task: dict, learned: list) -> None:
         except Exception as exc:
             logger.warning(
                 '[Task:%s] turn-native preferences_learned patch failed: %s',
-                task_id[:8], exc, exc_info=True,
+                task_log_tag(task_id), exc, exc_info=True,
             )

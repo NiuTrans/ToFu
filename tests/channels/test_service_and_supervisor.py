@@ -140,7 +140,8 @@ def router_turns(monkeypatch):
         rows[(ROUTER, 'in-1')] = {'conversationId': ROUTER, 'turnId': 'in-1', 'actor': 'human',
                                   'projection': {'content': 'q', 'origin': origin}}
         rows[(ROUTER, 'out-1')] = {'conversationId': ROUTER, 'turnId': 'out-1',
-                                  'actor': 'assistant', 'parentTurnId': 'in-1'}
+                                  'actor': 'assistant', 'parentTurnId': 'in-1',
+                                  'projection': {'role': 'assistant'}}
     return human
 
 
@@ -236,8 +237,9 @@ def test_task_event_ignores_another_conversation(
 
 
 def _done(conversation=ROUTER, **extra):
-    return {'id': 't', 'status': 'done', '_userId': OWNER, 'convId': conversation,
-            '_turnId': 'out-1', 'content': 'The answer', **extra}
+    # A completed Turn carries its provider finish (turn_verdict completion evidence).
+    return {'id': 't', 'status': 'done', 'finishReason': 'stop', '_userId': OWNER,
+            'convId': conversation, '_turnId': 'out-1', 'content': 'The answer', **extra}
 
 
 def test_router_answer_to_a_command_chat_message_returns_to_that_thread(store, router, enabled, router_turns):
@@ -260,9 +262,10 @@ def test_router_answer_to_a_command_chat_message_returns_to_that_thread(store, r
       'channel': {'channel': 'dx', 'thread': COMMAND, 'eventIds': []}}, _done(conversation='worker')),
 ])
 def test_no_auto_reply_for_nonhuman_input_other_conversations_or_failures(
-        store, router, enabled, router_turns, origin, task):
+        store, router, enabled, router_turns, origin, task, monkeypatch):
     enabled(command_chat=COMMAND)
     router_turns(origin)
+    monkeypatch.setattr(autoreply, '_notify_notice_failure', lambda *args: None)
     autoreply.on_task_terminal(task)
     assert store.active_outbox() == []
 
@@ -282,7 +285,7 @@ def test_human_steer_into_a_notice_returns_the_final_answer_to_its_command_threa
         },
         (ROUTER, 'out-1'): {
             'conversationId': ROUTER, 'turnId': 'out-1', 'actor': 'assistant',
-            'parentTurnId': 'in-1', 'projection': {'_userSteerInjects': [{
+            'parentTurnId': 'in-1', 'projection': {'role': 'assistant', '_userSteerInjects': [{
                 'blockId': 'injection:user-steer:channel-owner-42',
                 'commandId': 'channel-owner-42', 'deliveryState': 'delivered',
                 'author': author}]},
@@ -299,26 +302,81 @@ def test_human_steer_into_a_notice_returns_the_final_answer_to_its_command_threa
     assert item.thread == COMMAND and item.origin['kind'] == 'router_status'
 
 
-@pytest.mark.parametrize('origin, outcome, status', [
+@pytest.mark.parametrize('origin, outcome, status, reason', [
     ({'blockId': 'notice', 'initiator': 'channel', 'channel': {
-        'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/99']}}, 'error', 'error'),
-    ({'blockId': 'report', 'initiator': 'peer'}, 'interrupted', 'interrupted'),
+        'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/99']}},
+     'error', 'error', '尚未完成审阅'),
+    ({'blockId': 'report', 'initiator': 'peer'}, 'interrupted', 'interrupted', '处理已超时或停止响应'),
 ])
 def test_failed_notice_review_warns_the_command_chat_even_without_a_reply_origin(
-        store, router, enabled, router_turns, origin, outcome, status):
+        store, router, enabled, router_turns, origin, outcome, status, reason):
     enabled(command_chat=COMMAND)
     router_turns(origin)
-    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
-                                    status=status, finishReason=outcome))
-    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
-                                    status=status, finishReason=outcome))
-    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
-                                    status=status, finishReason=outcome))
+    terminal = _done(content='', _silentTurn=True, status=status, finishReason='')
+    if outcome == 'interrupted':
+        # An invocation guard stop (stall/deadline) is the interrupted outcome.
+        terminal.update(aborted=True, _invocationStopReason='stalled')
+    for _ in range(3):
+        autoreply.on_task_terminal(terminal)
     [item] = store.active_outbox()
     assert item.thread == COMMAND
-    assert '尚未完成审阅' in item.text
+    assert '未能完成一条通知的审阅' in item.text and reason in item.text
     assert item.idempotency_key == f'out-1:notice-review:{outcome}'
     assert item.reply_to == (f'{COMMAND}/99' if outcome == 'error' else None)
+
+
+def test_native_rejected_human_declaration_does_not_report_completion(
+        store, router, enabled, router_turns):
+    enabled(command_chat=COMMAND)
+    router_turns({'blockId': 'origin', 'initiator': 'human',
+                  'channel': {'channel': 'dx', 'thread': COMMAND, 'eventIds': []}})
+    autoreply.on_task_terminal(_done(content='', finishReason='abnormal_stop',
+                                    error={'kind': 'abnormal_stop', 'detail': 'Invalid control declaration'}))
+    [item] = store.active_outbox()
+    assert item.text == autoreply._TERMINAL_LABELS['error']
+    assert item.idempotency_key == 'out-1:terminal:error'
+
+
+def test_execution_limited_notice_warns_with_its_real_reason(
+        store, router, enabled, router_turns):
+    enabled(command_chat=COMMAND)
+    router_turns({'initiator': 'peer'})
+    autoreply.on_task_terminal(_done(
+        content='', status='aborted', aborted=True, finishReason='aborted',
+        _executionLimitReason='execution_tool_budget_exhausted'))
+    [item] = store.active_outbox()
+    assert 'execution_tool_budget_exhausted' in item.text
+    assert item.idempotency_key == 'out-1:notice-review:error'
+
+
+def test_missing_notice_turn_fails_closed_without_a_listener_exception(
+        store, router, enabled, router_turns, monkeypatch):
+    enabled(command_chat=COMMAND)
+    router_turns({'initiator': 'peer'})
+    from lib.turn_lifecycle import get_turn
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn',
+                        lambda conv, turn, *, user_id, include_projection=True: None)
+    autoreply.on_task_terminal(_done(status='error', finishReason='error'))
+    assert store.active_outbox() == []
+
+
+def test_real_terminal_listener_survives_a_notice_storage_error(
+        store, router, enabled, router_turns, monkeypatch):
+    enabled(command_chat=COMMAND)
+    router_turns({'initiator': 'peer'})
+    from lib.tasks_pkg.manager import _terminal
+    monkeypatch.setattr(_terminal, '_TERMINAL_LISTENERS', [])
+    monkeypatch.setattr(_terminal, '_TERMINAL_REGISTRATIONS', {})
+    monkeypatch.setattr(_terminal, '_TERMINAL_WITHDRAWN', set())
+    monkeypatch.setattr('lib.agent_core.terminal_delivery.deliver_terminal', lambda task: None)
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('storage unavailable')))
+    assert _terminal.register_terminal_listener(autoreply.on_task_terminal)
+    try:
+        _terminal.notify_terminal_listeners(_done(
+            status='error', finishReason='error', finished_at=1))
+    finally:
+        assert _terminal.unregister_terminal_listener(autoreply.on_task_terminal)
 
 
 def test_deliberate_silence_leaves_no_empty_reply_or_false_activity_completion(
@@ -450,13 +508,18 @@ def test_supervisor_starts_restarts_and_stops_from_configuration(store, router, 
     assert not FakeAdapter.instances[1].running
 
 
+@pytest.mark.parametrize('refused', [
+    ('disconnected', 'bridge exited (1): SSO_EXCHANGE_FAILED: refused'),
+    # The SSO step's own runtime refused: no login push can help, yet a repaired runtime
+    # (or a transient probe miss) recovers at the next tick without the owner re-enabling.
+    ('runtime_unavailable', 'bridge exited (1): SSO_NODE_UNAVAILABLE: no Node'),
+])
 def test_a_restart_reports_the_exit_until_the_new_session_connects(
-        store, router, installed, enabled, supervisor):
+        store, router, installed, enabled, supervisor, refused):
     from lib.router.watchdog.signals import UNHEALTHY_CHANNEL_STATES
     enabled()
     assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=FakeAdapter) == 'started'
     store.set_status('dx', 'connected', '', connected_at_ms=5)
-    refused = ('disconnected', 'bridge exited (1): SSO_SESSION_CONFIGURATION: refused')
     for restart in (1, 2):
         FakeAdapter.instances[-1].running = False
         FakeAdapter.instances[-1].exit = refused
@@ -469,6 +532,37 @@ def test_a_restart_reports_the_exit_until_the_new_session_connects(
             failing_since = status['updatedAtMs']
     assert status['updatedAtMs'] == failing_since  # a persistent failure keeps the time it began
     assert len(FakeAdapter.instances) == 3 and FakeAdapter.instances[-1].running
+
+
+def test_a_session_whose_launch_ticket_expired_is_relaunched_at_the_next_tick(
+        store, router, installed, enabled, supervisor):
+    """The real adapter over a bridge whose launch ticket 大象 refuses. The next tick stops it, stores the
+    typed exit for Settings and the Watchdog, and starts a new session. That relaunch runs the launcher's
+    SSO exchange again. A launcher that then needs the owner exits 42 and stays needs_login, so no tick
+    loops a login (test_session_required_and_kickoff_stop_restarts_until_reenabled)."""
+    from lib.channels.dx.adapter import DxAdapter
+    from lib.channels.model import ChannelError
+    from tests.channels.test_dx_adapter import GROUP, TICKET_EXPIRED, TICKET_EXPIRED_DETAIL, FlakyBridge, mid_at
+    bridges = []
+
+    def factory(owner, **kwargs):
+        bridges.append(FlakyBridge([], {}, {'history': dict(TICKET_EXPIRED)}))
+        bridge = bridges[-1]
+        return DxAdapter(owner, bridge_factory=lambda _owner: bridge, **kwargs)
+    enabled()
+    assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=factory) == 'started'
+    first = supervisor._ADAPTERS[OWNER]
+    first._connected.set()
+    with pytest.raises(ChannelError):
+        first.history_from(GROUP, mid_at(1_761_000_000_000))
+    assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=factory) == 'started'
+    status = store.account('dx')['status']
+    assert (status['state'], status['detail']) == ('disconnected', TICKET_EXPIRED_DETAIL)
+    assert len(bridges) == 2 and bridges[0].returncode == 0
+    relaunched = supervisor._ADAPTERS[OWNER]
+    assert relaunched is not first and relaunched.alive()
+    assert supervisor.reconcile_owner(OWNER, store=store, adapter_factory=factory) == 'running'
+    assert relaunched.stop(2.0)
 
 
 @pytest.mark.parametrize('state', ['needs_login', 'kicked'])
@@ -612,3 +706,13 @@ def test_confirmation_failures_surface_as_states(store, router, installed, super
     assert login.reconcile(supervisor, store) == 'confirming'
     settle_confirmations()
     assert store.account('dx')['status']['state'] == 'error' and FakeAdapter.instances == []
+    # A refusal of the SSO step's own runtime is not a login problem, and the next tick retries it.
+    login.failures['alice'] = ChannelError('runtime_unavailable', 'SSO_NODE_UNAVAILABLE: no Node')
+    assert login.reconcile(supervisor, store) == 'confirming'
+    settle_confirmations()
+    status = store.account('dx')['status']
+    assert (status['state'], status['detail']) == ('runtime_unavailable', 'SSO_NODE_UNAVAILABLE: no Node')
+    del login.failures['alice']
+    assert login.reconcile(supervisor, store) == 'confirming'
+    settle_confirmations()
+    assert store.account('dx')['identity'] == ALICE and len(FakeAdapter.instances) == 1

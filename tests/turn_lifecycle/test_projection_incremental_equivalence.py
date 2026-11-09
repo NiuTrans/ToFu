@@ -23,7 +23,7 @@ import pytest
 
 import lib.conversation_sync.settled_rows as settled_rows
 import lib.pricing._peak as peak_module
-import lib.storage.storage_projection as storage_projection
+import lib.task_replay.persistence_projection as persistence_projection
 import lib.turn_lifecycle as turn_lifecycle
 from lib.conversation_sync.settled_rows import (
     SettledDict,
@@ -132,11 +132,11 @@ def _reference_capture(task, event):
     keys.update(key for key, _ in turn_lifecycle._PROJECTION_PROVENANCE_FIELDS)
     values = {key: task[key] for key in keys if key in task}
     if 'apiRounds' in values:
-        values['apiRounds'] = storage_projection.sanitize_api_rounds_for_persist(
+        values['apiRounds'] = persistence_projection.sanitize_api_rounds_for_persist(
             values['apiRounds'])
     if 'toolRounds' in values:
-        values['toolRounds'] = storage_projection.compact_tool_rounds_for_frame_budget([
-            storage_projection.trim_tool_round_copy(row) for row in values['toolRounds']])
+        values['toolRounds'] = persistence_projection.compact_tool_rounds_for_frame_budget([
+            persistence_projection.trim_tool_round_copy(row) for row in values['toolRounds']])
     if isinstance(values.get('segments'), list):
         values['segments'] = [turn_lifecycle._segment_without_round_mirror(segment)
                               for segment in values['segments']]
@@ -454,7 +454,7 @@ def test_long_turn_crosses_every_bounded_lane_identically(pricing, monkeypatch):
         monkeypatch.setattr(module, 'ACTIVITY_TIMELINE_MAX_ENTRIES', 24)
     for module in (turn_trace, trace_contract, oracle):
         monkeypatch.setattr(module, 'TRACE_MAX_STATUS_ENTRIES', 24)
-    monkeypatch.setattr(storage_projection, 'TOOL_ROUNDS_FRAME_BUDGET_BYTES', 60_000)
+    monkeypatch.setattr(persistence_projection, 'TOOL_ROUNDS_FRAME_BUDGET_BYTES', 60_000)
     world = _World(random.Random(5))
     _drive(world, llm_rounds=16, tools_per_round=6,
            features=('retry', 'compaction', 'files', 'tool-phases', 'large'))

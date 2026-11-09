@@ -1199,22 +1199,24 @@ class MCPBridge:
                     hdrs = resolve_headers(srv_cfg, server_name=name)
                     if transport == STREAMABLE_HTTP:
                         # v2 signature: headers no longer go to the transport
-                        # directly — they ride on an httpx2.AsyncClient built
-                        # by the SDK's own factory. We provide the client (so
+                        # directly — they ride on the SDK-compatible client
+                        # supplied by the shared network layer. We provide the client (so
                         # the transport will NOT close it) and enter it into
                         # OUR stack so its lifecycle matches the session's.
                         from mcp.client.streamable_http import (
-                            create_mcp_http_client,
                             streamable_http_client,
                         )
-                        http_client = create_mcp_http_client(headers=hdrs or None)
+                        from lib.http_transport.sdk import mcp_http_client
+                        http_client = mcp_http_client(headers=hdrs or None)
                         await stack.enter_async_context(http_client)
                         transport_cm = streamable_http_client(
                             url, http_client=http_client
                         )
                     elif transport == SSE:
                         from mcp.client.sse import sse_client
-                        transport_cm = sse_client(url, headers=hdrs or None)
+                        from lib.http_transport.sdk import mcp_http_client
+                        transport_cm = sse_client(
+                            url, headers=hdrs or None, httpx_client_factory=mcp_http_client)
                     else:
                         raise ValueError(
                             f'MCP server {name}: unknown remote transport '

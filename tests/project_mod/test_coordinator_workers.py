@@ -12,6 +12,7 @@ from tests.project_mod.test_project_dispatch_repository import context as contex
 from lib.conversations import coordinator_workers
 from lib.project_dispatch.delegation import capture_worker_policy
 from lib.project_dispatch.service import ProjectDispatchService
+from lib.turn_lifecycle import get_turn as production_get_turn
 
 # Keep the imported fixture's registered alias visible to static tooling.
 __all__ = ('base_runtime',)
@@ -74,7 +75,7 @@ def runtime(base_runtime, monkeypatch):
         turn_get=r.c.repo.turn_get, attempt_get=r.c.repo.attempt_get)
     monkeypatch.setattr(workers, 'ProjectDispatchService', lambda repo: r.service)
     # '/project' is a fake port; the real isolation preflight is specified on real directories.
-    monkeypatch.setattr(workers, 'require_isolated_worker_root', lambda project: None)
+    monkeypatch.setattr(workers, 'require_isolated_worker_root', lambda project, **_: None)
     # Waits read the Coordinator's real project mailbox through the record store.
     from lib.storage import service as storage_service
     from tests.swarm.test_retained_agents import RecordClient
@@ -92,6 +93,12 @@ def runtime(base_runtime, monkeypatch):
         worker_model='model-a')
     r.args = {'title': 'Implement one part', 'brief': 'Implement and verify the requested feature.', 'idempotency_key': 'part-one'}
     return r
+
+
+def test_late_command_consumer_does_not_retain_fixture_turn_reader(runtime):
+    from lib.conversation_sync import command_service
+
+    assert command_service.get_turn is production_get_turn
 
 
 def test_one_human_request_creates_and_starts_independent_worker_without_grant_click(runtime):
@@ -376,10 +383,65 @@ def _idle_background_batch(r, monkeypatch, receipts):
     from lib import message_queue
     from lib.tasks_pkg import background_commands
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    monkeypatch.setattr('lib.background_command_delivery._ATTACHED_BACKGROUND_BLOCKS', {})
     monkeypatch.setattr(message_queue, '_background_receipts', lambda *a, **kw: receipts)
     monkeypatch.setattr(message_queue, 'next_dispatchable_turn', lambda *a, **kw: None)
     monkeypatch.setattr(background_commands, 'conversation_results_complete', lambda **kw: True)
     monkeypatch.setattr(chat_task_runtime, 'snapshot_owned', lambda **kw: [])
+
+
+def test_closed_worker_batch_reads_the_turn_body_only_to_attach(runtime, monkeypatch):
+    """Every maintenance tick re-evaluates late results of a closed Worker.
+
+    Its decisions read Turn metadata; the projection of a long Worker Turn is
+    read to attach the block and once more to observe it at its new revision,
+    never again while that revision stands.
+    """
+    from lib import message_queue, agent_inbox
+    from lib.project_dispatch.admission import TrustedDispatch
+    from lib.conversation_sync.runtime import conversation_turn_commands
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    conversation = worker['conversation_id']
+    assignment = r.c.repo.read(worker['assignment_id'])
+    execution = assignment['execution']
+    trusted = TrustedDispatch(r.c.repo.admission(assignment['id']))
+    config = trusted.capture({}, 7, trusted.principal, conversation)
+    r.attempts[execution['attemptId']]['status'] = 'completed'
+    turn = r.turns[execution['turnId']]
+    turn.update(status='completed', projection={'content': 'done'})
+    receipts = [{'queueId': 'late-result', 'timestamp': 1, 'config': config,
+                 'payload': {'text': 'late command output', '_backgroundCommand': 'bg_late'}}]
+    _idle_background_batch(r, monkeypatch, receipts)
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn',
+                        lambda *a, **kw: pytest.fail('completed execution cannot Continue'))
+    body_reads, read_turn = [], r.c.repo.turn_get
+
+    def recorded(conv, turn_id, **kwargs):
+        row = read_turn(conv, turn_id, **kwargs)
+        if kwargs.get('include_projection', True):
+            body_reads.append(turn_id)
+        elif isinstance(row, dict):
+            row.pop('projection', None)
+        return row
+    monkeypatch.setattr(r.c.repo, 'turn_get', recorded)
+    attached = []
+
+    def attach(conv, turn_id, *, projection, expected_projection_revision, user_id, **kw):
+        assert expected_projection_revision == turn['projectionRevision']
+        attached.append(projection)
+        turn.update(projection=projection, projectionRevision=expected_projection_revision + 1)
+    monkeypatch.setattr('lib.turn_lifecycle.update_turn_projection', attach)
+    monkeypatch.setattr(agent_inbox, 'consume_peer', lambda *args: None)
+    for _ in range(5):
+        assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert len(attached) == 1
+    assert body_reads.count(execution['turnId']) == 2
+    # A projection written elsewhere is a new revision: it is read again.
+    turn['projectionRevision'] += 1
+    assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert body_reads.count(execution['turnId']) == 3 and len(attached) == 1
 
 
 def test_worker_execution_without_continue_settles_its_background_batch_once(
@@ -491,6 +553,18 @@ def test_background_batch_issues_its_continue_once(runtime, monkeypatch):
         assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
     assert len(issued) == 1
     assert r.c.repo.read(assignment['id'])['execution']['attemptId'] == 'continuation-attempt'
+
+    # A later human Continue advances the assignment, while the original
+    # unconsumed receipt still names the first background batch command.
+    r.attempts['manual-attempt'] = {
+        **r.attempts['continuation-attempt'], 'attemptId': 'manual-attempt',
+        'commandId': 'manual-continue', 'taskId': '', 'status': 'pending'}
+    trusted.continue_execution(old['turnId'], 'manual-attempt')
+    r.attempts['manual-attempt'].update(taskId='manual-task', status='interrupted')
+    before = r.c.repo.read(assignment['id'])
+    assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert len(set(issued)) == 1
+    assert r.c.repo.read(assignment['id']) == before
 
 
 def test_cancelled_worker_background_completion_preserves_evidence_without_model_turn(
@@ -1026,6 +1100,84 @@ def test_a_new_physical_account_still_cannot_replenish_worker_tool_reservations(
     assert r.c.repo.read(row['id'])['toolReservations'] == spent
 
 
+def _follow_up_turn(r, task, row, *, witness=None):
+    """The Worker's Turn completed; a Coordinator follow-up accepts the next Turn's attempt."""
+    from lib.project_dispatch import admission
+    old = row['execution']
+    r.attempts[old['attemptId']]['status'] = 'completed'
+    r.turns[old['turnId']].update(status='completed')
+    source = {'attemptId': old['attemptId'], 'turnId': old['turnId'], 'taskId': task['id'],
+              'status': 'completed'}
+    trusted = admission.TrustedDispatch(r.c.repo.admission(row['id']),
+                                        follows={'execution': deepcopy(old), 'source': source})
+    r.turns['follow-up-turn'] = {'conversationId': task['convId'], 'turnId': 'follow-up-turn',
+                                 'actor': 'assistant', 'projectionRevision': 1}
+    r.attempts['follow-up-attempt'] = {'conversationId': task['convId'], 'turnId': 'follow-up-turn',
+        'attemptId': 'follow-up-attempt', 'taskId': '', 'status': 'pending'}
+    trusted.continue_execution('follow-up-turn', 'follow-up-attempt')
+    config = trusted.capture({}, 7, trusted.principal, task['convId'])
+    assert config[admission.FOLLOW_UP_KEY] == source
+    if witness is not None:
+        config[admission.FOLLOW_UP_KEY] = {**source, **witness}
+    config['_turnOwnerUserId'] = 7
+    r.attempts['follow-up-attempt'].update(taskId=task['id'], status='running')
+    return {'id': task['id'], 'convId': task['convId'], 'config': config, 'status': 'running',
+            '_userId': 7, '_principalContext': task['_principalContext'], '_attended': False,
+            '_turnId': 'follow-up-turn', '_attemptId': 'follow-up-attempt',
+            'abort_event': threading.Event(), 'usage': {}}
+
+
+def test_a_follow_up_turn_continues_the_worker_tool_account(runtime):
+    """A follow-up is a new Turn, so storage issues no _resumeSource; its witness is the
+    settled association it continues from, and the one account keeps counting."""
+    from lib.project_dispatch import admission
+    from tests.project_mod.test_coordinator_request_budget import bind
+    r = runtime
+    bind(r)
+    task, row = _worker_task(r)
+    for _ in range(2):
+        assert task['_executionBudget'].reserve_tool(task) is None
+    spent = r.c.repo.read(row['id'])['toolReservations']
+    follow_up = _follow_up_turn(r, task, row)
+    admission.bind_account(follow_up)
+    assert r.c.repo.read(row['id'])['execution']['turnId'] == 'follow-up-turn'
+    assert follow_up['_executionBudget'].reserve_tool(follow_up) is None
+    assert r.c.repo.read(row['id'])['toolReservations'] == {**spent, 'count': 3}
+    assert not follow_up.get('aborted')
+
+
+@pytest.mark.parametrize('forged', [{'status': 'failed'}, {'turnId': 'another-turn'}, {'taskId': 'another-task'}])
+def test_a_follow_up_witness_must_name_its_settled_predecessor(runtime, forged):
+    from lib.llm.llm_errors import AbortedError
+    from lib.project_dispatch import admission
+    from tests.project_mod.test_coordinator_request_budget import bind
+    r = runtime
+    bind(r)
+    task, row = _worker_task(r)
+    assert task['_executionBudget'].reserve_tool(task) is None
+    spent = r.c.repo.read(row['id'])['toolReservations']
+    with pytest.raises(AbortedError, match='follow-up source differs'):
+        admission.bind_account(_follow_up_turn(r, task, row, witness=forged))
+    assert r.c.repo.read(row['id'])['toolReservations'] == spent
+
+
+def test_a_follow_up_pin_refuses_a_session_that_moved_on(runtime):
+    from lib.project_dispatch import admission
+    from lib.project_dispatch.repository import ProjectDispatchError
+    r = runtime
+    task, row = _worker_task(r)
+    stale = deepcopy(row['execution'])
+    _follow_up_turn(r, task, row)
+    later = admission.TrustedDispatch(r.c.repo.admission(row['id']), follows={
+        'execution': stale, 'source': {'attemptId': stale['attemptId'], 'turnId': stale['turnId'],
+                                       'taskId': task['id'], 'status': 'completed'}})
+    r.attempts['second-attempt'] = {'conversationId': task['convId'], 'turnId': 'second-turn',
+        'attemptId': 'second-attempt', 'taskId': '', 'status': 'pending'}
+    with pytest.raises(ProjectDispatchError, match='source changed'):
+        later.continue_execution('second-turn', 'second-attempt')
+    assert r.c.repo.read(row['id'])['execution']['attemptId'] == 'follow-up-attempt'
+
+
 def test_each_restart_generation_continues_the_one_worker_tool_account_once(runtime):
     """The stored counter is the only offset: the restored budget ordinals continue it.
 
@@ -1128,7 +1280,7 @@ def test_plain_folder_is_prepared_and_delegation_proceeds(runtime, monkeypatch, 
         project = tmp_path / 'project-alias'
         project.symlink_to(plain, target_is_directory=True)
     monkeypatch.setattr(workers, 'require_isolated_worker_root',
-                        lambda _: admission.require_isolated_worker_root(str(project)))
+                        lambda _, **kwargs: admission.require_isolated_worker_root(str(project), **kwargs))
     accepted = r.call('delegate_project_work', **r.args)
     assert accepted['dispatch'] == 'accepted', accepted
     assert (plain / '.git').is_dir() and (plain / 'AGENTS.md').is_file()
@@ -1136,6 +1288,107 @@ def test_plain_folder_is_prepared_and_delegation_proceeds(runtime, monkeypatch, 
     assert r.task['convId'] == 'coordinator' and len(r.created) == len(r.calls) == 1
     assert r.call('delegate_project_work', **r.args) == accepted
     assert len(r.created) == len(r.calls) == 1
+
+
+# The reaper's silence threshold, dilated so a fake volume can outlast it in seconds.
+_REAPER_THRESHOLD = 3.0
+
+
+def _plain_folder_delegation(r, monkeypatch, tmp_path):
+    from lib.conversations import coordinator_workers as workers
+    from lib.project_dispatch import admission
+    plain = (tmp_path / 'autoharness').resolve()
+    plain.mkdir()
+    (plain / 'plan.md').write_text('# plan\n')
+    monkeypatch.setattr(workers, 'require_isolated_worker_root',
+                        lambda _, **kwargs: admission.require_isolated_worker_root(str(plain), **kwargs))
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_unresponsive', lambda: False)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_resumed_at', lambda: (0.0, 0.0))
+    return plain
+
+
+def test_a_long_root_preparation_keeps_its_delegating_coordinator_live(runtime, monkeypatch, tmp_path):
+    """2026-11-09: preparing a 1.4M-file plain folder took 6,931 s inside
+    ``delegate_project_work``; at 1,836 s the stuck-task reaper force-failed the
+    Coordinator as ``worker_lost`` and the delegation's result was lost. While
+    the preparation's Git executes, that is the waiting Coordinator's liveness."""
+    from lib.project_mod import managed_repository
+    from lib.tasks_pkg.liveness import judge
+    from tests.support.volume_git import volume_git
+    r = runtime
+    plain = _plain_folder_delegation(r, monkeypatch, tmp_path)
+    script, marker = volume_git(tmp_path, 'slow', 'add', seconds=2.2 * _REAPER_THRESHOLD)
+    monkeypatch.setattr(managed_repository, 'git_executable', lambda: str(script))
+    started = time.time()
+    r.task.update(status='running', aborted=False, created_at=started,
+                  _t_last_event=started, _dispatch_heartbeat=started)
+    verdicts, done = [], threading.Event()
+
+    def reaper():
+        while not done.wait(0.1):
+            verdicts.append(judge(r.task, time.time(), _REAPER_THRESHOLD, commands=[]).state)
+
+    sweeps = threading.Thread(target=reaper)
+    sweeps.start()
+    try:
+        accepted = r.call('delegate_project_work', **r.args)
+    finally:
+        done.set()
+        sweeps.join(5)
+    assert marker.exists() and time.time() - started > 2 * _REAPER_THRESHOLD
+    assert accepted['dispatch'] == 'accepted', accepted
+    assert (plain / '.git').is_dir() and len(r.created) == len(r.calls) == 1
+    assert verdicts and set(verdicts) == {'alive'}, verdicts
+    assert r.task['_t_last_event'] == started, 'preparation progress is not Worker output'
+
+
+def test_a_root_preparation_that_stops_advancing_leaves_its_coordinator_reapable(
+        runtime, monkeypatch, tmp_path):
+    """Only an observed advance is evidence: a step that stops advancing supplies
+    none, so a genuinely stuck delegation is reaped one threshold after its last
+    advance, and a returned delegation keeps no exemption."""
+    from lib.project_mod import managed_repository
+    from lib.tasks_pkg.liveness import judge
+    r = runtime
+    _plain_folder_delegation(r, monkeypatch, tmp_path)
+    stale = time.time() - 1801
+    r.task.update(status='running', aborted=False, created_at=stale,
+                  _t_last_event=stale, _dispatch_heartbeat=stale)
+    blocked = []
+    walk = managed_repository.plan_content
+
+    def stalled_walk(*args, **kwargs):
+        # The content walk stops here (one stat that never returns): no further advance.
+        now = time.time()
+        blocked.append((judge(r.task, now + 1799, 1800, commands=[]).state,
+                        judge(r.task, now + 1801, 1800, commands=[]).state))
+        return walk(*args, **kwargs)
+
+    monkeypatch.setattr(managed_repository, 'plan_content', stalled_walk)
+    accepted = r.call('delegate_project_work', **r.args)
+    assert accepted['dispatch'] == 'accepted', accepted
+    assert blocked == [('alive', 'wedged')], blocked
+    assert judge(r.task, time.time() + 1801, 1800, commands=[]).state == 'wedged'
+
+
+def test_a_folder_of_other_projects_refuses_delegation_with_the_owners_question(
+        runtime, monkeypatch, tmp_path):
+    """A folder without a project manifest that holds other projects needs the
+    owner's answer. The typed question reaches the Coordinator as its tool result
+    (code, candidates, recommended answer, no-retry recovery); no Worker exists
+    and nothing was written into the folder."""
+    r = runtime
+    plain = _plain_folder_delegation(r, monkeypatch, tmp_path)
+    (plain / 'work' / 'copy').mkdir(parents=True)
+    (plain / 'work' / 'copy' / 'pyproject.toml').write_text('[project]\nname = "copy"\n')
+    refused = r.call('delegate_project_work', **r.args)
+    assert refused.get('code') == 'ambiguous_project_root', refused
+    assert refused['details']['candidates'] == {'work': 1}
+    assert refused['details']['recommended'] == 'shared'
+    assert 'work/ (1 inside)' in refused['error'] and 'git ' not in refused['error']
+    assert refused['execution_started'] is False and 'owner' in refused['recovery']
+    assert not r.created and not r.calls and not r.c.repo.list()
+    assert sorted(path.name for path in plain.iterdir()) == ['plan.md', 'work']
 
 
 def test_unisolatable_root_refuses_before_any_worker_conversation_or_grant(runtime, monkeypatch, tmp_path):
@@ -1149,9 +1402,9 @@ def test_unisolatable_root_refuses_before_any_worker_conversation_or_grant(runti
                                   'commit', '-q', '--allow-empty', '-m', 'mine']):
         subprocess.run(['git', '-C', str(repository), *args], check=True, capture_output=True, timeout=20)
     checked = []
-    def preflight(project):
+    def preflight(project, **kwargs):
         checked.append(project)
-        admission.require_isolated_worker_root(str(repository / 'nested'))
+        admission.require_isolated_worker_root(str(repository / 'nested'), **kwargs)
     monkeypatch.setattr(workers, 'require_isolated_worker_root', preflight)
     refused = r.call('delegate_project_work', **r.args)
     assert checked == ['/project']
@@ -1179,7 +1432,7 @@ def test_accepted_delegation_replays_without_rechecking_the_root(runtime, monkey
     accepted = r.call('delegate_project_work', **r.args)
     assert accepted['dispatch'] == 'accepted', accepted
     monkeypatch.setattr(workers, 'require_isolated_worker_root',
-                        lambda project: pytest.fail('an accepted replay rechecked the root'))
+                        lambda project, **_: pytest.fail('an accepted replay rechecked the root'))
     assert r.call('delegate_project_work', **r.args) == accepted
     assert len(r.created) == len(r.calls) == 1
 

@@ -711,3 +711,17 @@ character and deadline limits still apply.
 
 Verification: `tests/test_observation_quality.py`, neighboring search-quality,
 engine/proxy, content extraction and MCP delivery suites.
+
+
+### Host network policy
+
+`SearchConfig` accepts three optional provider ports. Standalone defaults remain
+unchanged. `requests_transport(adapter, wire_send, prepared_request,
+explicit_proxy=..., **send_options)` runs after preparation and per-hop SSRF
+validation; it must preserve response ownership and explicit proxy intent.
+`httpx_client_factory(**client_options)` supplies an owned HTTPX client (including
+HTTP/2); `automatic` distinguishes shared routing from an explicit request proxy.
+`browser_proxy_resolver(url)` returns a Requests proxy mapping for the initial
+anonymous browser destination; the browser context owns subresources/redirects.
+Hosts retain routing/credentials, while search retains parsing, request deadlines,
+response limits and browser authorization. These ports do not import the host.

@@ -340,7 +340,7 @@ def test_auto_translating_coordinator_publishes_for_its_reading_language(coordin
     t = coordinator_tool
     task = {'config': {'autoTranslate': True, 'uiLang': 'zh'}}
     result = t.run(task)
-    assert sorted(result) == ['changed', 'next_step', 'revision', 'task_count'] and result['changed']
+    assert sorted(result) == ['changed', 'next_step', 'plan', 'revision', 'task_count'] and result['changed']
     assert t.targets == ['Chinese'] and t.scheduled == [(7, '/project', _PROGRESS_SCOPE, 'Chinese')]
     # An unchanged board schedules again: that retries a translation that failed before.
     assert t.run(task)['changed'] is False
@@ -453,6 +453,190 @@ def test_refused_lane_admission_is_logged_not_raised(board, board_job, monkeypat
     monkeypatch.setattr(execution, 'submit_reconstructible_translation', refuse)
     assert schedule_progress_translation(7, '/project', b.scope, 'Chinese') is False
     assert len(j.warnings) == 1 and 'coordinator=coordinator' in j.warnings[0]
+
+
+# One progress source (owner decision 2026-11-08): a board-keeping Coordinator's
+# checklist is its task board. todo_write and update_task_progress write that one
+# head; the task's checklist state is its plan projection, never a second list.
+
+_COORDINATOR_SCOPE = {'user_id': 7, 'project_path': '/project', 'conversation_id': 'coordinator',
+                      'binding_revision': 1}
+
+
+@pytest.fixture
+def coordinator_task(coordinator_tool, monkeypatch):
+    """A task of the bound, board-keeping Coordinator plus both real progress write paths."""
+    from lib.conversations.coordinator_progress import plan_publication
+    from lib.tasks_pkg import coordinator_policy
+    from lib.tools import todo
+    monkeypatch.setattr(coordinator_policy, 'coordinator_scope', lambda task, project_path=None: (
+        dict(_COORDINATOR_SCOPE) if task.get('convId') == 'coordinator' else None))
+    task = {'id': 'coordinator-turn', 'convId': 'coordinator', '_userId': 7, 'config': {}}
+
+    def checklist(arguments):
+        return todo.apply_todo_write_to_task(task, arguments, publish=plan_publication(task))
+    return SimpleNamespace(task=task, checklist=checklist, run=coordinator_tool.run,
+                           scheduled=coordinator_tool.scheduled, settings=coordinator_tool.settings)
+
+
+def _shown_board(board):
+    return board.factory().read()['board']
+
+
+def _assert_one_progress_source(b, task):
+    from lib.conversations.coordinator_progress import plan_from_board
+    shown = _shown_board(b)
+    assert task['_todoState']['todos'] == plan_from_board(shown)['todos'] == task['_todos']
+    return shown
+
+
+def test_checklist_and_task_board_are_one_progress_source(board, coordinator_task):
+    from lib.tools.todo import render_todo_snapshot
+    b, c = board, coordinator_task
+    _, text, outcome = c.checklist({'explanation': 'Release first, then the notes.', 'todos': [
+        {'content': 'Release 0.19.0', 'status': 'in_progress'},
+        {'content': 'Write the release notes', 'status': 'pending'}]})
+    assert not outcome['rejected'] and text.startswith('Checklist updated: 0/2 completed.')
+    assert 'task board' in text.partition('\n')[0]
+    shown = _assert_one_progress_source(b, c.task)
+    # The first board is summarized by the checklist's explanation.
+    assert shown['revision'] == 1 and shown['summary'] == 'Release first, then the notes.'
+    assert shown['tasks'] == [{'title': 'Release 0.19.0', 'status': 'in_progress'},
+                              {'title': 'Write the release notes', 'status': 'pending'}]
+    assert outcome['publication']['coordinatorProgress'] == {
+        'projectPath': '/project', 'conversationId': 'coordinator', 'bindingRevision': 1, 'revision': 1}
+
+    # The board tool writes the same list; dropped work is no longer part of the plan.
+    result = c.run(c.task, {'summary': 'Released; writing the notes.', 'tasks': [
+        {'title': 'Release 0.19.0', 'status': 'completed', 'progress': 'Pushed to all three remotes.'},
+        {'title': 'Write the release notes', 'status': 'in_progress', 'progress': 'Drafting highlights.'},
+        {'title': 'Announce in the group', 'status': 'cancelled'}]})
+    assert result['revision'] == 2 and result['changed'] is True
+    _assert_one_progress_source(b, c.task)
+    assert c.task['_todoState']['explanation'] == 'Released; writing the notes.'
+    assert c.task['_todos'] == [{'content': 'Release 0.19.0', 'status': 'completed'},
+                                {'content': 'Write the release notes', 'status': 'in_progress'}]
+    # The receipt shows the board as the checklist the model now holds.
+    assert result['plan'] == render_todo_snapshot(c.task['_todoState'])
+
+    # A checklist rewrite keeps the summary and the notes of tasks it leaves unchanged.
+    c.checklist({'todos': [
+        {'content': 'Release 0.19.0', 'status': 'completed'},
+        {'content': 'Write the release notes', 'status': 'completed'},
+        {'content': 'Update the changelog', 'status': 'in_progress'}]})
+    shown = _assert_one_progress_source(b, c.task)
+    assert shown['revision'] == 3 and shown['summary'] == 'Released; writing the notes.'
+    assert shown['tasks'] == [
+        {'title': 'Release 0.19.0', 'status': 'completed', 'progress': 'Pushed to all three remotes.'},
+        {'title': 'Write the release notes', 'status': 'completed'},
+        {'title': 'Update the changelog', 'status': 'in_progress'}]
+    # An identical checklist is a no-op for both views.
+    puts = b.store.puts
+    _, _, again = c.checklist({'todos': c.task['_todos']})
+    assert again['no_op'] and b.store.puts == puts
+
+
+def test_both_progress_tools_hand_the_browser_one_view_of_the_write(board, coordinator_task):
+    from lib.conversations import coordinator_tools
+    c = coordinator_task
+    receipt = coordinator_tools.execute_coordinator_tool(c.task, 'update_task_progress', board.request)
+    view = receipt.progress_view
+    assert view['todos'] == c.task['_todos'] and view['todoState'] == c.task['_todoState']
+    assert view['coordinatorProgress'] == {'projectPath': '/project', 'conversationId': 'coordinator',
+                                           'bindingRevision': 1, 'revision': 1}
+    assert json.loads(receipt)['revision'] == 1
+    refused = coordinator_tools.execute_coordinator_tool(
+        c.task, 'update_task_progress', {'summary': 'ok', 'tasks': [{'title': 'x', 'status': 'stuck'}]})
+    assert 'error' in json.loads(refused) and not getattr(refused, 'progress_view', None)
+
+
+@pytest.mark.parametrize('item, reason', [
+    ({'content': 'x' * 121, 'status': 'pending'}, 'at most 120'),
+    ({'content': 'first line\nsecond line', 'status': 'pending'}, 'one line'),
+    ({'content': 'Wait for the owner', 'status': 'blocked'}, 'blocked'),
+])
+def test_a_checklist_the_board_cannot_show_is_rejected_without_a_write(board, coordinator_task, item, reason):
+    b, c = board, coordinator_task
+    c.checklist({'todos': [{'content': 'Release 0.19.0', 'status': 'in_progress'}]})
+    accepted, puts = deepcopy(c.task['_todoState']), b.store.puts
+    _, text, outcome = c.checklist({'todos': [{'content': 'Release 0.19.0', 'status': 'completed'}, item]})
+    assert outcome['rejected'] and reason in outcome['reason'] and 'task board' in outcome['reason']
+    assert text.startswith('Checklist update rejected:')
+    assert c.task['_todoState'] == accepted and b.store.puts == puts
+    _assert_one_progress_source(b, c.task)
+
+
+def test_a_replaced_binding_refuses_the_stale_coordinators_checklist(board, coordinator_task):
+    b, c = board, coordinator_task
+    b.binding['revision'] = 2
+    _, _, outcome = c.checklist({'todos': [{'content': 'Release 0.19.0', 'status': 'in_progress'}]})
+    assert outcome['rejected'] and 'Coordinator binding changed' in outcome['reason']
+    assert b.store.puts == 0 and '_todoState' not in c.task
+
+
+def test_a_checklist_write_follows_the_boards_translation(board, coordinator_task):
+    c = coordinator_task
+    c.task['config'] = {'autoTranslate': True, 'uiLang': 'zh'}
+    c.checklist({'todos': [{'content': 'Release 0.19.0', 'status': 'in_progress'}]})
+    assert c.scheduled == [(7, '/project', _PROGRESS_SCOPE, 'Chinese')]
+
+
+def test_board_from_plan_summarizes_a_first_board_and_writes_nothing_without_one():
+    from lib.conversations.coordinator_progress import board_from_plan, plan_from_board
+    plan = [{'content': 'Draft', 'status': 'completed'}, {'content': 'Review', 'status': 'in_progress'}]
+    assert board_from_plan(None, plan, '  Drafted;\n reviewing now. ')['summary'] == 'Drafted; reviewing now.'
+    assert board_from_plan(None, plan, '')['summary'] == 'Review'
+    assert board_from_plan(None, plan, 'x' * 281)['summary'] == 'Review'
+    assert board_from_plan(None, [{'content': 'Draft', 'status': 'pending'}], '')['summary'] == 'Draft'
+    assert board_from_plan(None, [], 'Nothing yet.') is None
+    previous = {'revision': 4, 'updatedAt': 1, 'summary': 'Kept.', 'tasks': [
+        {'title': 'Draft', 'status': 'completed', 'progress': 'Done.'},
+        {'title': 'Old', 'status': 'cancelled'}]}
+    assert board_from_plan(previous, [], 'Cleared.') == {'summary': 'Kept.', 'tasks': []}
+    assert plan_from_board(previous) == {'todos': [{'content': 'Draft', 'status': 'completed'}],
+                                         'explanation': 'Kept.'}
+
+
+def test_tasks_without_a_board_keep_their_own_checklist(board, coordinator_task, monkeypatch):
+    from lib.conversations.coordinator_progress import plan_publication
+    from lib.router.watchdog.policy import WATCHDOG_TOOLS
+    from lib.tasks_pkg import coordinator_policy
+    b = board
+    ordinary = {'id': 'ordinary-turn', 'convId': 'ordinary', '_userId': 7, 'config': {}}
+    assert plan_publication(ordinary) is None
+    # The Router Watchdog is a bound Coordinator without a board.
+    monkeypatch.setattr(coordinator_policy, 'coordinator_tool_ceiling', lambda scope, task=None: WATCHDOG_TOOLS)
+    assert plan_publication(coordinator_task.task) is None
+    # A failed role lookup is never a Coordinator's: those are pinned for the turn.
+    monkeypatch.setattr(coordinator_policy, 'coordinator_scope', lambda task, project_path=None: 1 / 0)
+    assert plan_publication(ordinary) is None
+    assert b.store.puts == 0
+
+
+def test_a_board_receipt_proves_the_checklist_visible_until_it_leaves_the_context(board, coordinator_task):
+    from lib.tasks_pkg.context_composer.checklist import CHECKLIST_HEADING, restore_checklist_context
+    from lib.conversations import coordinator_tools
+    c = coordinator_task
+    receipt = str(coordinator_tools.execute_coordinator_tool(c.task, 'update_task_progress', board.request))
+    call = {'role': 'assistant', 'tool_calls': [{'id': 'board-1', 'function': {
+        'name': 'update_task_progress', 'arguments': json.dumps(board.request)}}]}
+    direct = [{'role': 'user', 'content': 'Continue.'}, call,
+              {'role': 'tool', 'tool_call_id': 'board-1', 'content': receipt}]
+    gateway = [{'role': 'user', 'content': 'Continue.'},
+               {'role': 'assistant', 'tool_calls': [{'id': 'batch', 'function': {
+                   'name': 'execute_tools', 'arguments': '{}'}}]},
+               {'role': 'tool', 'tool_call_id': 'batch', 'content': json.dumps({'results': [
+                   {'name': 'update_task_progress', 'status': 'done', 'output_truncated': False,
+                    'output': receipt}]})}]
+    for messages in (direct, gateway):
+        frozen = deepcopy(messages)
+        restore_checklist_context(messages, task=c.task, model='test-model')
+        assert messages == frozen
+    # Once the receipt is gone (compaction), the board is restored as the checklist.
+    lost = [{'role': 'user', 'content': 'Continue.'}]
+    restore_checklist_context(lost, task=c.task, model='test-model')
+    restored = lost[-1]['content'] if isinstance(lost[-1]['content'], str) else json.dumps(lost[-1]['content'])
+    assert CHECKLIST_HEADING in restored and 'Research New Year homestays' in restored
 
 
 def test_board_job_runs_on_the_shared_translation_lane(board, monkeypatch):

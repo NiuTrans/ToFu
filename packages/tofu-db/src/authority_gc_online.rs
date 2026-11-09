@@ -129,7 +129,6 @@ struct Epoch {
     suspects_next: Option<SpillMarkSet>,
     temp_candidate_next: Option<PathBuf>,
     segment_dead_next: BTreeMap<Uuid, Vec<BlockId>>,
-    confirmed_loose: Vec<BlockId>,
     /// Every block whose file this epoch's loose deletion hold removed, or
     /// may have removed.
     unlinked_loose: Vec<BlockId>,
@@ -139,12 +138,12 @@ struct Epoch {
     /// the scan packs each segment the format limits close before admitting
     /// the next block.
     compaction_ids: Vec<BlockId>,
-    /// An error other than a stop that ended compaction during the scan;
-    /// reported after the deletion holds, like a phase-4 compaction error.
-    compaction_failure: Option<io::Error>,
-    /// An error other than a stop that ended the scan's removal of redundant
-    /// loose copies; reported after the deletion holds as well.
-    copy_failure: Option<io::Error>,
+    /// The first error other than a stop that ended one of the scan's lanes
+    /// (loose compaction, redundant-copy removal, victim deletion). Each lane
+    /// closes on its own error and the scan completes; the epoch then reports
+    /// this first error before any catalog publication. A failed hold can
+    /// leave the authority uncertain, so later lanes' errors are consequences.
+    scan_failure: Option<io::Error>,
     confirmed_loose_planned: bool,
     rewrite_planned: bool,
     compaction_planned: bool,
@@ -211,30 +210,32 @@ struct PreviousEpoch {
 }
 
 /// One run of single-file deletion holds (docs/TOFUDB_ONLINE_GC.md, "One
-/// file per deletion hold"). Each hold validates and unlinks one loose file.
-/// Off the mutex, a shard's directory barrier runs once the run leaves that
-/// shard, and every attempt waits until the collector has stayed off the
-/// mutex at least as long as its previous hold took: a run holds the
-/// authority at most half of its time, the collector's 50% duty-cycle rule
-/// applied to its holds. A retry after a contended authority or a refused
-/// (`WouldBlock`) hold also waits at least as long as the run has already
-/// been contended or refused, so retries back off geometrically from the
-/// loop's own cost, even before the run measured any hold.
+/// file per deletion hold" and "Collector holds wait for the mutex"). Each
+/// hold validates and unlinks one loose file. Off the mutex, a shard's
+/// directory barrier runs once the run leaves that shard, and every attempt
+/// waits until the collector has stayed off the mutex at least as long as its
+/// previous hold took: a run holds the authority at most half of its time,
+/// the collector's 50% duty-cycle rule applied to its holds. The attempt then
+/// waits for the mutex. A retry after a refused (`WouldBlock`) hold also waits
+/// at least as long as the run has already been refused, so retries back off
+/// geometrically from the loop's own cost. Every pause wakes on `stop`.
 struct SingleFileHolds<'a> {
     blocks: &'a BlockStore,
+    stop: &'a AtomicBool,
     /// A block of the shard whose unlinks no barrier made durable yet.
     unsynced: Option<BlockId>,
     previous_hold: Duration,
     released: Instant,
-    /// When the run's current streak of contended or refused attempts began.
+    /// When the run's current streak of refused attempts began.
     retrying_since: Option<Instant>,
     removed: BlockRemovalMetrics,
 }
 
 impl<'a> SingleFileHolds<'a> {
-    fn new(blocks: &'a BlockStore, previous_hold: Duration) -> Self {
+    fn new(blocks: &'a BlockStore, previous_hold: Duration, stop: &'a AtomicBool) -> Self {
         Self {
             blocks,
+            stop,
             unsynced: None,
             previous_hold,
             released: Instant::now(),
@@ -251,35 +252,40 @@ impl<'a> SingleFileHolds<'a> {
         }
     }
 
-    /// Runs `operation` under one short hold, after the run's pause. `None`
-    /// when the authority was contended: the caller retries, and the retry
-    /// waits at least as long as the run has been contended or refused.
-    /// Every collector hold that waits for the authority goes through here.
+    /// Runs `operation` under one short hold, after the run's pause. The hold
+    /// waits for the mutex instead of sampling it: a holder that keeps the
+    /// mutex most of the time and lets go only briefly would fail most
+    /// samples, and a wait that doubles after each failure then never ends in
+    /// expectation. A stop raised meanwhile ends the run with `WouldBlock`
+    /// before the hold acts. Every collector hold that waits for the
+    /// authority goes through here.
     fn attempt<D: OnlineGcDatabase, T>(
         &mut self,
         database: &Arc<Mutex<D>>,
         operation: impl FnOnce(&mut AuthorityDatabase) -> io::Result<T>,
-    ) -> Option<io::Result<T>> {
+    ) -> io::Result<T> {
         let duty = self.previous_hold.saturating_sub(self.released.elapsed());
         let backoff = self.retrying_since.map_or(Duration::ZERO, |since| since.elapsed());
-        let pause = duty.max(backoff);
-        if !pause.is_zero() {
-            std::thread::sleep(pause);
-        }
+        self.pause(duty.max(backoff));
         #[cfg(test)]
         tests_short_holds::before_single_file_hold(self.previous_hold, self.released.elapsed());
-        let Ok(mut database_guard) = database.try_lock() else {
-            self.released = Instant::now();
-            self.retrying_since.get_or_insert(self.released);
-            return None;
-        };
+        if self.stop.load(Ordering::Acquire) {
+            return Err(would_block("online GC epoch stopped"));
+        }
+        let mut database_guard = database
+            .lock()
+            .map_err(|_| io::Error::other("online GC database mutex poisoned"))?;
         let acquired = Instant::now();
-        let result = database_guard.gc_database_mut().and_then(operation);
+        let result = if self.stop.load(Ordering::Acquire) {
+            Err(would_block("online GC epoch stopped"))
+        } else {
+            database_guard.gc_database_mut().and_then(operation)
+        };
         drop(database_guard);
         self.released = Instant::now();
         let held = self.released.saturating_duration_since(acquired);
         // A refused hold is retried only by runs that wait for a publication
-        // to move both CONTROL slots, so it backs off like contention.
+        // to move both CONTROL slots, so it backs off geometrically.
         match &result {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 self.retrying_since.get_or_insert(self.released);
@@ -289,7 +295,20 @@ impl<'a> SingleFileHolds<'a> {
         // A hold that failed never shortens the pause, so a retried
         // `WouldBlock` never polls faster than the run's unlinks.
         self.previous_hold = if result.is_ok() { held } else { self.previous_hold.max(held) };
-        Some(result)
+        result
+    }
+
+    /// Waits `pause` off the mutex, or until a stop: the driver unparks this
+    /// thread when it raises the flag.
+    fn pause(&self, pause: Duration) {
+        let deadline = Instant::now() + pause;
+        while !self.stop.load(Ordering::Acquire) {
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            std::thread::park_timeout(deadline - now);
+        }
     }
 
     /// Runs `remove` for `block_id` under one short hold (`attempt`).
@@ -298,9 +317,8 @@ impl<'a> SingleFileHolds<'a> {
         database: &Arc<Mutex<D>>,
         block_id: BlockId,
         remove: impl FnOnce(&mut AuthorityDatabase) -> io::Result<LooseRemoval>,
-    ) -> Option<io::Result<()>> {
-        let removal = self.attempt(database, remove)?;
-        Some(removal.map(|removal| match removal {
+    ) -> io::Result<()> {
+        match self.attempt(database, remove)? {
             LooseRemoval::Kept => {}
             LooseRemoval::Missing => self.removed.blocks_removed += 1,
             LooseRemoval::Unlinked { bytes } => {
@@ -308,7 +326,8 @@ impl<'a> SingleFileHolds<'a> {
                 self.removed.bytes_removed += bytes;
                 self.unsynced = Some(block_id);
             }
-        }))
+        }
+        Ok(())
     }
 
     /// The barrier of the last shard the run unlinked in. A crash before a
@@ -323,27 +342,18 @@ impl<'a> SingleFileHolds<'a> {
 }
 
 /// Publishes one off-mutex-built catalog change (consolidation or segment
-/// rewrite) under one short hold. A contended authority is waited for with
-/// the backoff of every other collector hold instead of failing the epoch
-/// and stranding the built segment. The publication's own `WouldBlock`
-/// (physical lane busy, catalog moved, relink fence) and a stop both return
-/// `WouldBlock`, which proves nothing was published: the caller discards
-/// the built segment.
+/// rewrite) under one short hold, which waits for a contended authority like
+/// every other collector hold instead of failing the epoch and stranding the
+/// built segment. The publication's own `WouldBlock` (physical lane busy,
+/// catalog moved, relink fence) and a stop both return `WouldBlock`, which
+/// proves nothing was published: the caller discards the built segment.
 fn publish_under_hold<D: OnlineGcDatabase, T>(
     database: &Arc<Mutex<D>>,
     blocks: &BlockStore,
     stop: &AtomicBool,
-    mut publish: impl FnMut(&mut AuthorityDatabase) -> io::Result<T>,
+    publish: impl FnOnce(&mut AuthorityDatabase) -> io::Result<T>,
 ) -> io::Result<T> {
-    let mut holds = SingleFileHolds::new(blocks, Duration::ZERO);
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return Err(would_block("online GC epoch stopped"));
-        }
-        if let Some(published) = holds.attempt(database, &mut publish) {
-            return published;
-        }
-    }
+    SingleFileHolds::new(blocks, Duration::ZERO, stop).attempt(database, publish)
 }
 
 /// The online collector. One instance per daemon, driven by a dedicated
@@ -705,13 +715,11 @@ impl OnlineGarbageCollector {
             suspects_next: None,
             temp_candidate_next: None,
             segment_dead_next: BTreeMap::new(),
-            confirmed_loose: Vec::new(),
             unlinked_loose: Vec::new(),
             confirmed_temp: None,
             rewrite_victim: None,
             compaction_ids: Vec::new(),
-            compaction_failure: None,
-            copy_failure: None,
+            scan_failure: None,
             confirmed_loose_planned: false,
             rewrite_planned: false,
             compaction_planned: false,
@@ -754,6 +762,11 @@ impl OnlineGarbageCollector {
         }
         // Phase 3: scan + two-mark confirm, off-mutex.
         if let Err(error) = self.scan(database, &mut epoch, stop) {
+            // The next epoch still confirms from the older suspects, observed
+            // before this scan's unlinks: none of those may confirm (S10).
+            self.previous.unlinked_loose.append(&mut epoch.unlinked_loose);
+            self.previous.unlinked_loose.sort_unstable();
+            self.previous.unlinked_loose.dedup();
             self.cleanup_epoch(&mut epoch);
             self.note_deferred();
             return Err(error);
@@ -883,11 +896,11 @@ impl OnlineGarbageCollector {
         };
         reclaim.observed_orphans = observed.len();
         let mut outcome = Ok(());
-        // One paced run of single-file holds: a contended authority or a
-        // refused hold (a publication owns the physical lane, or the CONTROL
-        // slots are briefly apart) postpones the next attempt by the run's
-        // backoff. Only a stop or an error ends the pass.
-        let mut holds = SingleFileHolds::new(blocks, Duration::ZERO);
+        // One paced run of single-file holds: a contended authority is waited
+        // for, and a refused hold (a publication owns the physical lane, or
+        // the CONTROL slots are briefly apart) postpones the next attempt by
+        // the run's backoff. Only a stop or an error ends the pass.
+        let mut holds = SingleFileHolds::new(blocks, Duration::ZERO, stop);
         'candidates: for candidate in observed
             .iter()
             .filter(|candidate| previous.get(&candidate.file_name) == Some(&candidate.file_bytes))
@@ -898,18 +911,17 @@ impl OnlineGarbageCollector {
                     break 'candidates;
                 }
                 match holds.attempt(database, |database| database.online_gc_remove_observed_orphan(candidate)) {
-                    Some(Ok(Some(bytes))) => {
+                    Ok(Some(bytes)) => {
                         reclaim.removed_orphans += 1;
                         reclaim.removed_bytes += bytes;
                         break;
                     }
-                    Some(Ok(None)) => break,
-                    Some(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Some(Err(error)) => {
+                    Ok(None) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => {
                         outcome = Err(error);
                         break 'candidates;
                     }
-                    None => {}
                 }
             }
         }
@@ -1142,7 +1154,12 @@ impl OnlineGarbageCollector {
             .min(MAX_SEGMENT_PAYLOAD_BYTES);
         let mut compaction_bytes = 0_u64;
         let mut copies_open = true;
-        let mut copy_holds = SingleFileHolds::new(blocks, Duration::ZERO);
+        let mut victims_open = true;
+        // One paced run for every unlink of the scan, redundant copies and
+        // confirmed victims alike, so together they keep the 50% duty rule.
+        let mut holds = SingleFileHolds::new(blocks, Duration::ZERO, stop);
+        let mut copies_removed = BlockRemovalMetrics::default();
+        let mut victims_removed = BlockRemovalMetrics::default();
         let result = blocks.visit_block_shards(
             |shard, block_ids| {
                 if stop.load(Ordering::Acquire) {
@@ -1159,6 +1176,7 @@ impl OnlineGarbageCollector {
                 // Live blocks of this shard whose loose file is a redundant
                 // copy, with the catalogued segment that holds each.
                 let mut redundant_copies = Vec::new();
+                let mut victims = Vec::new();
                 for block_id in block_ids {
                     if stop.load(Ordering::Acquire) {
                         return Err(would_block("online GC epoch stopped"));
@@ -1194,7 +1212,7 @@ impl OnlineGarbageCollector {
                                         .pack_compaction_segment(database, epoch, blocks, stop)
                                     {
                                         Err(error) if !stop.load(Ordering::Acquire) => {
-                                            epoch.compaction_failure = Some(error);
+                                            epoch.scan_failure.get_or_insert(error);
                                             false
                                         }
                                         packed => packed?,
@@ -1218,37 +1236,55 @@ impl OnlineGarbageCollector {
                     {
                         continue;
                     }
-                    // Each victim is unlinked in its own hold, so no byte
-                    // total bounds a hold; the count bounds the victim list.
-                    if epoch.confirmed_loose.len() < self.budget.maximum_blocks_per_round {
-                        epoch.confirmed_loose.push(block_id);
-                    }
+                    victims.push(block_id);
                 }
-                // The shard's redundant copies go before the next shard is
-                // listed, so their IDs never outgrow one shard.
-                if !redundant_copies.is_empty() {
-                    if let Err(error) = self.remove_loose_copies(database, &mut copy_holds, redundant_copies, stop) {
+                // The shard's redundant copies and confirmed victims go before
+                // the next shard is listed, so their IDs never outgrow one
+                // shard and no count bounds what one epoch reclaims.
+                if !redundant_copies.is_empty() && copies_open {
+                    let before = holds.removed;
+                    let removed = self.remove_loose_copies(database, &mut holds, redundant_copies, stop);
+                    copies_removed.blocks_removed += holds.removed.blocks_removed - before.blocks_removed;
+                    copies_removed.bytes_removed += holds.removed.bytes_removed - before.bytes_removed;
+                    if let Err(error) = removed {
                         if stop.load(Ordering::Acquire) {
                             return Err(error);
                         }
                         // Any error but a stop ends copy removal only; the
                         // suspects still complete.
-                        epoch.copy_failure = Some(error);
+                        epoch.scan_failure.get_or_insert(error);
                         copies_open = false;
+                    }
+                }
+                if !victims.is_empty() && victims_open {
+                    epoch.confirmed_loose_planned = true;
+                    let before = holds.removed;
+                    let deleted = self.delete_victims(database, &mut holds, victims, &mut epoch.unlinked_loose, stop);
+                    victims_removed.blocks_removed += holds.removed.blocks_removed - before.blocks_removed;
+                    victims_removed.bytes_removed += holds.removed.bytes_removed - before.bytes_removed;
+                    if let Err(error) = deleted {
+                        if stop.load(Ordering::Acquire) {
+                            return Err(error);
+                        }
+                        // Any error but a stop ends victim deletion only; the
+                        // suspects still complete, and the victims it left
+                        // confirm again next epoch.
+                        epoch.scan_failure.get_or_insert(error);
+                        victims_open = false;
                     }
                 }
                 Ok(())
             },
         );
+        epoch.redundant_copies_removed = copies_removed.blocks_removed;
+        epoch.reclaimed_blocks += victims_removed.blocks_removed;
+        epoch.reclaimed_bytes += copies_removed.bytes_removed + victims_removed.bytes_removed;
         result?;
-        epoch.redundant_copies_removed = copy_holds.removed.blocks_removed;
-        epoch.reclaimed_bytes += copy_holds.removed.bytes_removed;
         // The compaction floor mirrors the offline collector; it applies to
         // the trailing segment only, every closed one was full.
         if epoch.compaction_ids.len() < MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS {
             epoch.compaction_ids.clear();
         }
-        epoch.confirmed_loose_planned = !epoch.confirmed_loose.is_empty();
         epoch.compaction_planned = !epoch.compaction_ids.is_empty();
         Ok(())
 
@@ -1289,17 +1325,29 @@ impl OnlineGarbageCollector {
         let mut victims = Vec::new();
         let mut retained_per_victim = Vec::new();
         let mut retained_bytes = 0_u64;
+        let mut retained_blocks = 0_usize;
+        // The replacement is one segment: its retained union must fit the
+        // segment format (blocks and payload bytes), not only the budget. A
+        // victim's file bytes bound its retained payload from above.
+        let byte_limit = self.budget.maximum_temporary_bytes.min(MAX_SEGMENT_PAYLOAD_BYTES);
         for (reference, retained_ids, _) in candidates {
             if victims.len() >= PRESSURE_CONSOLIDATION_VICTIMS {
                 break;
             }
-            let next_bytes = retained_bytes.saturating_add(reference.file_bytes);
-            if !retained_ids.is_empty() && next_bytes > self.budget.maximum_temporary_bytes {
+            // A fully dead victim adds nothing to the replacement.
+            let next_bytes = if retained_ids.is_empty() {
+                retained_bytes
+            } else {
+                retained_bytes.saturating_add(reference.file_bytes)
+            };
+            let next_blocks = retained_blocks + retained_ids.len();
+            if !retained_ids.is_empty() && (next_bytes > byte_limit || next_blocks > MAX_SEGMENT_BLOCKS) {
                 continue;
             }
             victims.push(reference);
             retained_per_victim.push(retained_ids);
             retained_bytes = next_bytes;
+            retained_blocks = next_blocks;
         }
         if victims.len() >= 2 {
             // Consolidation subsumes a rewrite that shares a victim; never
@@ -1440,43 +1488,10 @@ impl OnlineGarbageCollector {
             }
         }
 
-        // Loose victims, one short hold each: every hold decides the staged
-        // copy, the relink fence and both CONTROL slots again, and reports the
-        // victim when it unlinked, or may have unlinked, its file (rule S10).
-        // A contended authority postpones the next hold. A busy physical lane
-        // or CONTROL slots that stay apart end this epoch's loose deletion;
-        // the remaining victims stay suspects and confirm again next epoch.
-        if !epoch.confirmed_loose.is_empty() {
-            let victims = std::mem::take(&mut epoch.confirmed_loose);
-            let mut holds = SingleFileHolds::new(&blocks, Duration::ZERO);
-            let mut deleted = Ok(());
-            'victims: for victim in victims {
-                if let Err(error) = holds.sync_left_shard(victim) {
-                    deleted = Err(error);
-                    break;
-                }
-                loop {
-                    if stop.load(Ordering::Acquire) {
-                        deleted = Err(would_block("online GC epoch stopped"));
-                        break 'victims;
-                    }
-                    match holds.remove(database, victim, |database| {
-                        database.online_gc_delete_loose_victim(victim, &mut epoch.unlinked_loose)
-                    }) {
-                        Some(Ok(())) => break,
-                        Some(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => break 'victims,
-                        Some(Err(error)) => {
-                            deleted = Err(error);
-                            break 'victims;
-                        }
-                        None => {}
-                    }
-                }
-            }
-            let synced = holds.finish();
-            epoch.reclaimed_blocks += holds.removed.blocks_removed;
-            epoch.reclaimed_bytes += holds.removed.bytes_removed;
-            deleted.and(synced)?;
+        // A scan lane that failed ends the epoch before any catalog
+        // publication, with the scan's first error.
+        if let Some(error) = epoch.scan_failure.take() {
+            return Err(error);
         }
 
         // Catalog-pressure consolidation: build off-mutex, publish under
@@ -1555,12 +1570,7 @@ impl OnlineGarbageCollector {
         }
 
         // Loose compaction: the scan packed every segment the format limits
-        // closed; the trailing one packs here. A compaction error that ended
-        // the scan's packing, or a copy-removal error that ended its removal
-        // of redundant copies, surfaces now.
-        if let Some(error) = epoch.compaction_failure.take().or_else(|| epoch.copy_failure.take()) {
-            return Err(error);
-        }
+        // closed; the trailing one packs here.
         if !epoch.compaction_ids.is_empty() {
             self.pack_compaction_segment(database, epoch, &blocks, stop)?;
         }
@@ -1605,28 +1615,20 @@ impl OnlineGarbageCollector {
         compaction_ids.sort_unstable();
         compaction_ids.dedup();
         let (segment, reference) = self.build_compaction_segment(blocks, &compaction_ids, stop)?;
-        let mut publish_hold = Duration::ZERO;
-        let publish = match database.try_lock() {
-            Ok(mut database_guard) => {
-                let acquired = Instant::now();
-                let published = match self.compaction_has_catalog_slot(blocks) {
-                    Ok(true) => database_guard.gc_database_mut().and_then(|database| {
-                        database.online_gc_finish_compaction(&compaction_ids, reference)
-                    }),
-                    Ok(false) => Err(would_block("online GC compaction catalog reached the pressure floor")),
-                    Err(error) => Err(error),
-                };
-                drop(database_guard);
-                publish_hold = acquired.elapsed();
-                published
+        // The publish waits for a contended authority like every collector
+        // hold, instead of discarding the segment it just built; its copies
+        // then go in the same run, paced by the publish hold.
+        let mut holds = SingleFileHolds::new(blocks, Duration::ZERO, stop);
+        let publish = holds.attempt(database, |database| {
+            if !self.compaction_has_catalog_slot(blocks)? {
+                return Err(would_block("online GC compaction catalog reached the pressure floor"));
             }
-            Err(_) => Err(would_block("online GC compaction hold contended")),
-        };
+            database.online_gc_finish_compaction(&compaction_ids, reference)
+        });
         match publish {
             Ok(metrics) => {
                 epoch.compacted_blocks += u64::from(metrics.blocks_packed);
                 epoch.compaction_segments += 1;
-                let mut holds = SingleFileHolds::new(blocks, publish_hold);
                 self.remove_loose_copies(
                     database,
                     &mut holds,
@@ -1649,10 +1651,11 @@ impl OnlineGarbageCollector {
     /// whose `removed` counts them, then makes the last shard's unlinks
     /// durable: the copies of a segment `pack_compaction_segment` just
     /// published, or one shard's copies the scan found already catalogued (one
-    /// run across the scan, so its pause also spans shards). Neither a
-    /// contended authority nor `WouldBlock` (CONTROL slots briefly apart while
-    /// a publication owns the lane) ends the batch, only a stop or an error; a
-    /// copy an ended batch leaves waits for the next scan. The copies are live
+    /// run across the scan, so its pause also spans shards). A contended
+    /// authority is waited for and `WouldBlock` (CONTROL slots briefly apart
+    /// while a publication owns the lane) is retried; neither ends the batch,
+    /// only a stop or an error, and a copy an ended batch leaves waits for the
+    /// next scan. The copies are live
     /// in this epoch's mark, so none of them is a suspect the next epoch
     /// confirms from, and rule S10 needs no record of their unlinks.
     fn remove_loose_copies<D: OnlineGcDatabase>(
@@ -1676,18 +1679,60 @@ impl OnlineGarbageCollector {
                 match holds.remove(database, copy, |database| {
                     database.online_gc_remove_redundant_copy(segment_id, copy)
                 }) {
-                    Some(Ok(())) => break,
-                    Some(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Some(Err(error)) => {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => {
                         removed = Err(error);
                         break 'copies;
                     }
-                    None => {}
                 }
             }
         }
         let synced = holds.finish();
         removed.and(synced)
+    }
+
+    /// Unlinks one shard's confirmed loose victims, one short hold each in
+    /// the scan's paced run: every hold decides the staged copy, the relink
+    /// fence and both CONTROL slots again and reports the victim when it
+    /// unlinked, or may have unlinked, its file (rule S10). A contended
+    /// authority is waited for and a refused hold (a publication owns the
+    /// physical lane) is retried after the run's backoff, as for redundant
+    /// copies; only a stop or an error ends deletion, and the victims it
+    /// leaves stay suspects that confirm again next epoch.
+    fn delete_victims<D: OnlineGcDatabase>(
+        &self,
+        database: &Arc<Mutex<D>>,
+        holds: &mut SingleFileHolds<'_>,
+        victims: Vec<BlockId>,
+        unlinked: &mut Vec<BlockId>,
+        stop: &AtomicBool,
+    ) -> io::Result<()> {
+        let mut deleted = Ok(());
+        'victims: for victim in victims {
+            if let Err(error) = holds.sync_left_shard(victim) {
+                deleted = Err(error);
+                break;
+            }
+            loop {
+                if stop.load(Ordering::Acquire) {
+                    deleted = Err(would_block("online GC epoch stopped"));
+                    break 'victims;
+                }
+                match holds.remove(database, victim, |database| {
+                    database.online_gc_delete_loose_victim(victim, unlinked)
+                }) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => {
+                        deleted = Err(error);
+                        break 'victims;
+                    }
+                }
+            }
+        }
+        let synced = holds.finish();
+        deleted.and(synced)
     }
 
     /// Builds the replacement segment off-mutex. Returns the built segment
@@ -1846,9 +1891,10 @@ impl OnlineGarbageCollectionObserver {
     }
 }
 
-/// Dedicated `tofu-db-online-gc` thread. Mirrors the maintenance lane's
-/// politeness: every authority hold is a `try_lock`, contention always
-/// defers the collector, never the foreground.
+/// Dedicated `tofu-db-online-gc` thread. The epoch's capture is a `try_lock`
+/// that defers a contended epoch; every later hold waits for the mutex after
+/// the collector's duty pause, so the foreground waits for at most one short
+/// hold (docs/TOFUDB_ONLINE_GC.md, "Collector holds wait for the mutex").
 pub struct OnlineGarbageCollectionDriver<D: OnlineGcDatabase = AuthorityDatabase> {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1962,6 +2008,8 @@ impl<D: OnlineGcDatabase> OnlineGarbageCollectionDriver<D> {
             .map_err(|_| io::Error::other("online driver thread lock poisoned"))?
             .take();
         if let Some(thread) = thread {
+            // A run paused by its backoff wakes now (`SingleFileHolds::pause`).
+            thread.thread().unpark();
             // Bounded join: every epoch phase is crash-safe at any
             // interruption point, so a slow phase never stalls shutdown.
             let deadline = std::time::Instant::now() + DRIVER_STOP_JOIN_BUDGET;

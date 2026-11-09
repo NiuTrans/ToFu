@@ -181,17 +181,35 @@ def test_other_routes_keep_the_complete_eager_surface(protocol, url, model):
     assert not projection.budget_dropped_names
 
 
-def test_no_demotion_without_a_discovery_path(monkeypatch):
+def test_all_eager_local_surface_keeps_a_discovery_path_to_fit(monkeypatch):
+    # Nothing is searchable, so local discovery alone would add no gateway; the
+    # route budget hides optional names and so keeps search/execute live.
     warnings = _captured_warnings(monkeypatch)
     body = _root_body(_tool_searchable_count=0, _tool_search_catalog_size=0)
-    tool_wire.project_tool_wire(
+    projection = tool_wire.project_tool_wire(
         body, api_protocol='anthropic', base_url=SANKUAI_ANTHROPIC)
     names = _names(body['tools'])
-    assert 'search_tools' not in names
+    hidden = [name for name in ROOT_WIRE_NAMES if name not in names]
+
+    assert _joined_bytes(names) <= tool_wire.SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES
+    assert {'search_tools', 'execute_tools', 'poll', 'kill', *CODE_FLOOR} <= set(names)
+    assert hidden and set(hidden) <= set(projection.budget_dropped_names)
+    assert warnings == []
+
+
+def test_required_only_surface_goes_out_over_budget_and_says_why(monkeypatch):
+    warnings = _captured_warnings(monkeypatch)
+    body = _root_body(_tool_searchable_count=0, _tool_search_catalog_size=0)
+    body['_required_direct_tool_names'] = _names(body['_executable_tool_catalog'])
+    projection = tool_wire.project_tool_wire(
+        body, api_protocol='anthropic', base_url=SANKUAI_ANTHROPIC)
+    names = _names(body['tools'])
+    # Nothing may be hidden, so a discovery pair would only add bytes.
     assert set(names) == set(ROOT_WIRE_NAMES) - {'search_tools', 'execute_tools'}
+    assert not projection.budget_dropped_names
     # A request that cannot fit still goes out, but never silently.
     (warning,) = warnings
-    assert 'NOT met' in warning and 'no search_tools/execute_tools' in warning
+    assert 'NOT met' in warning and 'required direct tools alone exceed it' in warning
     assert f'{_joined_bytes(names)} bytes sent' in warning
 
 

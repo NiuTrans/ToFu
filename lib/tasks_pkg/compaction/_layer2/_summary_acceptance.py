@@ -27,9 +27,13 @@ def accept_summary(
     summary_text: str, messages: list, task: dict | None, *, fallback: bool,
     recent_files_block: str, turn_diff_block: str, turn_diff_included: bool,
     result_meta: dict, log_prefix: str,
-    recovery_max_chars: int,
+    recovery_max_chars: int, continuity_fold: frozenset = frozenset(),
 ) -> AcceptedSummary | str:
-    """Return validated/decorated text or the unchanged-input refusal message."""
+    """Return validated/decorated text or the unchanged-input refusal message.
+
+    ``continuity_fold`` is the plan's fold: the attached packet omits and counts
+    exactly the observations the summary input handed to the narrative.
+    """
     _recovery_base_summary = summary_text if fallback else ''
 
     summary_text += recent_files_block
@@ -55,7 +59,8 @@ def accept_summary(
     from lib.tasks_pkg.compaction._continuity import attach_continuity
     narrative = summary_text
     try:
-        summary_text, digest = attach_continuity(summary_text, messages, task)
+        summary_text, digest = attach_continuity(
+            summary_text, messages, task, folded=continuity_fold)
     except (ValueError, TypeError) as exc:
         logger.warning('%s [Compact] continuity validation refused: %s', log_prefix, exc)
         result_meta.update(compacted=False, summaryFailureReason='continuity_invalid')

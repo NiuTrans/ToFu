@@ -265,19 +265,18 @@ def ensure_ffprobe(*, install: bool = True, timeout: int = 600) -> str:
     logger.info('[MotionVideo] downloading static ffprobe (one-time bootstrap)')
     import hashlib
     import tempfile
-    import urllib.request
+    from lib.http_transport.client import http_get
     import zipfile
     part_path = ''
     try:
         with tempfile.TemporaryDirectory(prefix='mv-ffprobe-') as tmp:
             archive_path = os.path.join(tmp, 'ffprobe.zip')
-            request = urllib.request.Request(
-                _FFPROBE_ARCHIVE_URL,
-                headers={'User-Agent': 'Tofu-ffprobe-bootstrap/1'})
             digest = hashlib.sha256()
             total = 0
-            with urllib.request.urlopen(request, timeout=max(1, timeout)) as response, \
+            with http_get(_FFPROBE_ARCHIVE_URL, timeout=max(1, timeout), stream=True,
+                          headers={'User-Agent': 'Tofu-ffprobe-bootstrap/1'}) as response, \
                     open(archive_path, 'wb') as archive:
+                response.raise_for_status()
                 try:
                     declared = int(response.headers.get('Content-Length') or 0)
                 except (AttributeError, TypeError, ValueError) as exc:
@@ -287,7 +286,7 @@ def ensure_ffprobe(*, install: bool = True, timeout: int = 600) -> str:
                 if declared > _FFPROBE_ARCHIVE_MAX_BYTES:
                     raise ValueError('ffprobe archive exceeds download limit')
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    chunk = response.raw.read(1024 * 1024, decode_content=True)
                     if not chunk:
                         break
                     total += len(chunk)

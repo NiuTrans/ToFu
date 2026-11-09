@@ -68,7 +68,7 @@ def compute_turn_attachments(
         _chars = sum(len(a) for a in attachments)
         logger.debug('[Context] conv=%s round=%d inject block=per_turn '
                      'count=%d chars=%d',
-                     conv_id[:8] if conv_id else '?', round_num,
+                     conv_id if conv_id else '?', round_num,
                      len(attachments), _chars)
 
     return attachments

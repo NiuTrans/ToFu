@@ -21,13 +21,13 @@ import subprocess
 import pytest
 
 from tests._jsdom import require_node_modules
-from tests._runtime_sections import native_module_path, runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-JS_DIR = runtime_sections_dir()
+MARKDOWN = runtime_section_path('core/markdown.js')
 HTML_SAFETY = native_module_path(
     '.native/markdown-html-safety.js',
     os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
@@ -96,7 +96,7 @@ def test_markdown_escape_raw_html_contract():
     try:
         result = subprocess.run(
             ['node', harness, HTML_SAFETY,
-             os.path.join(JS_DIR, 'core', 'markdown.js'), marked_cjs],
+             MARKDOWN, marked_cjs],
             cwd=ROOT, capture_output=True, text=True, timeout=30)
     finally:
         try:

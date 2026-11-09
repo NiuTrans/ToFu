@@ -9,13 +9,16 @@ Responsibility
     which is what lets lanes live on fast storage whose persistence is
     unproven. Landing retires a clean lane's checkout as a spare of its
     repository; the next lane takes a spare and rewrites only the files that
-    differ instead of checking out the whole tree.
+    differ instead of checking out the whole tree. When none is left,
+    ``ensure_next_spare`` prepares the next one in a detached process, under a
+    ``.preparing-`` name that is renamed to a spare only once complete.
 
 Entry points
     ``create_lane``, ``restore_lane``, ``retire_lane``, ``save_wip``,
     ``save_task_lanes``, ``list_lanes``, ``drop_wip``, ``repository``,
-    ``is_lane``. CLI: ``scripts/lane.py``; ``scripts/git_land.py`` retires a
-    landed lane.
+    ``is_lane``, ``prepare_spare``, ``ensure_next_spare``. CLI:
+    ``scripts/lane.py`` (``new`` and ``restore`` call ``ensure_next_spare``);
+    ``scripts/git_land.py`` retires a landed lane.
 
 Dependencies: the git executable; ``serverctl_pkg.local_placement``
 (``PURPOSE_LANES``). Standard library otherwise.
@@ -24,17 +27,20 @@ Contract: docs/modules/project_integration.md, "Lanes".
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 WIP_REF_PREFIX = 'refs/tofu/lanes/'
 _SPARE_PREFIX = '.spare-'
+_PREPARING_PREFIX = '.preparing-'
 # Lanes stay inside the repository when no faster local root is selected.
 _FALLBACK_PARENT = ('.tofu', 'worktrees')
 _BRIDGED_DEPENDENCIES = ('node_modules', '.venv')
@@ -57,14 +63,15 @@ class Checkout:
     branch: str
 
 
-def _git(cwd, *args: str, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def _git(cwd, *args: str, env: dict | None = None, check: bool = True,
+         input: str | None = None) -> subprocess.CompletedProcess:
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith('GIT_')
                    or key.startswith(('GIT_AUTHOR_', 'GIT_COMMITTER_'))}
     environment.update(LC_ALL='C', GIT_OPTIONAL_LOCKS='0')
     environment.update(env or {})
     result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', *args], cwd=str(cwd),
-                            env=environment, capture_output=True, text=True)
+                            env=environment, capture_output=True, text=True, input=input)
     if check and result.returncode:
         raise LaneError(f'git {args[0]} failed: {result.stderr.strip()[:600]}')
     return result
@@ -246,16 +253,14 @@ def restore_lane(path, branch: str) -> tuple[Path, str]:
     return target, 'restored with its saved uncommitted work'
 
 
-def save_wip(checkout) -> str | None:
-    """Record CHECKOUT's uncommitted state at refs/tofu/lanes/<branch>; the branch never moves.
+def capture_working_tree(checkout) -> tuple[str, str]:
+    """Capture HEAD and current bytes through a private index; move no caller state.
 
-    Returns the work-in-progress commit, or None when nothing is uncommitted
-    (the ref is then removed) or the checkout has no branch.
+    The same immutable capture serves saved lanes and verification. Staged,
+    unstaged and nonignored untracked files are included; the caller's index,
+    branch and working files are never rewritten.
     """
     checkout = Path(checkout)
-    branch = _git(checkout, 'symbolic-ref', '-q', '--short', 'HEAD', check=False).stdout.strip()
-    if not branch:
-        return None
     head = _git(checkout, 'rev-parse', 'HEAD').stdout.strip()
     index = Path(_git(checkout, 'rev-parse', '--path-format=absolute', '--git-path',
                       'index').stdout.strip())
@@ -265,8 +270,25 @@ def save_wip(checkout) -> str | None:
             # The copy keeps the index's mtime, which Git's racy-entry check reads.
             shutil.copy2(index, private)
         environment = {'GIT_INDEX_FILE': str(private)}
+        entries = _git(checkout, 'ls-files', '-v', '-z', env=environment).stdout.split('\0')
+        flagged = [entry[2:] for entry in entries if entry and
+                   (entry[0].islower() or entry[0] == 'S')]
+        if flagged:
+            for flag in ('--no-assume-unchanged', '--no-skip-worktree'):
+                _git(checkout, 'update-index', flag, '-z', '--stdin',
+                     env=environment, input='\0'.join(flagged) + '\0')
         _git(checkout, 'add', '-A', env=environment)
         tree = _git(checkout, 'write-tree', env=environment).stdout.strip()
+    return head, tree
+
+
+def save_wip(checkout) -> str | None:
+    """Save a lane's current bytes at its WIP ref without moving its branch."""
+    checkout = Path(checkout)
+    branch = _git(checkout, 'symbolic-ref', '-q', '--short', 'HEAD', check=False).stdout.strip()
+    if not branch:
+        return None
+    head, tree = capture_working_tree(checkout)
     ref = WIP_REF_PREFIX + branch
     if tree == _git(checkout, 'rev-parse', 'HEAD^{tree}').stdout.strip():
         _git(checkout, 'update-ref', '-d', ref, check=False)
@@ -341,3 +363,87 @@ def list_lanes(path) -> list[dict]:
 def spare_count(repo: Repository) -> int:
     return sum(1 for parent in _lane_parents(repo) if parent.is_dir()
                for _ in parent.glob(f'{_SPARE_PREFIX}*'))
+
+
+def _lock_is_held(lock_path: Path) -> bool:
+    """Whether a live process holds LOCK_PATH; a missing lock is not held."""
+    try:
+        handle = open(lock_path, 'r+')
+    except FileNotFoundError:
+        return False
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+
+
+def _clear_abandoned_preparations(repo: Repository, root: Path) -> None:
+    """Remove what a preparation that died left behind; a live one keeps its lock."""
+    for entry in sorted(root.glob(f'{_PREPARING_PREFIX}*')):
+        if entry.name.endswith('.lock'):
+            if not (root / entry.name[:-len('.lock')]).exists() and not _lock_is_held(entry):
+                entry.unlink(missing_ok=True)
+            continue
+        lock_path = root / f'{entry.name}.lock'
+        if _lock_is_held(lock_path):
+            continue
+        _git(repo.top, 'worktree', 'remove', '--force', str(entry), check=False)
+        shutil.rmtree(entry, ignore_errors=True)
+        lock_path.unlink(missing_ok=True)
+
+
+def _preparation_in_progress(root: Path) -> bool:
+    return any(_lock_is_held(lock) for lock in root.glob(f'{_PREPARING_PREFIX}*.lock'))
+
+
+def prepare_spare(path) -> str:
+    """Create the next lane's checkout as a spare at the main checkout's branch.
+
+    Returns ``ready``, ``present`` (a spare already exists) or ``no-space``
+    (the placement reserve would be crossed). The checkout is created under a
+    ``.preparing-`` name and renamed to a spare only once complete, so
+    ``create_lane`` never takes a partial checkout.
+    """
+    from serverctl_pkg.local_placement import has_free_space
+    repo = repository(path)
+    root = lane_root(repo)
+    _clear_abandoned_preparations(repo, root)
+    if any(root.glob(f'{_SPARE_PREFIX}*')):
+        return 'present'
+    if not has_free_space(root):
+        return 'no-space'
+    name = uuid.uuid4().hex[:12]
+    preparing, lock_path = root / f'{_PREPARING_PREFIX}{name}', root / f'{_PREPARING_PREFIX}{name}.lock'
+    with open(lock_path, 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            _git(repo.top, 'worktree', 'add', '-q', '--detach', str(preparing), _trunk(repo))
+            _move(preparing, root / f'{_SPARE_PREFIX}{name}')
+        except BaseException:
+            _git(repo.top, 'worktree', 'remove', '--force', str(preparing), check=False)
+            shutil.rmtree(preparing, ignore_errors=True)
+            raise
+        finally:
+            lock_path.unlink(missing_ok=True)
+    return 'ready'
+
+
+def ensure_next_spare(path) -> bool:
+    """Start preparing the next lane's checkout when none is ready or being prepared.
+
+    Runs ``scripts/lane.py prepare-spare`` detached, so the caller returns at
+    once and the next lane recycles instead of checking out the whole tree.
+    Its output goes to ``.preparation.log`` in the lane root.
+    """
+    repo = repository(path)
+    root = lane_root(repo)
+    if any(root.glob(f'{_SPARE_PREFIX}*')) or _preparation_in_progress(root):
+        return False
+    script = Path(__file__).resolve().parents[2] / 'scripts' / 'lane.py'
+    with open(root / '.preparation.log', 'w', encoding='utf-8') as log:
+        subprocess.Popen([sys.executable, str(script), 'prepare-spare'], cwd=str(repo.top),
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    return True

@@ -1,11 +1,14 @@
-"""Silent-stream deadline: headers then silence must never hang a turn.
+"""Silent-stream deadline: no upstream byte must never hang a turn.
 
 2026-10-28 production: a provider sent response headers and then nothing; a
 root-agent round sat in ``ssl.read`` for hours because the rolling idle window
 is sealed off by default and interactive rounds pass no attempt or first-byte
-deadline. A real local HTTP server reproduces it: the call must end with the
-typed retryable ``ResponseReadTimeoutError(cause_type='stream_silence')``
-within the deadline plus slack, while a slow but steady stream completes.
+deadline. 2026-11-08 production: the gateway buffered response headers and
+held twelve requests for its own 2,000 s upstream timeout before answering
+504; every retry answered in 7-71 s. A real local HTTP server reproduces both:
+the call must end with the typed retryable
+``ResponseReadTimeoutError(cause_type='stream_silence')`` within the deadline
+plus slack, while slow but steady traffic, including late headers, completes.
 """
 from __future__ import annotations
 
@@ -33,7 +36,8 @@ def _frame(payload):
 
 
 @contextmanager
-def _server(behaviour):
+def _server(behaviour, *, header_delay=0.0):
+    """``header_delay`` seconds before the response headers; None never sends them."""
     release = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -46,6 +50,12 @@ def _server(behaviour):
             length = int(self.headers.get('Content-Length', 0) or 0)
             if length:
                 self.rfile.read(length)
+            if header_delay is None:
+                release.wait(30)
+                self.close_connection = True
+                return
+            if header_delay and release.wait(header_delay):
+                return
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Transfer-Encoding', 'chunked')
@@ -175,6 +185,74 @@ def test_sync_slow_steady_stream_completes():
     assert elapsed > DEADLINE_S * 2
 
 
+def test_sync_missing_response_headers_raise_the_silence_timeout():
+    from lib.llm.stream import _stream_chat_once
+
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _bounded(lambda: _stream_chat_once(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]'))
+
+    error = outcome.get('error')
+    assert isinstance(error, ResponseReadTimeoutError), outcome
+    assert error.cause_type == 'stream_silence'
+    assert error.timeout_seconds == DEADLINE_S
+    assert DEADLINE_S * 0.9 <= elapsed <= DEADLINE_S + SLACK_S
+
+
+def test_sync_missing_headers_escape_same_slot_retry_to_dispatch():
+    from lib.llm.stream import stream_chat
+
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _bounded(lambda: stream_chat(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]'))
+
+    error = outcome.get('error')
+    assert isinstance(error, ResponseReadTimeoutError), outcome
+    assert error.cause_type == 'stream_silence'
+    assert elapsed <= DEADLINE_S + SLACK_S
+
+
+def test_sync_late_headers_inside_the_deadline_still_stream():
+    from lib.llm.stream import _stream_chat_once
+
+    with _server(_slow_steady, header_delay=DEADLINE_S * 0.65) as base:
+        outcome, elapsed = _bounded(lambda: _stream_chat_once(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]'))
+
+    assert 'error' not in outcome, outcome.get('error')
+    result = outcome['value']
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.message.get('content') == 'ok'
+    assert elapsed > DEADLINE_S * 2
+
+
+def test_sync_tighter_caller_header_bound_keeps_its_own_cause():
+    from lib.llm.stream import _stream_chat_once
+
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _bounded(lambda: _stream_chat_once(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]',
+            first_byte_timeout=DEADLINE_S / 3))
+
+    error = outcome.get('error')
+    assert isinstance(error, ResponseReadTimeoutError), outcome
+    assert error.cause_type == 'response_headers'
+    assert elapsed < DEADLINE_S
+
+
+def test_sync_user_stop_during_header_wait_aborts():
+    from lib.llm.stream import _stream_chat_once
+
+    stop_at = time.monotonic() + DEADLINE_S / 3
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _bounded(lambda: _stream_chat_once(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]',
+            abort_check=lambda: time.monotonic() >= stop_at))
+
+    assert isinstance(outcome.get('error'), AbortedError), outcome
+    assert elapsed < DEADLINE_S
+
+
 def test_sync_user_stop_during_silent_stream_aborts():
     from lib.llm.stream import _stream_chat_once
 
@@ -223,3 +301,47 @@ def test_async_slow_steady_stream_completes():
     assert finish == 'stop'
     assert msg.get('content') == 'ok'
     assert elapsed > DEADLINE_S * 2
+
+
+@pytest.mark.parametrize('abort_check', [None, lambda: False],
+                         ids=['without-stop-poll', 'with-stop-poll'])
+def test_async_missing_response_headers_raise_the_silence_timeout(abort_check):
+    from lib.llm.astream import async_stream_chat
+
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _run_async(lambda: async_stream_chat(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]',
+            abort_check=abort_check))
+
+    error = outcome.get('error')
+    assert isinstance(error, ResponseReadTimeoutError), outcome
+    assert error.cause_type == 'stream_silence'
+    # One attempt only: the silence cause escapes the same-slot retry loop.
+    assert DEADLINE_S * 0.9 <= elapsed <= DEADLINE_S + SLACK_S
+
+
+def test_async_late_headers_inside_the_deadline_still_stream():
+    from lib.llm.astream import async_stream_chat
+
+    with _server(_slow_steady, header_delay=DEADLINE_S * 0.65) as base:
+        outcome, elapsed = _run_async(lambda: async_stream_chat(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]'))
+
+    assert 'error' not in outcome, outcome.get('error')
+    msg, finish, _usage = outcome['value']
+    assert finish == 'stop'
+    assert msg.get('content') == 'ok'
+    assert elapsed > DEADLINE_S * 2
+
+
+def test_async_user_stop_during_header_wait_aborts():
+    from lib.llm.astream import async_stream_chat
+
+    stop_at = time.monotonic() + DEADLINE_S / 3
+    with _server(_silent_after_headers, header_delay=None) as base:
+        outcome, elapsed = _run_async(lambda: async_stream_chat(
+            dict(_BODY), api_key='sk-x', base_url=base, log_prefix='[t]',
+            abort_check=lambda: time.monotonic() >= stop_at))
+
+    assert isinstance(outcome.get('error'), AbortedError), outcome
+    assert elapsed < DEADLINE_S

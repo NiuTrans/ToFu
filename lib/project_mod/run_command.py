@@ -502,6 +502,13 @@ def _get_cmd_env(cwd=None, credential_env=None, strip_credential_vars=None,
     if credential_env:
         env.update(credential_env)
 
+    # docs/CHANNELS.md C6: while Tofu's 大象 channel session lives it holds the
+    # dx-engine's per-host Web channel lock. A command's engine write (a dx-pura-api
+    # send, reply or subscribe) is refused at once with the engine's refusal, which
+    # names that holder and channel_send, instead of waiting out the engine's 120 s
+    # deadline: the skill CLI kills its engine at 120 s and reports that as a success.
+    env['DX_BROWSERLESS_WEB_LOCK_TIMEOUT_MS'] = '0'
+
     # ── Block user-site-packages (~/.local/) writes & reads ──
     env['PYTHONNOUSERSITE'] = '1'
     env['PIP_USER'] = '0'
@@ -1253,6 +1260,20 @@ class _CommandRedaction:
         if self.values is None or not isinstance(result, str):
             return result
         return self.values.redact(result)
+
+
+def _format_aborted_output(command, stdout, stderr, task, notices):
+    """A whole-task abort result that names a system cause instead of the user.
+
+    A server restart killed paused lanes' commands with ``aborted by user``,
+    and each lane reported a Stop nobody gave (2026-11-06 14:10).
+    """
+    from lib.turn_verdict import system_abort_label
+    cause = system_abort_label(task.get('_abort_reason') if task is not None else '')
+    if cause:
+        return _format_run_output(command, stdout, stderr, -1,
+                                  interrupted_by=cause, notices=notices)
+    return _format_run_output(command, stdout, stderr, -1, aborted=True, notices=notices)
 
 
 def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
@@ -2441,8 +2462,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         return _format_run_output(command, stdout, stderr, -1, timed_out=True,
                                   notices=group_notices)
     if aborted:
-        return _format_run_output(command, stdout, stderr, -1,
-                                  timed_out=False, aborted=True, notices=group_notices)
+        return _format_aborted_output(command, stdout, stderr, task, group_notices)
 
     logger.info('run_command done: exit=%d, stdout=%dch, stderr=%dch',
                 proc.returncode, len(stdout), len(stderr))
@@ -3233,8 +3253,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
         return _format_run_output(command, stdout, stderr, -1,
                                   interrupted_by=interrupted_by, notices=group_notices)
     if aborted:
-        return _format_run_output(command, stdout, stderr, -1,
-                                  timed_out=False, aborted=True, notices=group_notices)
+        return _format_aborted_output(command, stdout, stderr, task, group_notices)
     exit_code = proc.returncode if not timed_out else -1
     logger.info('run_command done (interactive): exit=%d, stdout=%dch, stderr=%dch',
                 exit_code, len(stdout), len(stderr))

@@ -547,51 +547,40 @@ fn foreground_value_key(index: u32) -> EntityKey {
     EntityKey::new(7, 11, "record", format!("short-hold-foreground-{index}").as_bytes()).unwrap()
 }
 
-type Holder = (mpsc::Sender<()>, std::thread::JoinHandle<Result<(), String>>);
-
-/// A contended authority postpones a deletion hold instead of ending the run.
-/// Before every other hold attempt a foreground thread takes the authority
-/// and keeps it across the collector's `try_lock`; before the retry it
-/// commits and lets go. Every compaction copy and every garbage victim still
-/// goes in its epoch, one per hold, and every foreground commit lands.
-/// Before the change no hold attempt ran between two unlinks.
+/// A contended authority makes a deletion hold wait instead of ending the
+/// run. Right before every hold attempt a foreground thread takes the
+/// authority and commits; each hold waits for that commit. Every compaction
+/// copy and every garbage victim still goes in its epoch, one per hold, and
+/// every foreground commit lands.
 #[test]
-fn contended_deletion_holds_retry_until_every_file_goes_while_foreground_commits_land() {
+fn contended_deletion_holds_wait_for_each_foreground_commit_and_every_file_goes() {
     let (vfs, database) = observed_authority();
     let backlog = loose_backlog(&database, 2);
     let garbage = garbage_in_distinct_shards(&database, 16);
     let database = count_holds(&vfs, database);
     let mut collector = OnlineGarbageCollector::new(backlog_budget());
-    let holder: Rc<RefCell<Option<Holder>>> = Rc::default();
     let commits = Rc::new(Cell::new(0_u32));
+    let committers: Rc<RefCell<Vec<std::thread::JoinHandle<Result<(), String>>>>> = Rc::default();
     let reset = {
         let database = Arc::downgrade(&database);
-        let holder = Rc::clone(&holder);
         let commits = Rc::clone(&commits);
+        let committers = Rc::clone(&committers);
         before_every_hold_attempt(move |_, _| {
-            if let Some((release, thread)) = holder.borrow_mut().take() {
-                release.send(()).unwrap();
-                thread.join().unwrap().unwrap();
-                commits.set(commits.get() + 1);
-                return;
-            }
             let database = database.upgrade().unwrap();
             let index = commits.get();
+            commits.set(index + 1);
             let (locked, entered) = mpsc::channel();
-            let (release, released) = mpsc::channel::<()>();
-            let thread = std::thread::spawn(move || -> Result<(), String> {
+            committers.borrow_mut().push(std::thread::spawn(move || -> Result<(), String> {
                 let mut guard = database.lock().map_err(|_| "the authority mutex is poisoned".to_owned())?;
                 locked.send(()).unwrap();
-                released.recv().unwrap();
                 let authority = &mut guard.authority;
                 let mut transaction = authority.begin(7, 11).map_err(|error| error.to_string())?;
                 authority
                     .entity_put(&mut transaction, foreground_value_key(index), index.to_le_bytes().to_vec())
                     .map_err(|error| error.to_string())?;
                 authority.commit(transaction).map(|_| ()).map_err(|error| error.to_string())
-            });
+            }));
             entered.recv().unwrap();
-            *holder.borrow_mut() = Some((release, thread));
         })
     };
     vfs.observer.take();
@@ -600,14 +589,16 @@ fn contended_deletion_holds_retry_until_every_file_goes_while_foreground_commits
     epoch(&mut collector, &database);
     let deleting = vfs.observer.take();
     drop(reset);
+    for committer in committers.take() {
+        committer.join().unwrap().unwrap();
+    }
 
-    assert!(holder.borrow().is_none(), "every contended attempt was retried");
     let most = |events: &[Observed]| unlinks_per_hold(events).0.values().copied().max().unwrap_or(0);
     assert_eq!((most(&packing), most(&deleting)), (1, 1));
     assert_eq!(backlog_still_loose(&database, &backlog), 0, "every compaction copy goes in its epoch");
     assert!(
         commits.get() as usize >= backlog.len() + garbage.len(),
-        "one foreground commit took the authority before every successful hold: {}",
+        "one foreground commit took the authority before every hold: {}",
         commits.get()
     );
     let guard = database.lock().unwrap();
@@ -620,6 +611,61 @@ fn contended_deletion_holds_retry_until_every_file_goes_while_foreground_commits
             guard.authority.entity_get(&mut transaction, &foreground_value_key(index)).unwrap(),
             Some(index.to_le_bytes().to_vec())
         );
+    }
+}
+
+/// docs/TOFUDB_ONLINE_GC.md, "Collector holds wait for the mutex": every
+/// collector hold waits for the authority mutex instead of sampling it. A
+/// foreground thread takes the mutex right before each of the first holds and
+/// lets go a moment later on its own, so every one of those attempts finds the
+/// mutex held, as the busy search worker left the search projection's mutex
+/// in 88% of samples on 2026-11-08. Each attempt waits and then holds: one
+/// attempt per victim. Sampled with `try_lock`, each of those attempts failed
+/// and every failure doubled the next wait from the streak's start; at that
+/// load the expected wait diverges, and the live search collector slept
+/// 13,249 s in a single retry.
+#[test]
+fn deletion_holds_wait_for_an_authority_held_at_every_attempt_instead_of_backing_off() {
+    const VICTIMS: usize = 8;
+    let (vfs, database) = observed_authority();
+    let garbage = garbage_in_distinct_shards(&database, VICTIMS);
+    let database = count_holds(&vfs, database);
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    epoch(&mut collector, &database);
+    let attempts = Rc::new(Cell::new(0_usize));
+    let holders: Rc<RefCell<Vec<std::thread::JoinHandle<()>>>> = Rc::default();
+    let reset = {
+        let database = Arc::downgrade(&database);
+        let attempts = Rc::clone(&attempts);
+        let holders = Rc::clone(&holders);
+        before_every_hold_attempt(move |_, _| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() > VICTIMS {
+                return;
+            }
+            let database = database.upgrade().unwrap();
+            let (locked, entered) = mpsc::channel();
+            holders.borrow_mut().push(std::thread::spawn(move || {
+                let _guard = database.lock().unwrap();
+                locked.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }));
+            entered.recv().unwrap();
+        })
+    };
+    vfs.observer.take();
+    epoch(&mut collector, &database);
+    drop(reset);
+    for holder in holders.take() {
+        holder.join().unwrap();
+    }
+
+    assert_eq!(attempts.get(), VICTIMS, "one attempt per victim: each waited for its holder, none was retried");
+    let (per_hold, off_mutex) = unlinks_per_hold(&vfs.observer.take());
+    assert_eq!((per_hold.len(), off_mutex), (VICTIMS, 0), "(holds that unlinked a victim, unlinks off the mutex)");
+    let guard = database.lock().unwrap();
+    for block_id in &garbage {
+        assert_eq!(guard.authority.read_block_for_test(*block_id).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 }
 
@@ -666,9 +712,9 @@ fn stop_between_deletion_holds_records_exactly_the_unlinked_victims() {
 /// Asserts that every retry from the second on (attempts 2..=retried) waited
 /// off the mutex at least as long as the run had already spent retrying.
 /// `attempts` holds each hold attempt's seam timestamp and the off-mutex wait
-/// the run measured for it. Attempt 1's seam runs after attempt 0's failure,
-/// so `attempts[1]` bounds the contention's start from above and the bound is
-/// exact for the implementation: no host speed enters it.
+/// the run measured for it. Attempt 1's seam runs after attempt 0's refusal,
+/// so `attempts[1]` bounds the refusal streak's start from above and the bound
+/// is exact for the implementation: no host speed enters it.
 fn assert_retries_back_off(attempts: &[(Instant, Duration)], retried: usize) {
     assert!(attempts.len() > retried, "{} attempts", attempts.len());
     let first_retry = attempts[1].0;
@@ -679,66 +725,14 @@ fn assert_retries_back_off(attempts: &[(Instant, Duration)], retried: usize) {
     }
 }
 
-/// A run whose first hold finds the authority held has no previous hold to
-/// pace it. It must still back off: each retry waits off the mutex at least
-/// as long as the run has already been retrying, so retries thin out
-/// geometrically instead of spinning on `try_lock`. A foreground thread holds
-/// the authority across the first CONTENDED attempts of a garbage run, then
-/// lets go. Before the change every retry followed the failed one at once.
-#[test]
-fn a_contended_first_deletion_hold_backs_off_instead_of_spinning() {
-    const CONTENDED: usize = 8;
-    let (vfs, database) = observed_authority();
-    let garbage = garbage_in_distinct_shards(&database, 4);
-    let database = count_holds(&vfs, database);
-    let mut collector = OnlineGarbageCollector::new(test_budget());
-    epoch(&mut collector, &database);
-    let attempts: Rc<RefCell<Vec<(Instant, Duration)>>> = Rc::default();
-    let holder: Rc<RefCell<Option<(mpsc::Sender<()>, std::thread::JoinHandle<()>)>>> = Rc::default();
-    let reset = {
-        let database = Arc::downgrade(&database);
-        let attempts = Rc::clone(&attempts);
-        let holder = Rc::clone(&holder);
-        before_every_hold_attempt(move |_, off_mutex| {
-            let index = attempts.borrow().len();
-            attempts.borrow_mut().push((Instant::now(), off_mutex));
-            if index == 0 {
-                let database = database.upgrade().unwrap();
-                let (locked, entered) = mpsc::channel();
-                let (release, released) = mpsc::channel::<()>();
-                let thread = std::thread::spawn(move || {
-                    let _guard = database.lock().unwrap();
-                    locked.send(()).unwrap();
-                    released.recv().unwrap();
-                });
-                entered.recv().unwrap();
-                *holder.borrow_mut() = Some((release, thread));
-            } else if index == CONTENDED {
-                let (release, thread) = holder.borrow_mut().take().unwrap();
-                release.send(()).unwrap();
-                thread.join().unwrap();
-            }
-        })
-    };
-    epoch(&mut collector, &database);
-    drop(reset);
-
-    assert!(holder.borrow().is_none(), "the authority was released");
-    assert_retries_back_off(&attempts.borrow(), CONTENDED);
-    let guard = database.lock().unwrap();
-    for block_id in &garbage {
-        assert_eq!(guard.authority.read_block_for_test(*block_id).unwrap_err().kind(), io::ErrorKind::NotFound);
-    }
-}
-
 /// A hold refused with `WouldBlock` (CONTROL slots briefly apart while a
 /// publication owns the lane) is retried by a compaction-copy run. Each retry
-/// takes the authority mutex, so a refusal must back off like a contended
-/// authority instead of re-taking the mutex at the pace of its own short
-/// holds for as long as the publication lasts. Before the change a refused
-/// hold was retried after only as long as that refused hold took.
+/// takes the authority mutex, so a refusal backs off geometrically instead of
+/// re-taking the mutex at the pace of its own short holds for as long as the
+/// publication lasts. Before that rule a refused hold was retried after only
+/// as long as that refused hold took.
 #[test]
-fn refused_deletion_holds_back_off_like_a_contended_authority() {
+fn refused_deletion_holds_back_off_geometrically() {
     const REFUSED: usize = 8;
     let (vfs, database) = observed_authority();
     let database = count_holds(&vfs, database);
@@ -748,7 +742,8 @@ fn refused_deletion_holds_back_off_like_a_contended_authority() {
         let attempts = Rc::clone(&attempts);
         before_every_hold_attempt(move |_, off_mutex| attempts.borrow_mut().push((Instant::now(), off_mutex)))
     };
-    let mut holds = SingleFileHolds::new(&blocks, Duration::ZERO);
+    let stop = AtomicBool::new(false);
+    let mut holds = SingleFileHolds::new(&blocks, Duration::ZERO, &stop);
     let mut refused = 0;
     loop {
         let outcome = holds.remove(&database, BlockId([7; 32]), |_| {
@@ -760,14 +755,94 @@ fn refused_deletion_holds_back_off_like_a_contended_authority() {
             }
         });
         match outcome {
-            Some(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Some(result) => break result.unwrap(),
-            None => panic!("nothing else takes the authority"),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            result => break result.unwrap(),
         }
     }
     drop(reset);
     assert_eq!(refused, REFUSED);
     assert_retries_back_off(&attempts.borrow(), REFUSED);
+}
+
+/// A stop raised while a hold waits for the mutex ends the run before that
+/// hold acts: the attempt checks the stop flag again once it holds the mutex.
+/// A foreground thread takes the authority right before the first victim's
+/// hold, raises the stop while it holds it, and lets go; no victim's file goes
+/// and rule S10 records none.
+#[test]
+fn a_stop_raised_while_a_hold_waits_for_the_mutex_ends_the_run_before_it_acts() {
+    let (vfs, database) = observed_authority();
+    let garbage = garbage_in_distinct_shards(&database, 4);
+    let database = count_holds(&vfs, database);
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    epoch(&mut collector, &database);
+    let stop = Arc::new(AtomicBool::new(false));
+    let holder: Rc<RefCell<Option<std::thread::JoinHandle<()>>>> = Rc::default();
+    let reset = {
+        let database = Arc::downgrade(&database);
+        let stop = Arc::clone(&stop);
+        let holder = Rc::clone(&holder);
+        before_every_hold_attempt(move |_, _| {
+            if holder.borrow().is_some() {
+                return;
+            }
+            let database = database.upgrade().unwrap();
+            let stop = Arc::clone(&stop);
+            let (locked, entered) = mpsc::channel();
+            *holder.borrow_mut() = Some(std::thread::spawn(move || {
+                let _guard = database.lock().unwrap();
+                locked.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+                stop.store(true, Ordering::Release);
+            }));
+            entered.recv().unwrap();
+        })
+    };
+    vfs.observer.take();
+    let error = collector.run_epoch(&database, &stop).unwrap_err();
+    drop(reset);
+    holder.take().unwrap().join().unwrap();
+
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("online GC epoch stopped"), "{error}");
+    assert_eq!(unlinked_paths(&vfs.observer.take()), BTreeSet::new(), "no file goes after the stop");
+    assert!(collector.previous.unlinked_loose.is_empty(), "rule S10 records no unlink");
+    let guard = database.lock().unwrap();
+    for block_id in &garbage {
+        assert!(guard.authority.read_block_for_test(*block_id).is_ok());
+    }
+}
+
+/// Every pause of a run wakes on a stop. A run that has been refused for two
+/// minutes waits as long again before its next attempt; the stop raises the
+/// flag and unparks the thread, as `stop_and_join` does for the driver, and
+/// the run ends at once instead of sleeping on.
+#[test]
+fn a_stop_wakes_a_run_paused_by_its_backoff() {
+    let (vfs, database) = observed_authority();
+    let database = count_holds(&vfs, database);
+    let blocks = database.lock().unwrap().authority.block_store_shared();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (pausing, paused) = mpsc::channel();
+    let run = {
+        let stop = Arc::clone(&stop);
+        let database = Arc::clone(&database);
+        std::thread::spawn(move || {
+            let mut holds = SingleFileHolds::new(&blocks, Duration::ZERO, &stop);
+            holds.retrying_since = Instant::now().checked_sub(Duration::from_secs(120));
+            pausing.send(()).unwrap();
+            let started = Instant::now();
+            let outcome = holds.attempt(&database, |_| Ok(()));
+            (outcome.map_err(|error| error.to_string()), started.elapsed())
+        })
+    };
+    paused.recv().unwrap();
+    stop.store(true, Ordering::Release);
+    run.thread().unpark();
+    let (outcome, waited) = run.join().unwrap();
+
+    assert!(outcome.unwrap_err().contains("online GC epoch stopped"));
+    assert!(waited < Duration::from_secs(60), "the stop woke the run only after {waited:?}");
 }
 
 /// The contention watch reports a wedge only after 10 s of probes that find

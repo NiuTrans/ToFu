@@ -167,7 +167,7 @@ def take_steers(task: dict[str, Any], local_items: Iterable[dict[str, Any]]) -> 
         records = _live_turn_records(task) or []
     except Exception as error:
         logger.warning('[Steer] committed steers unreadable task=%s; delivering local steers only: %s',
-                       str(task.get('id') or '')[:16], error)
+                       str(task.get('id') or ''), error)
         records = []
     taken = _taken(task, records)
     chosen, blocks, dropped = [], set(), []
@@ -194,9 +194,11 @@ def requeue_committed_steer(task: dict[str, Any], item: Mapping[str, Any]) -> di
 
     The owner's words keep their committed author (actor, text, origin), so a
     forwarded request is verified again when it authorizes; a steer without an
-    author was nonhuman and stays nonhuman. Returns the ``queued`` record for
-    the Turn's injection lane, or None when nothing was accepted.
+    author was nonhuman and stays nonhuman. The steer's images come along as
+    the next Turn's images. Returns the ``queued`` record for the Turn's
+    injection lane, or None when nothing was accepted.
     """
+    from lib.agent_inbox._steer_preview import steer_model_images
     from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
     from lib.tasks_pkg.manager import task_user_id
     from lib.turn_initiation import INITIATOR_PEER, stamp_initiator
@@ -209,6 +211,9 @@ def requeue_committed_steer(task: dict[str, Any], item: Mapping[str, Any]) -> di
     else:
         message = stamp_initiator({'role': 'user', 'content': item['value']}, INITIATOR_PEER)
         actor = 'human'
+    images = steer_model_images(item)
+    if images:
+        message['images'] = images
     outcome = dispatch_scheduled_turn(
         task['convId'], message, {}, user_id=task_user_id(task),
         command_id='steer-requeue:' + item['blockId'], log_prefix='[Steer]',

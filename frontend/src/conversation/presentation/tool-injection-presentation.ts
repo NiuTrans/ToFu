@@ -72,6 +72,9 @@ export type ToolInjectionPresentationDependencies = Readonly<{
   renderMarkdown: (source: string) => string;
   iconHtml: (name: string, size?: number) => string;
   resolveConversationTitle: (conversationId: string) => unknown;
+  /* The renderer's media URL port (deployment base path for root-relative
+   * '/api/images/<f>' uploads), the same one message-bubble images use. */
+  resolveMediaUrl?: (url: string) => string;
 }>;
 
 const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
@@ -220,6 +223,7 @@ export function createToolInjectionPresentation(
     renderMarkdown,
     iconHtml,
     resolveConversationTitle,
+    resolveMediaUrl,
   } = dependencies;
 
   function translatedHtml<K extends I18nKey>(
@@ -380,7 +384,9 @@ export function createToolInjectionPresentation(
     const images = arrayField(preview, 'images');
     const tiles: string[] = [];
     for (const imageValue of images) {
-      const source = safeImageUrl(field(imageValue, 'preview'));
+      const preview = safeImageUrl(field(imageValue, 'preview'));
+      const source = preview && resolveMediaUrl
+        ? safeImageUrl(resolveMediaUrl(preview)) : preview;
       if (!source) continue;
       const caption = boundedText(field(imageValue, 'caption'), 200).value;
       const sizeKB = boundedText(field(imageValue, 'sizeKB'), 32).value;

@@ -44,6 +44,9 @@
     },
     {
       "path": "13-dx-channel.css"
+    },
+    {
+      "path": "14-messaging-platforms.css"
     }
   ],
   "sourceEntry": "settings.generated.css",

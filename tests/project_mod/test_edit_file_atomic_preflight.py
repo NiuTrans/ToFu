@@ -25,8 +25,8 @@ def project(tmp_path, monkeypatch):
     return root
 
 
-def edit(path, anchor, content, operation='replace'):
-    return {'path': str(path), 'operation': operation, 'anchor': anchor, 'content': content}
+def edit(path, anchor, content):
+    return {'path': str(path), 'anchor': anchor, 'content': content}
 
 
 @pytest.mark.parametrize('mode', ['default', True, False])
@@ -38,17 +38,17 @@ def test_absent_semantic_anchors_in_fourteen_mixed_edits_are_all_or_nothing(
         (project / name).chmod(0o751)
     edits = [
         edit('a.txt', 'old', 'step1'),
-        edit('b.txt', 'ROOT', 'new_one', 'insert_after'),
+        edit('b.txt', 'ROOT', 'ROOT\nnew_one'),
         edit('a.txt', 'semantic branch that does not exist', 'wrong'),
-        edit('c.txt', 'omega', 'before', 'insert_before'),
+        edit('c.txt', 'omega', 'before\nomega'),
         edit('a.txt', 'step1', 'step2'),
         edit('b.txt', 'conceptually similar but absent message', 'wrong'),
         edit('c.txt', 'before', 'ready'),
-        edit('a.txt', 'step2', 'extra', 'insert_after'),
-        edit('c.txt', 'absent semantic anchor', 'wrong', 'insert_after'),
+        edit('a.txt', 'step2', 'step2\nextra'),
+        edit('c.txt', 'absent semantic anchor', 'wrong'),
         edit('b.txt', 'new_one', 'new_two'),
         edit('a.txt', 'extra', 'final'),
-        edit('b.txt', 'ROOT', 'start', 'insert_before'),
+        edit('b.txt', 'ROOT', 'start\nROOT'),
         edit('c.txt', 'omega', 'done'),
         edit('a.txt', 'different missing semantic branch', 'wrong'),
     ]
@@ -69,7 +69,7 @@ def test_absent_semantic_anchors_in_fourteen_mixed_edits_are_all_or_nothing(
         assert result.startswith('Applied 10/14 edits (4 failed)'), result
         assert len(writes) == 3
         assert len(mods.get_modifications(str(project))) == 3
-        assert (project / 'a.txt').read_bytes() == b'step2\nfinal\n'
+        assert (project / 'a.txt').read_bytes() == b'step2\nfinal\r\n'
         assert (project / 'b.txt').read_bytes() == b'start\nROOT\nnew_two\n'
         assert (project / 'c.txt').read_bytes() == b'ready\ndone\n'
         undone = mods.undo_task_modifications(str(project), 'batch')
@@ -90,12 +90,12 @@ def test_absent_semantic_anchors_in_fourteen_mixed_edits_are_all_or_nothing(
 @pytest.mark.parametrize('bad', [
     None,
     {'path': 'a.txt', 'operation': [], 'anchor': 'A', 'content': 'bad'},
-    {'path': 'a.txt', 'operation': 'replace', 'anchor': 'A'},
-    {'path': 'a.txt', 'operation': 'replace', 'anchor': 1, 'content': 'bad'},
+    {'path': 'a.txt', 'anchor': 'A'},
+    {'path': 'a.txt', 'anchor': 1, 'content': 'bad'},
     edit('missing.txt', 'A', 'bad'),
     edit('unknown-root:missing.txt', 'A', 'bad'),
     edit('b.txt', 'duplicate', 'bad'),
-    edit('a.txt', 'A', 'A', 'insert_after'),
+    {'path': 'a.txt', 'operation': 'insert_after', 'anchor': 'A', 'content': 'B'},
 ])
 def test_any_late_invalid_operation_prevents_earlier_file_write(project, bad):
     (project / 'a.txt').write_text('A\n')
@@ -147,10 +147,10 @@ def test_same_physical_file_aliases_share_sequential_buffer_and_one_undo(project
     alias.symlink_to(target.name)
     result = _ops.tool_edit_file(str(project), [
         edit('a.txt', 'A', 'B'), edit('alias.txt', 'B', 'C'),
-        edit('a.txt', 'C', 'D', 'insert_after'),
+        edit('a.txt', 'C', 'C\nD'),
     ], task_id='aliases')
     assert result.startswith('Applied 3/3 edits'), result
-    assert target.read_bytes() == b'C\nD\n'
+    assert target.read_bytes() == b'C\nD\r\n'
     assert alias.is_symlink()
     assert len(mods.get_modifications(str(project))) == 1
     undone = mods.undo_task_modifications(str(project), 'aliases')
@@ -193,29 +193,6 @@ def test_only_explicit_false_enables_partial_application(project, value):
     result = _ops.tool_edit_file(str(project), [edit('a.txt', 'A', 'B'), None], atomic=value)
     assert result.startswith('Applied 0/2'), result
     assert target.read_text() == 'A\n'
-
-
-@pytest.mark.parametrize(('before', 'anchor', 'content', 'operation', 'expected'), [
-    ('A', 'A', 'B', 'insert_after', 'A\nB\n'),
-    ('A', 'A', 'B\n', 'insert_after', 'A\nB\n'),
-    ('prefix A', 'A', 'B', 'insert_after', 'prefix A\nB\n'),
-    ('A\n', 'A', 'B', 'insert_after', 'A\nB\n'),
-    ('A\n', 'A\n', 'B', 'insert_after', 'A\nB\n'),
-    ('A\nC', 'A', 'B', 'insert_after', 'A\nB\nC'),
-    ('A\nC', 'C', 'B', 'insert_before', 'A\nB\nC'),
-    ('A', 'A', 'B', 'insert_before', 'B\nA'),
-    ('A', 'A', 'A\nB', 'insert_after', 'A\nB\n'),
-])
-def test_eof_insert_separates_lines_without_extra_blank_lines(
-        project, before, anchor, content, operation, expected):
-    target = project / 'a.txt'
-    target.write_text(before)
-    result = _ops.tool_edit_file(str(project), [edit('a.txt', anchor, content, operation)], task_id='eof')
-    assert result.startswith('Applied 1/1 edits'), result
-    assert target.read_text() == expected
-    undone = mods.undo_task_modifications(str(project), 'eof')
-    assert undone['failed'] == 0
-    assert target.read_text() == before
 
 
 def test_late_write_path_refusal_skips_other_files_without_success_advisories(project, monkeypatch):

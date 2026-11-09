@@ -13,14 +13,11 @@ import json
 
 from lib.log import get_logger
 from lib.storage.model_continuation import ModelContinuationStore, settled_witness
+from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
 
 logger = get_logger(__name__)
 VERSION = 1
 MAX_TURN_WITNESSES = 4096
-# Task flag: the working messages hold an inbox carrier (human steer, peer,
-# swarm or background delivery) appended after the latest verified provider
-# return. Set by the round drain, cleared by the verified-consumption flush.
-UNVERIFIED_INBOX_DELIVERY = '_inboxDeliveryUnverified'
 _POLICY_FIELDS = (
     'model', 'provider_id', 'providerId', 'preset', 'thinkingDepth',
 
@@ -238,7 +235,7 @@ def _portable_messages(messages):
 def _publication_status(task, reason):
     task['_modelReplayPublishStatus'] = reason
     logger.info('[ModelReplay] conv=%s checkpoint=%s',
-                str(task.get('convId') or '')[:8], reason)
+                str(task.get('convId') or ''), reason)
 
 
 def _has_resume_data(config):
@@ -263,11 +260,15 @@ def publishes_completed_checkpoint(config):
     return _supports_completed_publication(config) and not config.get('autopilot')
 
 
-def _supports_prefix_restore(config):
-    # Recovering the current Turn is not restoring a completed historical
-    # prefix. After validated recovery actually completes, publication is a
-    # different admission decision and must not inherit this exclusion.
-    return _supports_completed_publication(config) and not _has_resume_data(config)
+def _supports_prefix_restore(config, validated_context=None):
+    # Recovering the current Turn restores only a completed prefix that ends
+    # strictly before it. A storage-validated context proves that (its anchor
+    # walk covers only Turns before the target), so a Continue restores the
+    # same prefix the interrupted request had; an unvalidated legacy witness
+    # list cannot, so it refuses. Publication after recovery completes is a
+    # different admission decision and does not inherit this exclusion.
+    return _supports_completed_publication(config) and (
+        validated_context is not None or not _has_resume_data(config))
 
 
 def _remember_context_activity(rows, config, *, cached=None, conversation_id='', user_id=None):
@@ -342,13 +343,17 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
     config['_modelReplayPolicyFields'] = _policy_fields(config)
     config['_modelReplayPortablePolicy'] = portable_policy_witness(config)
     config['_modelReplayEffortPolicy'] = effort_policy_witness(config)
-    # Resume cannot reuse a completed-turn prefix blindly, but it still needs
-    # fresh history witnesses to validate an accepted compaction archive.
-    if not _supports_prefix_restore(config):
+    # Resume never reuses a completed-turn prefix blindly, and it always needs
+    # fresh history witnesses to validate a checkpointed working view.
+    if not _supports_prefix_restore(config, validated_context):
         config['_modelReplayStatus'] = 'unsupported_mode'
         return [], 0
     target = rows[-1]
-    if target.get('projection', {}).get('content') or target.get('projection', {}).get('toolRounds'):
+    resume = _has_resume_data(config)
+    # A resume target carries its interrupted attempt; the resume path, not
+    # the completed prefix, owns that projection.
+    if not resume and (target.get('projection', {}).get('content')
+                       or target.get('projection', {}).get('toolRounds')):
         config['_modelReplayStatus'] = 'resume_target'
         return [], 0
     try:
@@ -361,6 +366,12 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
                 'history_changed', 'terminal_changed', 'legacy_proof',
                 'checkpoint_not_before_target', 'replay_disabled',
             } else 'checkpoint_missing')
+            return [], 0
+        terminal = (cached.get('turns') or [None])[-1]
+        if (resume and isinstance(terminal, list) and terminal
+                and terminal[0] == target.get('turnId')):
+            # Never replay the resumed Turn's own completed publication.
+            config['_modelReplayStatus'] = 'checkpoint_not_before_target'
             return [], 0
         _remember_context_activity([], config, cached=cached,
                                    conversation_id=conversation_id, user_id=user_id)
@@ -385,7 +396,7 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
             # field map always reports digest drift and never reaches here.
             same_policy = same_prefix_policy = True
             logger.info('[ModelReplay] conv=%s policy=equivalent (witness spellings differ)',
-                        str(conversation_id)[:8])
+                        str(conversation_id))
         if drift:
             config['_modelReplayPolicyDrift'] = drift
         # Route/effort drift keeps the checkpoint's portable text and rebuilds
@@ -400,7 +411,7 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
                 logger.warning(
                     '[ModelReplay] conv=%s restore=policy_changed drift=%s — '
                     'authority-bearing fields differ between the checkpoint and '
-                    'this request', str(conversation_id)[:8], ','.join(drift))
+                    'this request', str(conversation_id), ','.join(drift))
             return [], 0
         prior = cached.get('turns') or []
         legacy_prefix = validated_context is not None and 'historyProof' not in cached
@@ -419,7 +430,7 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
                 config['_modelReplayStatus'] = 'nonportable_checkpoint'
                 return [], 0
             logger.info('[ModelReplay] conv=%s restore=portable drift=%s',
-                        str(conversation_id)[:8], ','.join(drift) or 'route')
+                        str(conversation_id), ','.join(drift) or 'route')
         from lib.knowledge import read_source_path
         for message in messages:
             for source in message.get('_modelImageSources') or []:
@@ -522,7 +533,7 @@ def rebind_history_proof(task, settled_input):
         status = 'unavailable'
         logger.warning('[ModelReplay] proof rebind unavailable: %s', type(exc).__name__)
     logger.info('[ModelReplay] conv=%s proof=%s input=%s',
-                str(task.get('convId') or '')[:8], status, str(input_turn_id or '')[:8])
+                str(task.get('convId') or ''), status, str(input_turn_id or '')[:8])
 
 
 def _rebind_proof(task, config, pin, input_turn_id, revision):

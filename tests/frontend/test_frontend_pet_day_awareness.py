@@ -55,7 +55,8 @@ def test_myday_emit_routes_through_single_cache_choke():
         re.S,
     )
     assert store and "publishReport(date, report);" in store.group(1)
-    assert "repository.storeReport(dateStr, report)" in presenter
+    # The goal board replaced the report view: the panel writes only the month cache.
+    assert "storeReport" not in presenter and "repository.storeMonth(monthKey" in presenter
     assert "myDayDigestFromReport" not in presenter and "tofu:day" not in presenter
     assert "createMyDayReportRepository" in background
     assert "new CustomEvent('tofu:day', { detail: digest })" in background

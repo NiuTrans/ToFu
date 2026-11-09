@@ -401,6 +401,19 @@ class TestReadSource:
         assert {key: row[key] for key in cwr.READ_SOURCES} == {
             'previous': 1, 'older': 0, 'unmatched': 1, 'none': 0}
 
+    def test_concurrent_siblings_sharing_a_log_rid_keep_their_own_chains(self):
+        # Durable tasks log one shared rid; the whole conv ID separates them.
+        def sibling(conv, call, read, write, ts):
+            return {**_round('conversa', call, read, write, ts=ts), 'conv': conv}
+        records = [
+            sibling('worker-d45e757de0646c3e3b3b6e86', 1, 0, 1000, '2026-11-07 10:00:00'),
+            sibling('worker-d7da3952f623f73343c4a101', 1, 0, 2000, '2026-11-07 10:00:01'),
+            sibling('worker-d45e757de0646c3e3b3b6e86', 2, 1000, 100, '2026-11-07 10:00:10'),
+            sibling('worker-d7da3952f623f73343c4a101', 2, 2000, 100, '2026-11-07 10:00:11'),
+        ]
+        row = self._only_row(cwr.read_sources(records))
+        assert row['previous'] == 2 and row['rounds'] == 2
+
     def test_load_records_keeps_the_invocation_id(self, tmp_path):
         log = tmp_path / 'app.log'
         log.write_text(

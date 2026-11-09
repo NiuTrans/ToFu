@@ -24,9 +24,9 @@ from tests.tofudb.test_tofudb_differential import (
     integration_owner_daemon,  # noqa: F401 -- reused disposable native fixture
 )
 
-from tests.support.postgres_cluster import postgres_cluster  # noqa: F401 -- private fixture
-
-pytest_plugins = ('tests._chat_sidecar',)
+# The plugin, not a bare fixture import: postgres_cluster depends on its
+# session-scoped _postgres_bootstrap.
+pytest_plugins = ('tests._chat_sidecar', 'tests.support.postgres_cluster')
 pytestmark = pytest.mark.unit
 
 _PROJECT = Path(__file__).resolve().parents[2]

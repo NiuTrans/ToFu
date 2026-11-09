@@ -246,6 +246,6 @@ final class SessionManagerTests: XCTestCase {
 }
 
 func protectedMetadata() -> HTTPResponse {
-    makeResponse(200, body: #"{"requestId":"test-request","data":{"items":[],"page":{}},"meta":{"serverTimeMs":1}}"#,
+    makeResponse(200, body: #"{"data":{"items":[],"page":{}},"meta":{"requestId":"test-request","serverTimeMs":1}}"#,
                  headers: ["content-type": ["application/json"]])
 }

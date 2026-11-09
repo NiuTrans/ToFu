@@ -46,7 +46,7 @@ from lib.ids import short_id
 from lib.compat.openai_projection import (
     openai_completion_chunk, openai_finish_reason,
 )
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.openapi import api_meta
 from lib.rate_limit.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
@@ -332,7 +332,7 @@ async def _stream_generator(task, model: str, requested_id: str,
             yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[api_v1.chat] stream client disconnected task=%s',
-                    task_id[:8])
+                    task_log_tag(task_id))
         raise
     finally:
         unregister_waiter(task_id)
@@ -533,7 +533,7 @@ async def chat_completions():
         reject_unstarted_chat_task(
             task, e, cause='task_spawn_failed', conv_id=conversation_id)
         logger.exception('[api_v1.chat] spawn_task failed task=%s',
-                         task['id'][:8])
+                         task_log_tag(task['id']))
         return api_internal_error(e, context='api_v1.chat',
                                    source='routes.api_v1.chat')
 
@@ -548,7 +548,7 @@ async def chat_completions():
         await _wait_for_terminal(task, timeout_s=timeout_s)
     except RuntimeError as e:
         logger.warning('[api_v1.chat] task=%s timed out model=%s elapsed=%.0fs',
-                       task['id'][:8], cfg.get('model', '?'), timeout_s)
+                       task_log_tag(task['id']), cfg.get('model', '?'), timeout_s)
         return api_internal_error(str(e), context='api_v1.chat')
     finally:
         unregister_waiter(task['id'])
@@ -560,7 +560,7 @@ async def chat_completions():
     except TerminalTaskFailure as exc:
         logger.warning(
             '[api_v1.chat] refusing false-success task=%s cause=%s',
-            task['id'][:8], exc.verdict.cause)
+            task_log_tag(task['id']), exc.verdict.cause)
         return api_internal_error(
             str(exc), context='api_v1.chat', log_traceback=False,
             error_kind=exc.verdict.cause,

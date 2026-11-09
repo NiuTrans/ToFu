@@ -344,6 +344,7 @@ function waitTickEligible(block: Extract<ConversationBlockViewModel, { kind: 'li
   const value = block.value;
   const providerWait = value.phase === 'waiting_model'
     && (value.detailKey === 'stream.phase.waitingForResponse'
+      || value.detailKey === 'stream.phase.waitingForProviderResponse'
       || value.detailKey === 'stream.phase.waitingQuotaReset'
       || value.detailKey === 'stream.phase.streamStalled');
   const toolCallGeneration = value.phase === 'llm_thinking'

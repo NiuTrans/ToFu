@@ -99,7 +99,21 @@ def test_sent_tool_surface_reaches_usage_and_the_projection_event():
     accumulator = SSEAccumulator(plan.body, plan.trace_id, plan.raw_dumper,
                                  plan.wire_translator, plan.t0)
     _, _, usage = accumulator.finalize()
-    assert usage['_wire_tool_surface'] == sent
+    assert usage['_wire_tool_surface'] == {
+        **sent,
+        'name_budget_bytes': tool_wire.SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES}
+
+
+def test_routes_without_a_name_budget_relay_only_the_sent_surface():
+    from lib.llm._sse_core import SSEAccumulator
+
+    plan = prepare_request(_canonical_round(['inspect the cache']),
+                           base_url='https://api.anthropic.com/v1', api_key='test-key',
+                           api_protocol='anthropic')
+    accumulator = SSEAccumulator(plan.body, plan.trace_id, plan.raw_dumper,
+                                 plan.wire_translator, plan.t0)
+    _, _, usage = accumulator.finalize()
+    assert set(usage['_wire_tool_surface']) == {'count', 'name_bytes'}
 
 
 def test_other_anthropic_routes_keep_their_complete_surface():

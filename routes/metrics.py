@@ -33,6 +33,9 @@ Metrics:
   * ``tofu_storage_fastpath_write_pressure_active{backend="…"}``
   * ``tofu_cgroup_relief_reclaimed_bytes_total{source="…"}``
   * ``tofu_cgroup_relief_duration_seconds``
+  * ``tofu_execution_storage_rpc_seconds{kind,operation,outcome}`` — the
+    resident execution host's storage RPC histogram, read per scrape
+  * ``tofu_execution_metrics_available``           — whether it answered
 
 Auth: requires ``admin`` scope. Without auth the
 endpoint 401s — Prometheus scrapers configure a Bearer header.
@@ -818,11 +821,56 @@ def _collect_resource_metrics(out: list) -> None:
                 [({}, snapshot.get('revision', 0))])
 
 
+def _collect_execution_storage_metrics(out: list) -> None:
+    """The resident execution host's storage RPC histogram, read per scrape.
+
+    That host runs project Workers, Coordinators and queue drains but has no
+    HTTP listener, so its ``tofu_storage_rpc_seconds`` is exported here under
+    its own family name. An unconfirmed read reports unavailable, never zero.
+    """
+    from quart import current_app, has_request_context
+    from lib.tasks_pkg.command_control_runtime import execution_storage_rpc_metrics
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
+    from routes.api_v1.auth import request_user_id
+    if not has_request_context():
+        return
+    try:
+        result = execution_storage_rpc_metrics(current_app, user_id=int(request_user_id()))
+    except CommandControlUnavailable as e:
+        logger.debug('[Metrics] execution storage histogram unavailable: %s', e)
+        _emit_gauge(out, 'tofu_execution_metrics_available',
+                    'Whether the resident execution host answered this scrape',
+                    [({}, 0)])
+        return
+    if result is None:
+        return
+    name = 'tofu_execution_storage_rpc_seconds'
+    out.append(f'# HELP {name} Storage RPC latency observed by the resident execution host.')
+    out.append(f'# TYPE {name} histogram')
+    for row in result['histograms']:
+        labels = ','.join(f'{key}="{_escape_label(value)}"'
+                          for key, value in sorted(row['labels'].items()))
+        prefix = labels + ',' if labels else ''
+        for upper, count in zip(row['buckets'], row['counts']):
+            out.append(f'{name}_bucket{{{prefix}le="{float(upper)}"}} {count}')
+        out.append(f'{name}_bucket{{{prefix}le="+Inf"}} {row["count"]}')
+        suffix = f'{{{labels}}}' if labels else ''
+        out.append(f'{name}_sum{suffix} {row["sum"]}')
+        out.append(f'{name}_count{suffix} {row["count"]}')
+    _emit_gauge(out, 'tofu_execution_metrics_available',
+                'Whether the resident execution host answered this scrape',
+                [({}, 1)])
+
+
 def _build_metrics_body() -> str:
     out: list[str] = []
     _collect_usage_metrics(out)
     _collect_task_metrics(out)
     _collect_infra_metrics(out)
+    try:
+        _collect_execution_storage_metrics(out)
+    except Exception as e:
+        logger.warning('[Metrics] execution storage block failed: %s', e)
     try:
         from lib.observability import prometheus_lines
         out.extend(prometheus_lines())

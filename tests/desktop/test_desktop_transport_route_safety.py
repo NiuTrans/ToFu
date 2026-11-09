@@ -61,7 +61,8 @@ def test_explicit_attach_candidate_remains_authorized(monkeypatch):
     'https://example.com:bad', 'https://example.com\\@evil.example',
 ])
 def test_unsafe_probe_urls_never_make_request(monkeypatch, url):
-    monkeypatch.setattr(requests, 'get', lambda *a, **k: pytest.fail('unsafe URL'))
+    monkeypatch.setattr('lib.http_transport.client.http_get',
+                        lambda *a, **k: pytest.fail('unsafe URL'))
     assert _probe.probe_server(url) == (False, 'unreachable')
 
 
@@ -94,7 +95,7 @@ def test_probe_honors_proxy_ca_and_suppresses_ambient_auth(monkeypatch):
 def test_read_timeout_is_timeout(monkeypatch):
     def get(*a, **k):
         raise requests.exceptions.ReadTimeout()
-    monkeypatch.setattr(requests, 'get', get)
+    monkeypatch.setattr('lib.http_transport.client.http_get', get)
     assert _probe.probe_server('https://server.example') == (False, 'timeout')
 
 
@@ -103,7 +104,7 @@ def test_tls_failure_is_not_retried_without_verification(monkeypatch):
     def get(*a, **k):
         calls.append(k)
         raise requests.exceptions.SSLError('untrusted certificate')
-    monkeypatch.setattr(requests, 'get', get)
+    monkeypatch.setattr('lib.http_transport.client.http_get', get)
     assert _probe.probe_server('https://server.example') == (False, 'unreachable')
     assert len(calls) == 1
     assert calls[0].get('verify', True) is True

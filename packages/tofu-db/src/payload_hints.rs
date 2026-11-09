@@ -21,7 +21,7 @@ const TEMP_FILE: &str = "payload-read-hints.cache.tmp";
 const ENTRY_BYTES: usize = 32 + 16;
 const HEADER_BYTES: usize = 12;
 const CHECKSUM_BYTES: usize = 32;
-const MAX_ENTRIES: usize = crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS;
+const MAX_ENTRIES: usize = crate::generated_tofudb_ir::MAX_PERSISTED_PAYLOAD_HINTS;
 const MAX_FILE_BYTES: usize = HEADER_BYTES + MAX_ENTRIES * ENTRY_BYTES + CHECKSUM_BYTES;
 
 pub(crate) struct PayloadHints {

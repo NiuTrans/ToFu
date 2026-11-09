@@ -1,9 +1,9 @@
 """Real Chromium: Settings lists 大象 and its panel renders the live channel state.
 
-The 大象 tab sits in the 连接 group right after 飞书. Opening it renders the
+大象 is the 消息平台 tab's section right after 飞书. Expanding it renders the
 panel from the application's own /api/v4/channels endpoints over isolated test
 storage (no route interception), and the assistant's ``setting:dx`` jump chip
-lands on the same tab.
+opens that section.
 
 A connected account cannot exist without a real 大象 login, and creating a
 command chat for real creates a real 大象 group, so the connected-account
@@ -32,7 +32,8 @@ def _open_app_in_chinese(page, live_server):
 
 def _open_dx_tab(page):
     page.evaluate('() => window.openSettings()')
-    page.locator('.settings-tab[data-tab="dx"]').click()
+    page.locator('.settings-tab[data-tab="messaging"]').click()
+    page.locator('#msgPlatform_dx > summary').click()
     return page.locator('#settingsTab_dx')
 
 
@@ -43,13 +44,16 @@ def _no_horizontal_overflow(panel) -> bool:
 def test_dx_tab_follows_feishu_and_renders_live_channel_state(page, live_server, screenshot_dir):
     _open_app_in_chinese(page, live_server)
     page.evaluate('() => window.openSettings()')
-    tab = page.locator('.settings-tab[data-tab="dx"]')
+    tab = page.locator('.settings-tab[data-tab="messaging"]')
     tab.wait_for(state='visible')
-    assert tab.inner_text().strip() == '大象'
-    tabs = page.eval_on_selector_all('.settings-tab', 'els => els.map(el => el.dataset.tab)')
-    assert tabs.index('dx') == tabs.index('feishu') + 1
+    assert tab.inner_text().strip() == '消息平台'
+    platforms = page.eval_on_selector_all('#messagingPlatforms > details', 'els => els.map(el => el.dataset.platform)')
+    assert platforms.index('dx') == platforms.index('feishu') + 1
 
     tab.click()
+    section = page.locator('#msgPlatform_dx')
+    assert section.locator('.msg-platform-name').inner_text().strip() == '大象'
+    section.locator('summary').click()
     # Each card renders when its own read answers.
     page.wait_for_function("() => document.querySelectorAll('#settingsTab_dx .channel-card').length === 7")
     titles = page.locator('#settingsTab_dx .channel-card-title').all_inner_texts()
@@ -82,8 +86,8 @@ def test_setting_dx_jump_chip_opens_the_dx_tab(page, live_server):
     }""")
     page.locator('#dxJumpChip').click()
     page.wait_for_selector('#settingsTab_dx .channel-card', state='visible')
-    assert page.locator('.settings-tab[data-tab="dx"]').evaluate("el => el.classList.contains('active')")
-    assert page.locator('#settingsTab_dx').evaluate("el => el.classList.contains('active')")
+    assert page.locator('.settings-tab[data-tab="messaging"]').evaluate("el => el.classList.contains('active')")
+    assert page.locator('#msgPlatform_dx').evaluate('el => el.open')
 
 
 # ── A connected account, answered in the page ─────────────────────────
@@ -112,7 +116,7 @@ class _ConnectedDx:
         self.status = dict(_CONNECTED)
         self.writes = []
         self.threads = threads if threads is not None else [
-            _thread('dx:gid:70565831967', 'CMU-Meituan AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
+            _thread('dx:gid:70565831967', 'CMU-YourProvider AutoResearch', 'gid'), _thread('dx:uid:2002', 'Ann', 'uid')]
         page.route(re.compile(r'/api/v4/channels/dx(\?.*)?$'), self._account)
         page.route(re.compile(r'/api/v4/channels/dx/threads(\?.*)?$'), self._threads)
         page.route(re.compile(r'/api/v4/channels/dx/threads/[^/?]+$'), self._thread_update)
@@ -138,7 +142,7 @@ class _ConnectedDx:
                 self.robot = robot and {
                     'clientId': robot['clientId'], 'credentialHint': 'fa…42', 'error': None,
                     'credentialName': robot.get('credentialName', 'channel.u1.dx.robot'),
-                    'managed': 'credentialName' not in robot}
+                    'managed': 'credentialName' not in robot, 'builtIn': False}
         route.fulfill(json=self.view())
 
     def _threads(self, route):

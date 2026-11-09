@@ -268,6 +268,34 @@ neither provider input, permission, nor a cryptographic portability proof.
 Legacy unwitnessed histories keep their existing projection; no order is invented
 retrospectively.
 
+### Encrypted reasoning: one replay decision
+
+**Problem:** some gateways stream `reasoning` items carrying
+`encrypted_content` that the request never asked for (your-llm-gateway.example.com's Kunlun
+face serving `kunlunbedrock.gpt-6.1-sol-m17`). On a route without
+`features.responses_reasoning_replay` the response adapters still retained that
+ciphertext, which the route can never send back, so checked conversion refused
+the next request as `mandatory_continuity_unrepresentable` and every
+multi-tool-call conversation on the route ended at the first round after
+reasoning (TB2.1 headless pilot, 2026-11-09).
+**Decision:** `responses_reasoning_replay(body, profile)`
+(`lib/llm/responses_outbound/_to_responses.py`) is the single decision. The
+request asks for `reasoning.encrypted_content`, sets `reasoning.context` and
+resends stored items only when it is true; `prepare_request` and the non-stream
+`chat()` bind the same value into `ResponsesSSETranslator` and
+`responses_response_to_openai`, which retain encrypted reasoning only when it is
+true. Encrypted reasoning is optional stateless input: the model re-reasons
+without it. Summary-only reasoning, compaction, program and hosted-tool items
+keep their capture, and checked conversion still refuses unreplayable
+ciphertext already in history (foreign or retained before this rule). A route
+whose endpoint does replay, such as the template Kunlun face, declares the
+feature and keeps its reasoning round-tripping. The native engine still refuses
+such a response outright (`packages/tofu-runtime/src/agent_http.rs`).
+**Alternatives rejected:** treating same-route ciphertext as an optional
+conversion loss weakens the fail-closed rule for foreign state; inferring replay
+from the response would send `include`/`reasoning.context` to routes that never
+declared them. Specification: `tests/llm/test_responses_reasoning_replay_symmetry.py`.
+
 ### Model-specific thinking replay on Messages routes
 
 **Problem:** treating the Anthropic Messages envelope as proof of Claude's
@@ -749,6 +777,63 @@ stream. Spec: the `response.metadata` cases in
 `tests/llm/test_responses_outbound.py`.
 
 ## SSE framing and stream-activity watchdog
+
+**Attempt-local text accumulation.** Problem: the shared Python accumulator
+copied its entire accumulated content, reasoning or opaque signature on every
+new delta, making long fragmented output quadratic. Decision:
+`lib/llm/_stream_text.py::StreamTextBuffer` merges adjacent equal-depth fragments
+like binary carry. Appends copy at most once per merge depth and retain only
+logarithmically many fragments; there is no threshold, timer, truncation or new
+dependency. A string read joins the pending pieces and releases their references.
+Later appends preserve earlier returned snapshots. The accumulator's three
+string properties still support replacement and clearing, and a failed append
+leaves every previously accepted fragment intact. Delta callbacks, progress,
+MiniMax demultiplexing, finish/error/abort decisions and paid usage keep their
+existing owners and order. Tool argument assembly is unchanged.
+
+Alternatives rejected: a flat fragment list keeps too many small Python strings
+alive under single-character Unicode delivery; `StringIO` retains its buffer
+alongside a materialized result; UTF-8 buffering adds encode/decode allocations
+and a larger Unicode peak. The selected buffer retains ordinary Python strings
+and dies with its attempt. It adds no persistent cache or background service.
+Verify `tests/sse/test_stream_text_accumulation.py`, the common SSE parity suite,
+code fidelity, reasoning replay, truncation/cancellation and idle-timeout tests.
+`benchmarks/sse_text_accumulation.py --core-source FILE --case CASE --count N`
+compares frozen revisions with complete message/callback/terminal receipts;
+`--allocations` measures memory separately from clocks. These are parser and
+accumulator observations, excluding provider latency, transport and storage.
+
+Measurement (2026-11-07, Python 3.12.13, baseline `64676724b`): three fresh
+alternating process pairs, seven post-warmup samples per arm, median of process
+medians. All complete receipts match. Wall time includes JSON parsing, progress,
+incremental callbacks and finalization; fixtures contain synthetic text only.
+
+| Fixture (10,000 provider payloads) | Before | After |
+|---|---:|---:|
+| 72-character ASCII content | 208.1 ms | 61.0 ms |
+| CJK/emoji/control/surrogate content | 1127.3 ms | 73.4 ms |
+| Reasoning followed by terminal text | 321.4 ms | 67.1 ms |
+| Content, reasoning and opaque signatures | 1594.1 ms | 104.4 ms |
+| One CJK character per payload | 56.5 ms | 56.3 ms |
+
+Small-output costs are retained: 100 ASCII payloads measured 0.673→0.708 ms;
+100 Unicode payloads 0.884→0.812 ms; 1,000 ASCII payloads 6.83→6.31 ms.
+An explicit full-text property read from every callback costs 6.963→7.717 ms
+for 1,000 ASCII payloads. The current sync, async and Responses WebSocket
+transports consume only deltas and read cumulative text in finalization;
+their error classifier asks only whether a buffer is nonempty. This extra
+full-snapshot cost is not a production per-frame accounting path.
+
+Separate tracemalloc runs (three pairs, three samples per arm) retain the memory
+tradeoff: ASCII peak 1,444,362→1,479,587 bytes; Unicode peak
+4,484,063→4,592,851; scalar-CJK peak 44,057→46,259; mixed peak
+5,704,513→5,706,065. Retained state after finalization increases by 288–928
+bytes across these cases. These are Python allocations with the accumulator
+and result alive, not process RSS. Earlier StringIO/flat-list/UTF-8 experiments
+were rejected for excess retained or peak memory rather than promoted using
+their favorable clocks. No application throughput or native-runtime claim
+follows from this Python component result.
+
 Sync/async HTTP error responses retain at most a 256 KiB diagnostic prefix through `lib/llm/provider_error_body.py`; HTTP status and UTF-8-first decoding remain authoritative, and clipped raw archives are incomplete. Sync and async diagnostic reads stop after five seconds or caller cancellation, including while waiting for bytes; expiration preserves the prefix and HTTP status. Sync reads reuse the attempt’s single transport watchdog, arming it even when rolling idle timeout is disabled; diagnostic capture creates no extra reader or timer thread. Incoming bytes cannot renew this diagnostic deadline. Caller Stop wins races with error-body EOF, read failure and byte-limit truncation. Iterator cleanup errors are type-only diagnostics and never replace status/Stop; async iterator closure has a separate 100 ms budget. Response closure remains the transport owner’s responsibility. Specs: `test_provider_error_body_bounds.py`, `test_provider_error_body_deadline.py`. Sync HTTP uses decompressed urllib3 `read1` (legacy one-byte fallback), preserving requests errors; short SSE frames must arrive before EOF for close/length/chunked bodies, plain or gzip. Async and relay readers already yield available chunks. Watchdog interruption shuts down the active read socket before reader-owned response closure; closing a buffered response from the watchdog would wait on its read lock. The legacy urllib3 path remains inside the transport adapter. Specs: `test_sse_http_delivery.py`, `test_sync_stream_socket_cancel.py`. Chat `reasoning` is a string alias; whitespace-only stop is empty; SSE `message` without `delta` is malformed, never silently discarded. `[DONE]` without finish is not completion; finish without DONE may be valid. `LLM_DEBUG_RAW_SSE=1`/model substring enables redacted capture (64 Ki chars/line, 400 lines/256 KiB ring, per-write file rotation via log policy); default anomaly logs keep original decoded character counts and bounded framing categories, not bodies. `RawSSEDumper.payload` alone owns redaction and length measurement, avoiding double-redacted placeholder counts. JSON is redacted structurally; tool input/argument fragments, malformed/oversized payloads and over-depth values are omitted even in debug. Truncated/redacted capture is not byte-exact replay. All byte-stream transports use `lib/llm/_sse_framer.py`, driven by the shared `SSEByteStream` lifecycle. It incrementally decodes strict UTF-8 and frames SSE events across arbitrary byte boundaries, including CR/LF/CRLF, comments, a leading BOM, repeated `data:` fields, multiple events in one read and a split `[DONE]`. One event is capped at 1 MiB; lazy event delivery uses at most a 64 KiB decode slice without copying an entire bytes-like input or retaining a chunk-sized list of events. Dense invalid-byte runs are counted without repeatedly decoding/copying their suffix. Invalid UTF-8, invalid JSON, an oversized event, or unterminated data at actual EOF closes as `malformed_stream` with bounded, credential-free diagnostics. Data-free comments/id/event/retry tails are discarded; retry hints require bounded ASCII integers.
 
 A consumer-recognized protocol terminal (OpenAI `[DONE]`, translated Anthropic `message_stop`, or Responses terminal) ends parsing at that complete event, not at an arbitrary network chunk boundary. Bytes after it never affect content, tools, usage, errors or framing, even when the same read includes a partial/invalid trailer. Intentional close releases the parser without manufacturing EOF truncation; it never erases earlier corruption, grants success to DONE without finish, or bypasses tool-input validation. A finish reason alone does not stop parsing: final usage must still arrive, and pending data at EOF must still fail. Clean finish without `[DONE]` remains valid. Client cancellation is distinct from both protocol completion and EOF. Before HTTP headers, async Stop cancels and joins one request-scoped opening task; its response context closes even when Stop races with header arrival. Pre-stopped calls open no connection. Problem: body-only cancellation left silent header waits unresponsive. Decision: own setup and teardown in the existing async transport; alternatives rejected: abandoned POST tasks, arbitrary generation deadlines, or replaying a possibly accepted prompt. Real-socket and context-race specs: `test_async_stream_header_cancel.py`. The Responses WebSocket path submits an already-decoded provider payload directly; it never manufactures a `data:` line.
@@ -759,23 +844,29 @@ Problem: stopping at the SSE terminal left HTTP chunked EOF unread, so sync resp
 
 `TOFU_LLM_IDLE_STREAM_TIMEOUT_S` is one attempt's continuous transport-idle window, not its maximum wall time. **It is permanently disabled by default (`0`); a deployment opts in with an explicit positive value.** Do not restore a default cutoff here — see the seal note on the env var in `lib/llm/_transport.py`. When a value is set, `0`/unset disables the window, and positive values below 30 seconds clamp to 30. The shape matches native Codex's rolling stream behavior; sync SSE, async SSE, and Responses WebSocket paths share these rules. (The pinned `@openai/codex` `rust-v0.149.1` [provider default](https://github.com/openai/codex/blob/rust-v0.149.1/codex-rs/model-provider-info/src/lib.rs#L26-L27) of 300,000 ms and its [Responses SSE loop](https://github.com/openai/codex/blob/rust-v0.149.1/codex-rs/codex-api/src/sse/responses.rs#L552-L575) informed the window's *shape*, not its default; the 2026-10-23 incident showed a default idle cutoff discards healthy slow answers from buffered/reasoning providers.)
 
-The live response arms the rolling idle window at response headers. The preceding header wait still runs the same watcher for Stop and heartbeat polling, but it cannot arm the idle window: there is no response handle to interrupt and no body activity to renew the clock, so an expiry there could only latch and then discard the first chunk of a healthy late answer (the 2026-10-23 zero-byte incident). The header wait remains bounded by the caller's `first_byte_timeout`/`attempt_timeout` deadline and the abort poll. Every byte chunk or WebSocket message renews the window, including SSE comments/keep-alives, empty data, signatures, usage, finish metadata and protocol-only events such as `response.in_progress`. Reasoning/content/tool deltas remain semantic diagnostics; their absence never terminates generation. A full window without transport activity closes the attempt as `premature_close` / `midstream_close`, using the existing bounded retry and route-health policy.
+The live response arms the rolling idle window at response headers. The preceding header wait still runs the same watcher for Stop and heartbeat polling, but it cannot arm the idle window: there is no response handle to interrupt and no body activity to renew the clock, so an expiry there could only latch and then discard the first chunk of a healthy late answer (the 2026-10-23 zero-byte incident). The header wait remains bounded by the silent-stream deadline below, the caller's `first_byte_timeout`/`attempt_timeout` deadline and the abort poll. Every byte chunk or WebSocket message renews the window, including SSE comments/keep-alives, empty data, signatures, usage, finish metadata and protocol-only events such as `response.in_progress`. Reasoning/content/tool deltas remain semantic diagnostics; their absence never terminates generation. A full window without transport activity closes the attempt as `premature_close` / `midstream_close`, using the existing bounded retry and route-health policy.
 
 
 ### Silent-stream deadline
 
 Problem: the idle-window seal above assumed a wedged request is still bounded by `attempt_timeout`/`first_byte_timeout`, but interactive root-agent and sub-agent rounds pass neither. On 2026-10-28 a provider sent response headers and then no byte; the round blocked in `ssl.read` under `_iter_response_bytes` for more than 3 hours with `TOFU_LLM_IDLE_STREAM_TIMEOUT_S=0`, and fallback never ran because no error was ever raised.
 
-Decision: every attempt arms the named `SILENT_STREAM_DEADLINE_SECONDS = 900.0` backstop at response headers (sync SSE, async SSE, Responses WebSocket). The fixed hardware-independent liveness contract lives here and in `lib/llm/_transport.py`; it has no tuning environment variable. It uses the same rolling transport clock as the idle window, so any byte renews it: SSE comments, keep-alives, thinking deltas. Expiry closes the response from the watcher, which also unblocks the reading thread, and raises `ResponseReadTimeoutError(cause_type='stream_silence')`. This error is never accepted as a partial answer. It skips the same-slot retry loop (as `attempt_deadline` does), so dispatch excludes the slot and rotates to another slot or the fallback model, and the turn either continues or fails visibly. User Stop keeps its own abort poll and still lands during the silence. An opted-in tighter idle window still fires first, with its premature-close semantics. The header wait is unchanged: it is not covered, so gateways that buffer headers (2026-10-23) are unaffected.
+Decision: every attempt arms the named `SILENT_STREAM_DEADLINE_SECONDS = 900.0` backstop at response headers (sync SSE, async SSE, Responses WebSocket). The fixed hardware-independent liveness contract lives here and in `lib/llm/_transport.py`; it has no tuning environment variable. It uses the same rolling transport clock as the idle window, so any byte renews it: SSE comments, keep-alives, thinking deltas. Expiry closes the response from the watcher, which also unblocks the reading thread, and raises `ResponseReadTimeoutError(cause_type='stream_silence')`. This error is never accepted as a partial answer. It skips the same-slot retry loop (as `attempt_deadline` does), so dispatch excludes the pair and rotates to another eligible slot; a strict-model round never switches model, so three such expiries fail the round visibly instead of reaching a fallback model. User Stop keeps its own abort poll and still lands during the silence. An opted-in tighter idle window still fires first, with its premature-close semantics.
+
+The response-header wait is transport silence too (owner decision 2026-11-08, which supersedes that morning's rejection of a header deadline recorded with the waiting label below). Problem: the example-corp gateway buffers response headers until its upstream speaks, so the header wait of an interactive round, which passes no caller bound, was unbounded. Twelve claude-opus-5.5 and kimi-k3.1-pro attempts in about four hours sent no header until the gateway's own 2,000.3-2,002 s timeout answered HTTP 504; every retry then answered in 7-71 s (median about 16 s). Those holds were 24,008 s, 18.3% of all agent model time in the window. Decision: the direct HTTP sync and async transports start the same contract when the request is sent (after route admission), and the header wait raises the same typed `stream_silence` timeout with the same dispatch treatment; a tighter caller `first_byte_timeout`/`attempt_timeout` still wins with its own `response_headers` cause. Headers renew the clock, so the body then gets its full silence window. Evidence that no healthy answer is cut: in the same window the longest healthy claude-opus-5.5 first token was 133.9 s and its longest attempt 316 s (first token at 9.5 s); kimi-k3.1-pro attempts stayed under 241 s. The hidden-reasoning gpt-6.1-sol round of 1,114.5 s ran under the existing post-header contract, so its transport was never silent for 900 s after headers. The relayed desktop-egress and subscription-adapter branches still have no header bound; their relays own that wait. An abandoned attempt settles its model budget as usage unknown, exactly like a post-header expiry; only actors with finite token limits fence the next request on that.
 
 Threshold evidence (2026-10-28 logs): the agent `[Timing]` request-to-first-token latency (header wait plus first-byte silence) was p50 7.8 s, p99 37.7 s and max 128.5 s over 119 rounds. Per-chunk arrival times are not logged (`raw_sse_anomaly.log` frames carry only the per-request `created` stamp), so a long post-header silence of a healthy stream is bounded by that first-token figure. The 2026-10-23 incident had first-token latency just past 300 s. 900 s is 7x the observed maximum and 3x that incident, while bounding a dead stream to 15 minutes instead of indefinitely.
 
-Alternatives considered: (1) restoring a default `TOFU_LLM_IDLE_STREAM_TIMEOUT_S`, rejected because it reverses a recorded seal and reuses premature-close semantics that discarded healthy answers; (2) a caller-side `attempt_timeout` on root-agent rounds, rejected because it is a total wall-clock bound that would cut long healthy generations, and because it is a per-caller workaround that leaves other callers exposed; (3) per-transport socket read timeouts, rejected because they would add a second, transport-specific deadline mechanism next to the shared watcher that already owns Stop, heartbeats and the transport-activity clock. Verification: `tests/llm/test_llm_silent_stream_deadline.py` uses a real local HTTP server (headers then silence, then slow steady chunks, then Stop).
+Alternatives considered: (1) restoring a default `TOFU_LLM_IDLE_STREAM_TIMEOUT_S`, rejected because it reverses a recorded seal and reuses premature-close semantics that discarded healthy answers; (2) a caller-side `attempt_timeout` on root-agent rounds, rejected because it is a total wall-clock bound that would cut long healthy generations, and because it is a per-caller workaround that leaves other callers exposed; (3) per-transport socket read timeouts, rejected because they would add a second, transport-specific deadline mechanism next to the shared watcher that already owns Stop, heartbeats and the transport-activity clock. Verification: `tests/llm/test_llm_silent_stream_deadline.py` uses a real local HTTP server (headers then silence, no headers at all, late headers inside the window, a tighter caller header bound, slow steady chunks, and Stop in both waits, sync and async).
 `TOFU_LLM_SEMANTIC_IDLE_TIMEOUT_S` and `TOFU_LLM_NO_ACTIONABLE_TIMEOUT_S` are deprecated lower-priority aliases for the same transport-idle duration. They log an import-time warning because keep-alives now renew the value. New attempts never emit `semantic_progress_timeout`; that state, its usage flags, retry label, and `no_actionable_output` remain read-only compatibility for stored timelines and plugins.
 
 There is no absolute per-attempt ceiling while nonterminal transport events continue; model token limits, task/round policy, and user Stop still govern it. Typed stream evidence and Turn Trace record request elapsed time, response headers, transport bytes, complete SSE events, transport/semantic ages, reasoning/content/tool progress, provider finish, client abort and bounded malformed-frame diagnostics. Legacy usage flags project that evidence, never a second classifier.
 
 Problem: continuous transport traffic suppressed waiting-status callbacks, and a socket exception skipped accumulator finalization, losing the failed physical attempt's progress when a retry succeeded. Decision: publish waiting status on the existing watcher interval during semantic silence or unfinished tool-argument generation, independently of incoming bytes; preparing a tool call follows the stream's latest output channel, is announced the moment each call opens (`stream.phase.preparingToolCall` with the tool name and `toolCallId`, through the same wait-status port, outside the sampled beat budget) and never implies tool execution. Record bounded `llm.stream_interrupted` counts and the physical trace ID before propagating an iteration error. Argument bodies and credentials are never included. Alternative rejected: a semantic deadline would interrupt live Codex generation; raw archives alone cannot diagnose attempts after quota exhaustion. No additional watcher or retention tier is introduced. Verification: `tests/llm/test_stream_interruption_visibility.py` covers metadata traffic, semantic progress, retry preservation, and partial argument failure evidence. Measurement: 240 callbacks over a simulated hour at the default 15-second interval persist eight sampled phase frames through the unchanged 128-frame per-round retry/wait budget. One interrupted-attempt sample with 13,643,802 transport bytes serializes 629 bytes of fixed progress evidence; the watcher adds one 24-byte float on Python 3.12 and no thread or queue. Existing log rotation owns the once-per-interruption diagnostic's retention.
+
+Problem: a request whose response headers never arrived showed the same "waiting for {model} to start replying" label as a connected model that had not produced output yet. On 2026-11-08 the AIGC gateway held some requests for 2000 s without answering and then returned 504, and those requests looked like a slow model. Decision: a `waiting_headers` beat publishes `stream.phase.waitingForProviderResponse` ("Request sent {elapsed}s ago; the {model} model service has not responded yet…"). A `waiting_event` beat (headers received, no output yet) and a dispatcher capacity wait keep `stream.phase.waitingForResponse`. The label itself changes no deadline, retry or rotation; the header wait it describes is bounded by the silent-stream deadline above, whose expiry rotates the attempt to another slot rather than surfacing an error, so the label shows the unanswered wait until that rotation. Alternatives considered: (1) a header deadline that fails the attempt, first rejected because an error gives the user nothing to act on and because a gateway that buffers headers (2026-10-23) would lose slow but healthy answers; the owner later approved the silent-stream bound above, which rotates instead of failing and sits far above every healthy wait observed; (2) one new label for every wait before output, rejected because capacity waits and a connected but silent stream are not unanswered requests. Verification: `tests/llm/test_no_read_timeout_abort.py::TestBeatLabelHonesty` and the live-status tick case in `frontend/src/conversation/ui/renderers/text-blocks.test.ts`.
+
+Response-header arrival. Problem: agent rounds did not record when an attempt's response headers arrived, so a gateway that buffers the status line could not be told apart from model think time before the first token. Decision: the sync and async direct HTTP transports stamp every streamed attempt's usage (complete or prematurely closed) with `_response_headers_ms`, the milliseconds from request send to response headers on the route that answered: the network authority's per-route latency (`tofu_network_latency_ms`), which excludes route admission and failed route connects, else the transport's own measurement from just after egress route admission. Attempts that end in an exception carry no usage; their wait is in the dispatcher attempt's `durationMs` and Turn Trace's failed-attempt window. Turn Trace joins it into `attrs.attempts[].responseHeadersMs` (`docs/contracts/TURN_TRACE_CONTRACT.md`). The relayed desktop-egress/adapter paths reuse the sync transport; the Responses WebSocket path does not stamp it. Spec: `tests/llm/test_llm_response_headers_usage.py` (real local HTTP server holding the status line, sync and async).
 
 ## Dispatch policy
 
@@ -804,8 +895,24 @@ route pins and caller budgets stay with their current owners.
 Every pre-transport admission failure and cancellation releases its reservation
 without provider-health damage. After non-stream success has settled the slot,
 later bookkeeping failures propagate without releasing again or initiating a
-new provider attempt. Public tests retain another reservation on the same slot
-to detect cross-request corruption. Quota tests inspect resulting key health
+new provider attempt. Streaming dispatch separates local cache/admission waits,
+the transport retry boundary, and terminal result settlement. Once transport
+returns a typed result, `_settle_stream_result` records its success, neutral abort
+or soft failure before projecting route/usage receipts and cache observations.
+Those later failures propagate unchanged; they cannot consume another request's
+reservation, rewrite the provider outcome or start another provider attempt.
+Non-finite output-token estimates are unusable throughput observations; raw usage
+remains intact for its accounting owner. Both streaming lanes share the existing
+provider-reported network-error rotation, including its budget and notifications.
+
+Problem: catching terminal bookkeeping errors as transport failures repeated
+settlement and could resend completed work. Alternatives rejected: compensating
+an aggregate inflight counter cannot identify another request's reservation;
+swallowing every local error hides required failure and cancellation signals.
+`test_stream_settlement_failures.py` injects failures before send, during health
+observation and after each outcome through both public streaming entrypoints.
+Public tests retain another reservation on the same slot to detect cross-request
+corruption. Quota tests inspect resulting key health
 through chat, sync stream, async stream and racing calls: HTTP 402 stops the
 account, while ambiguous quota HTTP 429 stops only the affected model.
 

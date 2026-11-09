@@ -79,7 +79,7 @@ def test_real_async_stream_sends_snapshot_after_budget_dispatch_and_closes(monke
     monkeypatch.setattr(module,'_resolve_async_route',lambda url:(None,{'mode':'fixture'}))
     async def execute():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            monkeypatch.setattr(module,'get_async_client',lambda proxy:client)
+            monkeypatch.setattr(module,'get_async_client',lambda **_:client)
             async with module._open_server_stream(plan) as (response,route):
                 assert route is None
                 assert await response.aread()==b'data: [DONE]\n\n'

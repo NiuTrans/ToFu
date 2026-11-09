@@ -98,19 +98,24 @@ def test_replay_reuses_the_command_and_the_existing_project_router(r):
     assert other['command_id'] == first['command_id']
 
 
-@pytest.mark.parametrize('forward, context_mode', [('started', 'steer'), ('steered', 'steer'),
-                                                   ('queued', 'queue')])
-def test_note_is_separate_nonhuman_context_never_inside_the_owner_text(r, forward, context_mode):
-    r.dispositions[:] = [forward, 'steered']
+@pytest.mark.parametrize('forward', ['started', 'steered', 'queued'])
+def test_note_is_nonhuman_context_of_the_same_request_never_the_owner_text(r, forward):
+    """The note is evidence inside the one authorized request, not a second input.
+
+    A second input became its own synthetic Coordinator request when the steer
+    window was closed; the note therefore rides the forwarded input, while the
+    owner's verbatim words (``originalContent``) stay the compared authority.
+    """
+    r.dispositions[:] = [forward]
     result = r.route(project_path=r.project, source_turn_id='human-1', note='The owner prefers small PRs.')
-    human, context = r.calls
-    assert human['message']['content'] == TEXT and 'small PRs' not in json.dumps(human['message'])
-    assert context['message']['_initiator'] == 'peer'
-    assert context['message']['origin'] == {'initiator': 'peer', 'sourceConversationId': 'router'}
-    assert 'nonhuman' in context['message']['content'] and 'small PRs' in context['message']['content']
-    assert context['command_id'] == human['command_id'] + ':context'
-    assert context['inject_mode'] == context_mode
-    assert result['disposition'] == forward and result['context_disposition'] == 'steered'
+    [call] = r.calls
+    assert call['message']['originalContent'] == TEXT
+    assert call['message']['content'].startswith(TEXT)
+    assert 'nonhuman' in call['message']['content'] and 'small PRs' in call['message']['content']
+    assert '_initiator' not in call['message']
+    assert call['message']['origin'] == {'initiator': 'human', 'forwardedFrom': {
+        'conversationId': 'router', 'turnId': 'human-1'}}
+    assert result['disposition'] == forward and result['context_disposition'] is None
 
 
 @pytest.mark.parametrize('case', ['other-turn', 'synthetic-request'])

@@ -139,6 +139,12 @@ struct WalBarrierState {
     path: PathBuf,
     requested_len: u64,
     synced_len: u64,
+    /// Contiguous prefix of `path` physically written, by inline appends or
+    /// by the worker before its sync. Normal durability acknowledges here.
+    written_len: u64,
+    /// The frontier that acknowledges a commit: `synced_len` under Strict,
+    /// `written_len` under Normal. The attached log sets it.
+    acknowledgement: WalDurability,
     stop: bool,
     closing: bool,
     error: Option<FlushError>,
@@ -222,8 +228,24 @@ impl WalBarrierShared {
             if len > state.requested_len {
                 state.requested_len = len;
             }
+            // Callers have already written these bytes. Without a queued or
+            // inflight frame below them the whole prefix is written; otherwise
+            // the worker's next write covers them.
+            if state.writes.retained_bytes == 0 {
+                state.written_len = state.written_len.max(len);
+            }
         }
+        self.synced.notify_all();
         self.wake.notify_all();
+    }
+
+    fn note_written(&self, path: &Path, len: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.path == path {
+                state.written_len = state.written_len.max(len);
+            }
+        }
+        self.synced.notify_all();
     }
 
     fn note_synced(&self, path: &Path, len: u64) {
@@ -232,7 +254,15 @@ impl WalBarrierShared {
             // published its successor. Its bytes cannot cover the new WAL.
             if state.path == path {
                 state.synced_len = state.synced_len.max(len);
+                state.written_len = state.written_len.max(len);
             }
+        }
+        self.synced.notify_all();
+    }
+
+    fn set_acknowledgement(&self, durability: WalDurability) {
+        if let Ok(mut state) = self.state.lock() {
+            state.acknowledgement = durability;
         }
         self.synced.notify_all();
     }
@@ -253,6 +283,7 @@ impl WalBarrierShared {
             let mut file = vfs.open(&path, OpenRequest { write: true, ..Default::default() })?;
             batches = write_buffer::write_frames(file.as_mut(), &frames)?;
             wrote = true;
+            self.note_written(&path, len);
             file.sync_data()
         })();
         drop(frames);
@@ -261,6 +292,35 @@ impl WalBarrierShared {
             Ok(()) => { self.note_synced(&path, len); Ok(()) }
             Err(error) => { let returned = io::Error::new(error.kind(), error.to_string()); self.note_flush_error(&path, error); Err(returned) }
         }
+    }
+
+    /// The worker's physical write without its sync: queued frames reach the
+    /// file and the written frontier advances, exactly as before `sync_data`.
+    #[cfg(test)]
+    pub(crate) fn write_for_test(&self, vfs: &dyn Vfs) -> io::Result<()> {
+        let (path, len, frames) = {
+            let mut state = self.state.lock().unwrap();
+            (state.path.clone(), state.requested_len, state.writes.take())
+        };
+        let count = frames.len();
+        let bytes = frames.iter().map(|f| f.bytes.len()).sum::<usize>();
+        let mut batches = 0;
+        let result = (|| -> io::Result<()> {
+            let mut file = vfs.open(&path, OpenRequest { write: true, ..Default::default() })?;
+            batches = write_buffer::write_frames(file.as_mut(), &frames)?;
+            Ok(())
+        })();
+        drop(frames);
+        self.state.lock().unwrap().writes.release_counts(bytes, count, result.is_ok(), batches, 0);
+        match result {
+            Ok(()) => { self.note_written(&path, len); Ok(()) }
+            Err(error) => { let returned = io::Error::new(error.kind(), error.to_string()); self.note_flush_error(&path, error); Err(returned) }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn written_len_for_test(&self) -> u64 {
+        self.state.lock().unwrap().written_len
     }
 
     fn note_flush_error(&self, path: &Path, error: io::Error) {
@@ -305,6 +365,7 @@ impl WalBarrierShared {
                 state.path = path;
                 state.requested_len = 0;
                 state.synced_len = 0;
+                state.written_len = 0;
             }
         }
         // Engine installs a successor only AFTER synchronizing the complete
@@ -347,6 +408,30 @@ impl WalBarrierShared {
         witness: &WalWitness,
         deadline: std::time::Instant,
     ) -> io::Result<()> {
+        self.wait_covered(witness, deadline, |state| state.synced_len)
+    }
+
+    /// Parks a command's response until its tier's acknowledgement point
+    /// covers the witness: the sync under Strict, the physical write under
+    /// Normal. Durable dependents (CONTROL, projections, checkpoints) keep
+    /// waiting for the sync through `wait_witness`.
+    pub fn wait_acknowledged(
+        &self,
+        witness: &WalWitness,
+        deadline: std::time::Instant,
+    ) -> io::Result<()> {
+        self.wait_covered(witness, deadline, |state| match state.acknowledgement {
+            WalDurability::Strict => state.synced_len,
+            WalDurability::Normal => state.written_len,
+        })
+    }
+
+    fn wait_covered(
+        &self,
+        witness: &WalWitness,
+        deadline: std::time::Instant,
+        covered: impl Fn(&WalBarrierState) -> u64,
+    ) -> io::Result<()> {
         let mut guard = self
             .state
             .lock()
@@ -355,7 +440,7 @@ impl WalBarrierShared {
             if let Some(error) = guard.error.as_ref() {
                 return Err(io::Error::new(error.kind, error.message.clone()));
             }
-            if guard.path != witness.path || guard.synced_len >= witness.len {
+            if guard.path != witness.path || covered(&guard) >= witness.len {
                 return Ok(());
             }
             let now = std::time::Instant::now();
@@ -380,6 +465,9 @@ impl WalBarrierShared {
 pub struct WalBarrierDriver {
     barrier: WalBarrier,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// Normal tier only: the physical writes that acknowledge run here, so
+    /// the worker's fsync never stands between a commit and its response.
+    writer: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl WalBarrierDriver {
@@ -399,6 +487,15 @@ impl WalBarrierDriver {
     }
 
     pub fn start_with_write_buffer(vfs: Arc<dyn Vfs>, path: PathBuf, interval: Duration, capacity_bytes: usize) -> io::Result<(WalBarrier, Self)> {
+        Self::start_buffered(vfs, path, WalDurability::Strict, interval, capacity_bytes)
+    }
+
+    /// One buffered barrier per tier. Strict: one worker writes and then syncs
+    /// each captured prefix, because a response needs the sync. Normal: a
+    /// writer thread performs the physical writes a response needs and the
+    /// worker syncs the written prefix as the interval-bounded backstop.
+    pub fn start_buffered(vfs: Arc<dyn Vfs>, path: PathBuf, durability: WalDurability,
+        interval: Duration, capacity_bytes: usize) -> io::Result<(WalBarrier, Self)> {
         if !(MIN_WAL_FLUSH_INTERVAL..=MAX_WAL_FLUSH_INTERVAL).contains(&interval) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -410,17 +507,25 @@ impl WalBarrierDriver {
         if vfs.supports_buffered_wal_writes() {
             barrier.state.lock().map_err(|_| io::Error::other("WAL barrier state poisoned"))?.writes.capacity = capacity_bytes;
         }
+        let driver = Self { barrier: barrier.clone(), worker: Mutex::new(None), writer: Mutex::new(None) };
+        if durability == WalDurability::Normal {
+            let writer_barrier = barrier.clone();
+            let writer_vfs = Arc::clone(&vfs);
+            let writer = thread::Builder::new()
+                .name("tofu-db-wal-writer".to_owned())
+                .spawn(move || run_wal_writer(writer_vfs, writer_barrier))?;
+            *driver.writer.lock().map_err(|_| io::Error::other("WAL barrier state poisoned"))? = Some(writer);
+        }
         let worker_barrier = barrier.clone();
+        // A failed spawn drops `driver`, which stops and joins any writer.
         let worker = thread::Builder::new()
             .name("tofu-db-wal-barrier".to_owned())
-            .spawn(move || run_wal_barrier(vfs, worker_barrier, interval))?;
-        Ok((
-            barrier.clone(),
-            Self {
-                barrier,
-                worker: Mutex::new(Some(worker)),
-            },
-        ))
+            .spawn(move || match durability {
+                WalDurability::Strict => run_wal_barrier(vfs, worker_barrier, interval),
+                WalDurability::Normal => run_wal_syncer(vfs, worker_barrier, interval),
+            })?;
+        *driver.worker.lock().map_err(|_| io::Error::other("WAL barrier state poisoned"))? = Some(worker);
+        Ok((barrier, driver))
     }
 
     pub fn stop_and_join(&self) -> io::Result<()> {
@@ -439,15 +544,16 @@ impl WalBarrierDriver {
             state.stop = true;
         }
         self.barrier.wake.notify_all();
-        let worker = self
-            .worker
-            .lock()
-            .map_err(|_| io::Error::other("WAL barrier state poisoned"))?
-            .take();
-        if let Some(worker) = worker {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("WAL barrier worker panicked"))?;
+        for thread in [&self.writer, &self.worker] {
+            let handle = thread
+                .lock()
+                .map_err(|_| io::Error::other("WAL barrier state poisoned"))?
+                .take();
+            if let Some(handle) = handle {
+                handle
+                    .join()
+                    .map_err(|_| io::Error::other("WAL barrier worker panicked"))?;
+            }
         }
         if let Ok(mut state) = self.barrier.state.lock() {
             state.writes.pending.clear();
@@ -501,6 +607,10 @@ fn run_wal_barrier_with_sync_hook(
                 write_nanos = started.elapsed().as_nanos() as u64;
                 batches_written = written?;
                 wrote = true;
+                // Every byte below the captured length is now written: these
+                // frames, inline appends that preceded it and earlier batches.
+                // Normal acknowledgements need nothing more; Strict waits on.
+                barrier.note_written(&path, requested_len);
                 let _sync = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_SYNC);
                 file.sync_data()
             })();
@@ -536,6 +646,94 @@ fn run_wal_barrier_with_sync_hook(
             .unwrap_or_else(|error| error.into_inner());
         if guard.stop {
             return;
+        }
+    }
+}
+
+/// Normal tier's physical writer: takes every queued frame, writes the
+/// contiguous runs and advances the written prefix that acknowledges. Frames
+/// are released after the write; the worker's later sync needs no copy.
+fn run_wal_writer(vfs: Arc<dyn Vfs>, barrier: WalBarrier) {
+    crate::fsync_stats::set_current_component(crate::fsync_stats::COMPONENT_WAL_BARRIER);
+    let mut handle: Option<(PathBuf, Box<dyn VfsFile>)> = None;
+    loop {
+        let (path, requested_len, frames) = {
+            let Ok(mut state) = barrier.state.lock() else { return };
+            loop {
+                if state.stop { return; }
+                if state.error.is_none() {
+                    if !state.writes.pending.is_empty() {
+                        break (state.path.clone(), state.requested_len, state.writes.take());
+                    }
+                    // Inline appends queued behind written frames: no frame
+                    // below them is unwritten any more.
+                    if state.writes.retained_bytes == 0 && state.requested_len > state.written_len {
+                        state.written_len = state.requested_len;
+                        barrier.synced.notify_all();
+                        barrier.wake.notify_all();
+                        continue;
+                    }
+                }
+                // Every enqueue, inline append, rotation and stop notifies
+                // `wake` after changing this predicate under the same mutex.
+                state = match barrier.wake.wait(state) { Ok(state) => state, Err(_) => return };
+            }
+        };
+        let frame_count = frames.len();
+        let frame_bytes = frames.iter().map(|f| f.bytes.len()).sum::<usize>();
+        let started = std::time::Instant::now();
+        let result = (|| -> io::Result<usize> {
+            if handle.as_ref().is_none_or(|(handle_path, _)| *handle_path != path) {
+                handle = Some((path.clone(), vfs.open(&path, OpenRequest { write: true, ..Default::default() })?));
+            }
+            let file = &mut handle.as_mut().expect("opened WAL writer handle").1;
+            write_buffer::write_frames(file.as_mut(), &frames)
+        })();
+        let write_nanos = started.elapsed().as_nanos() as u64;
+        drop(frames);
+        if let Ok(mut state) = barrier.state.lock() {
+            let batches = *result.as_ref().unwrap_or(&0);
+            state.writes.release_counts(frame_bytes, frame_count, result.is_ok(), batches, write_nanos);
+        }
+        match result {
+            Ok(_) => barrier.note_written(&path, requested_len),
+            Err(error) => barrier.note_flush_error(&path, error),
+        }
+        barrier.wake.notify_all();
+    }
+}
+
+/// Normal tier's barrier: syncs whatever prefix the writer (or an inline
+/// append) has physically written, through its own descriptor, and idles on
+/// `interval`. It never syncs a length the writer has not covered.
+fn run_wal_syncer(vfs: Arc<dyn Vfs>, barrier: WalBarrier, interval: Duration) {
+    crate::fsync_stats::set_current_component(crate::fsync_stats::COMPONENT_WAL_BARRIER);
+    let mut handle: Option<(PathBuf, Box<dyn VfsFile>)> = None;
+    loop {
+        let (path, written_len) = {
+            let Ok(mut state) = barrier.state.lock() else { return };
+            loop {
+                if state.stop { return; }
+                if state.error.is_none() && state.written_len > state.synced_len {
+                    break (state.path.clone(), state.written_len);
+                }
+                state = match barrier.wake.wait_timeout(state, interval) {
+                    Ok((state, _)) => state,
+                    Err(_) => return,
+                };
+            }
+        };
+        let result = (|| -> io::Result<()> {
+            if handle.as_ref().is_none_or(|(handle_path, _)| *handle_path != path) {
+                handle = Some((path.clone(), vfs.open(&path, OpenRequest { write: true, ..Default::default() })?));
+            }
+            let file = &mut handle.as_mut().expect("opened WAL barrier handle").1;
+            let _sync = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_SYNC);
+            file.sync_data()
+        })();
+        match result {
+            Ok(()) => barrier.note_synced(&path, written_len),
+            Err(error) => barrier.note_flush_error(&path, error),
         }
     }
 }
@@ -740,6 +938,9 @@ impl ActiveLog {
 
     pub fn set_durability(&mut self, durability: WalDurability) {
         self.durability = durability;
+        if let Some(barrier) = &self.barrier {
+            barrier.set_acknowledgement(durability);
+        }
     }
 
     /// Bytes not known to be covered by any barrier, whether performed by
@@ -764,6 +965,7 @@ impl ActiveLog {
 
     pub fn attach_barrier(&mut self, barrier: &WalBarrier) {
         barrier.note_rotated(self.path.clone());
+        barrier.set_acknowledgement(self.durability);
         // Bytes written before the attachment predate the worker: post the
         // current length as one witnessed append so a barrier wait on a
         // pre-attachment witness (e.g. a read command's `wal_len()`) is
@@ -821,13 +1023,14 @@ impl ActiveLog {
         let next_len = current_len
             .checked_add(record_len as u64)
             .ok_or_else(|| invalid_data("active WAL length overflow"))?;
-        if self.durability == WalDurability::Strict {
-            if let Some(barrier) = &self.barrier {
-                if barrier.queue_write(&self.path, current_len, next_len, &[&leading, payload, &trailing])? {
-                    crate::fsync_stats::note_wal_encoded_bytes(next_len - current_len);
-                    self.len = next_len;
-                    return Ok(hash);
-                }
+        // Both tiers hand the physical write to the barrier worker, so no
+        // caller holds the authority mutex across file I/O; the tiers differ
+        // only in the frontier that acknowledges (`wait_acknowledged`).
+        if let Some(barrier) = &self.barrier {
+            if barrier.queue_write(&self.path, current_len, next_len, &[&leading, payload, &trailing])? {
+                crate::fsync_stats::note_wal_encoded_bytes(next_len - current_len);
+                self.len = next_len;
+                return Ok(hash);
             }
         }
         self.file.write_all_vectored_at(current_len, &mut [
@@ -1224,7 +1427,8 @@ mod tests {
                     }
                 });
         });
-        let driver = WalBarrierDriver { barrier: barrier.clone(), worker: Mutex::new(Some(worker)) };
+        let driver = WalBarrierDriver { barrier: barrier.clone(), worker: Mutex::new(Some(worker)),
+            writer: Mutex::new(None) };
         wait_reached.recv_timeout(Duration::from_secs(5)).unwrap();
         log.append(2, first, b"arrival while worker cannot receive wakeup").unwrap();
         let witness = barrier.witness(log.len()).unwrap();

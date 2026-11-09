@@ -27,6 +27,7 @@ import time
 from urllib.parse import urlparse
 
 import requests
+from lib.http_transport.client import http_request
 
 from lib.log import get_logger
 
@@ -159,7 +160,7 @@ def _resolve_proxies(mode: str):
 
 def _do_request(method, url, headers, body, timeout_s, proxies):
     t0 = time.monotonic()
-    resp = requests.request(method, url, headers=headers, data=body,
+    resp = http_request(method, url, headers=headers, data=body,
                             timeout=timeout_s, proxies=proxies, stream=False)
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     content = resp.content
@@ -267,7 +268,7 @@ def start_egress_stream(params: dict, on_chunk, on_exit):
     status = 0
 
     try:
-        resp = requests.request(
+        resp = http_request(
             method, url, headers=headers, data=body,
             timeout=(min(timeout_s, 60), timeout_s), proxies=_resolve_proxies(mode),
             stream=True)

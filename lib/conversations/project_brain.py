@@ -20,7 +20,6 @@ import uuid
 from typing import Any
 
 from lib.log import get_logger
-from lib.storage import get_storage_client
 
 from .project_identity import normalize_project_path, project_channel_key
 
@@ -42,12 +41,18 @@ _WRITE_TOOLS = frozenset({
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
     'insert_content', 'insert_contents',
 })
-_TRANSIENT_ADVISORY_LIMIT = 20
+_overlap_lock = threading.Lock()
 _MAX_CHECKER_OUTPUT_CHARS = 4000
 _MAX_CHECKER_OUTPUT_BYTES = _MAX_CHECKER_OUTPUT_CHARS * 4
 _MAX_NARRATIVE_BYTES = 720
-_overlap_lock = threading.Lock()
 _work_signal_lock = threading.Lock()
+
+
+def get_storage_client(*, write: bool = False):
+    # Imported on use: transient signals reach this module and return before
+    # storage, and the storage-free agent wheel does not ship lib.storage.
+    from lib.storage import get_storage_client as storage_client
+    return storage_client(write=write)
 
 
 def _owner(task: dict) -> int:
@@ -406,15 +411,18 @@ def note_file_signal(
     return work_id
 
 
-def _queue_transient_advisory(task: dict, key: str, text: str) -> bool:
-    keys = task.setdefault('_projectOverlapKeys', [])
-    if key in keys or len(keys) >= _TRANSIENT_ADVISORY_LIMIT:
-        return False
-    keys.append(key)
-    task.setdefault('_projectOverlapAdvisories', []).append({
-        'key': key, 'value': text[:1600],
-    })
-    return True
+def _queue_radar_advice(task: dict, project_path: str,
+                        advice: list[tuple[str, str]], path: str) -> None:
+    if not advice:
+        return
+    from lib.project_mod.integration_radar import queue_transient_advisory
+    with _overlap_lock:
+        queued = [queue_transient_advisory(task, key, text) for key, text in advice]
+    if any(queued) and project_path:
+        _push_project_hint(normalize_project_path(project_path), _owner(task), {
+            'type': 'path_overlap', 'path': path,
+            'taskIds': [str(task.get('id') or '')],
+        })
 
 
 def _note_integration_radar(task: dict, bound_root: str, changed_paths: list[str]) -> None:
@@ -436,32 +444,18 @@ def _note_integration_radar(task: dict, bound_root: str, changed_paths: list[str
 
 
 def queue_radar_notices(task: dict) -> None:
-    """Move notices other writers and landings left for this conversation into its advice."""
-    if task.get('_transientRuntime'):
-        return
+    """Move notices other writers and landings left for this conversation into its advice.
+
+    Agent core's inbox drain must not import this host module, so the task-local
+    queueing lives in the radar; this wrapper adds the UI hint on the host side.
+    """
+    from lib.project_mod.integration_radar import queue_radar_notices as queue
+    before = len(task.get('_projectOverlapAdvisories') or ())
+    queue(task)
     project_path = str((task.get('config') or {}).get('projectPath') or '')
-    if not project_path and not task.get('_radarCommonDirs'):
-        return
-    try:
-        from lib.project_mod.integration_radar import take_notices
-        notices = take_notices(task, project_path)
-    except Exception as exc:
-        logger.debug('[ProjectBrain] radar notices failed soft: %s', exc)
-        return
-    _queue_radar_advice(task, project_path, [
-        (hashlib.sha256(text.encode('utf-8')).hexdigest()[:24], text)
-        for text in notices], '')
-
-
-def _queue_radar_advice(task: dict, project_path: str,
-                        advice: list[tuple[str, str]], path: str) -> None:
-    if not advice:
-        return
-    with _overlap_lock:
-        queued = [_queue_transient_advisory(task, key, text) for key, text in advice]
-    if any(queued) and project_path:
+    if project_path and len(task.get('_projectOverlapAdvisories') or ()) > before:
         _push_project_hint(normalize_project_path(project_path), _owner(task), {
-            'type': 'path_overlap', 'path': path,
+            'type': 'path_overlap', 'path': '',
             'taskIds': [str(task.get('id') or '')],
         })
 

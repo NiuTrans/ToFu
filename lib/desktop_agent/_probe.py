@@ -49,6 +49,7 @@ def probe_server(url: str, timeout: float = 4.0) -> tuple[bool, str]:
       * ``timeout`` / ``unreachable`` / ``error`` — transport failures.
     """
     import requests
+    from lib.http_transport.client import http_get
     base = (url or '').strip().rstrip('/')
     if not base or not _is_route_url(base):
         return False, 'unreachable'
@@ -57,7 +58,7 @@ def probe_server(url: str, timeout: float = 4.0) -> tuple[bool, str]:
         # is only a reachability hint, never proof of server identity. Do not
         # follow a gateway redirect or attach ambient .netrc credentials to
         # a URL that may have come from unauthenticated LAN discovery.
-        resp = requests.get(base + '/api/health', timeout=timeout,
+        resp = http_get(base + '/api/health', timeout=timeout,
                             allow_redirects=False, auth=lambda request: request)
     except requests.exceptions.Timeout as e:
         logger.debug('[Agent] server probe timed out: %s', e)

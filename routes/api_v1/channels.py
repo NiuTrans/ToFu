@@ -10,7 +10,11 @@ Routes (projected onto ``/api/v4`` with the v4 envelope):
   PUT  /api/v1/channels/github                    — enable/disable, token or vault entry, API base
   GET  /api/v1/channels/github/threads            — GitHub issue/PR thread page
   PUT  /api/v1/channels/github/threads/<path:key> — set a GitHub thread's mode / reply policy
-  GET  /api/v1/channels/outbox[?channel=dx|github] — active outbox items (drafts, queue, failures)
+  GET  /api/v1/channels/{wecom,qq,wechat}         — bot account (C12): status, owner, pairing code, 微信 login QR
+  PUT  /api/v1/channels/{wecom,qq,wechat}         — enable/disable, app ID and secret, pairing, 微信 QR login
+  GET  /api/v1/channels/{wecom,qq,wechat}/threads — bot thread page with mode and reply policy
+  PUT  /api/v1/channels/{wecom,qq,wechat}/threads/<thread_key> — set a bot thread's mode / reply policy
+  GET  /api/v1/channels/outbox[?channel=<channel>] — active outbox items (drafts, queue, failures)
   GET  /api/v1/channels/outbox/<item_id>/attachments/<index> — an attached original image (thumbnail)
   POST /api/v1/channels/outbox/<item_id>/approve  — approve a draft
   POST /api/v1/channels/outbox/<item_id>/discard  — discard a draft/queued/failed item
@@ -55,7 +59,8 @@ _BAD_REQUEST_CODES = frozenset({'invalid_update', 'invalid_thread', 'invalid_mod
                                 'token_unsupported', 'credential_missing'})
 _UNAVAILABLE_CODES = frozenset({'skill_missing', 'bridge_failed', 'engine_error',
                                 'identity_unavailable', 'group_create_failed',
-                                'github_unavailable', 'rate_limited'})
+                                'github_unavailable', 'rate_limited', 'qq_unavailable',
+                                'wechat_unavailable'})
 
 
 @lru_cache(maxsize=1)
@@ -82,12 +87,12 @@ def _fields(name: str) -> tuple[str, ...]:
 def _channel_error(error):
     code = getattr(error, 'code', 'channel_error')
     if code == 'not_found':
-        return api_not_found('not_found', code=code)
+        return api_not_found('not_found', code=code, error_code=code)
     if code in _BAD_REQUEST_CODES:
-        return api_bad_request(str(error), code=code)
+        return api_bad_request(str(error), code=code, error_code=code)
     if code in _UNAVAILABLE_CODES:
-        return api_service_unavailable(str(error), code=code)
-    return api_conflict(str(error), code=code)
+        return api_service_unavailable(str(error), code=code, error_code=code)
+    return api_conflict(str(error), code=code, error_code=code)
 
 
 async def _call(function, *args, **kwargs):
@@ -215,6 +220,49 @@ async def list_github_threads_v1():
           responses=_responses('ChannelThreadView', 'Updated thread'))
 async def update_github_thread_v1(thread_key):
     return await _configure_thread('github', thread_key)
+
+
+def _register_bot_routes(channel: str, label: str) -> None:
+    """The account and thread routes of one bot platform (docs/CHANNELS.md C12)."""
+    async def get_account():
+        from lib.channels.bots import account
+        return await _call(account.account_view, request_user_id(), channel)
+
+    async def update_account():
+        from lib.channels.bots import account
+        body = await async_parse_body(strict=True, exact=_fields('BotAccountUpdate'))
+        return await _call(account.update_account, request_user_id(), channel, body)
+
+    async def list_threads():
+        return await _thread_page(channel)
+
+    async def update_thread(thread_key):
+        return await _configure_thread(channel, thread_key)
+
+    cursor = [{'name': 'cursor', 'in': 'query', 'required': False, 'schema': {'type': 'string', 'maxLength': 512}}]
+    routes = (
+        (get_account, 'account', '', 'GET', 'conversations',
+         dict(summary=f'Read the {label} bot account: status, owner, pairing code or login code',
+              responses=_responses('BotAccountView', f'{label} account'))),
+        (update_account, 'update_account', '', 'PUT', 'admin',
+         dict(summary=f'Enable/disable the {label} bot account, set its app ID and secret, pair its owner '
+                      f'or start a login', request_body=_body('BotAccountUpdate'),
+              responses=_responses('BotAccountView', f'Updated {label} account'))),
+        (list_threads, 'threads', '/threads', 'GET', 'conversations',
+         dict(summary=f'List {label} threads with their ingress mode and reply policy',
+              responses=_responses('ChannelThreadPage', 'Thread page'), parameters=cursor)),
+        (update_thread, 'update_thread', '/threads/<thread_key>', 'PUT', 'conversations',
+         dict(summary=f"Set a {label} thread's ingress mode or reply policy (null restores the default)",
+              request_body=_body('ChannelThreadUpdate'), responses=_responses('ChannelThreadView', 'Updated thread'))),
+    )
+    for function, name, suffix, method, scope, meta in routes:
+        function.__name__ = function.__qualname__ = f'{name}_{channel}_v1'
+        handler = require_scope(scope)(api_meta(tags=['channels'], scope=scope, **meta)(function))
+        api_v1_channels_bp.route(f'/api/v1/channels/{channel}{suffix}', methods=[method])(handler)
+
+
+for _channel, _label in (('wecom', '企业微信'), ('qq', 'QQ'), ('wechat', '微信')):
+    _register_bot_routes(_channel, _label)
 
 
 @api_v1_channels_bp.route('/api/v1/channels/outbox', methods=['GET'])

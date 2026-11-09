@@ -91,8 +91,12 @@ semantics. Git history is the incident archive.
 ## Test ladder
 
 ```bash
-# smallest relevant tests
-python3 -m pytest -q tests/test_<owner>.py
+# default development loop: frozen current changes and valid evidence reuse
+make test
+make test-plan
+
+# smallest relevant test file or directory
+make test TESTS="tests/project_mod/test_verification_defaults.py"
 
 # current generated frontend graph
 npm run check:frontend
@@ -103,11 +107,14 @@ make test-api
 make test-frontend
 
 # full release gate
-make test-all
+make test-full
 ```
 
-Use `make test-affected` for a bounded iteration hint; it does not replace the
-domain or release gate. Do not rerun an unchanged suite. Test policy and marker
+`make test-affected` aliases `make test`. These affected checks do not replace
+the domain or release gate. Ordinary CI uses affected Python verification;
+nightly, manual and release-tag CI retains full qualification and coverage.
+Use direct pytest for case-level debugging or specialized markers.
+Do not rerun an unchanged suite. Test policy and marker
 semantics live in [docs/TESTING_STRATEGY.md](docs/TESTING_STRATEGY.md).
 
 ## Documentation lifecycle

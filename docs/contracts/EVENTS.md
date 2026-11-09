@@ -559,6 +559,17 @@ projection. It is deliberately not rendered into the Turn activity
 timeline, does not duplicate full schemas, never enters model context, and
 grants no execution authority.
 
+`messages_snapshot` and `tool_wire_projection` optionally carry
+`contextLineage`, whose source ranges, hashes, stage losses and sealed-request
+binding are defined in `contracts/context_lineage_v1.schema.json`.
+These diagnostics contain no prompt bodies. Canonical snapshots describe their
+own message space; a final projection binds the actual provider body and
+transport occurrence. Missing lineage is supported for historical and native
+transport evidence. Persistence alone delta-encodes the source sequence; replay
+restores the exported shape or marks lineage degraded. See
+[source attribution](../CONTEXT_INJECTIONS.md#source-attribution-from-exported-requests)
+and [snapshot storage](../FRONTEND_ARCHITECTURE.md).
+
 The sidecar is not a second event authority and its rows are not synthetic tool
 calls. It is capped at 128 entries and 96 KiB of serialized JSON; repeated
 wait/retry/schema rows coalesce by span, tool progress updates the matching

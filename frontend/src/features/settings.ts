@@ -46,6 +46,8 @@ import './settings/local-deploy';
 import './settings/database';
 import './settings/dx-channel';
 import './settings/github-channel';
+import './settings/bot-channel';
+import './settings/messaging-platforms';
 import './settings/core-panel';
 import './settings/tools-inventory';
 import './settings/knowledge-tab';

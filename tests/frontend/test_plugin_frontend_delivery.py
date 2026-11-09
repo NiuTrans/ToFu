@@ -11,6 +11,7 @@ import pytest
 
 from lib.app.app_factory import create_base_app
 from lib.static_serving import load_static_bytes, register_static_route
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -38,6 +39,7 @@ class AssetLinks(HTMLParser):
 
 @pytest.fixture
 def plugin_page_app(monkeypatch):
+    require_shipped_graph()
     monkeypatch.syspath_prepend(str(ROOT / 'plugins/tofu-trading'))
     from tofu_trading import web
 

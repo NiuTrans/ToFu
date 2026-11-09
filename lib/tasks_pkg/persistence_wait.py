@@ -19,9 +19,11 @@ import threading
 from collections.abc import Callable
 from typing import TypeVar
 
-from lib.agent_core.storage_errors import describe_storage_failure
+from lib.agent_core.storage_errors import (
+    describe_storage_failure, is_transient_storage_error,
+)
 from lib.log import get_logger, log_event
-from lib.storage.retry import is_transient_storage_error
+from lib.agent_core.storage_waits import storage_wait_owner
 
 logger = get_logger(__name__)
 T = TypeVar('T')
@@ -48,6 +50,9 @@ def wait_for_persistence(task: dict, operation: Callable[[], T], *, label: str,
     waited out (transient storage codes by default); a caller may add its own
     typed local deadline, never a permanent refusal. Concurrent waits retain
     distinct tokens; none can clear a sibling's liveness witness or phase.
+    A supervised storage client also waits inside ``operation`` while its
+    authority lives; this owner presents that wait and ends it on Stop or
+    shutdown exactly as for a raised failure.
     """
     from lib.tasks_pkg.invocation import invocation_abort_requested
     from lib.llm.llm_errors import AbortedError
@@ -73,18 +78,50 @@ def wait_for_persistence(task: dict, operation: Callable[[], T], *, label: str,
         if (cancellable or effect_free) and invocation_abort_requested(task):
             raise AbortedError('Agent stopped while waiting for persistence')
 
+    def present_wait():
+        nonlocal phase, waiting_beacon
+        if phase is not None:
+            return
+        phase = {'phase': 'retrying', 'detail': 'Waiting for storage',
+                 'storageOperation': label, 'since': time.time()}
+        with lock:
+            if not waits:
+                task['_storageWaitPreviousPhase'] = task.get('phase')
+            waits[token] = phase
+            task['phase'] = phase
+
+        if callable(getattr(beacon, 'begin_persistence_wait', None)):
+            beacon.begin_persistence_wait(progress_key, token)
+            waiting_beacon = beacon
+        # Pure presentation hint; it is neither a durability ACK
+        # nor execution proof. A failed hint cannot poison work.
+        sink = task.get('_invocationEventSink')
+        if callable(sink):
+            from lib.agent_core.events import build_phase, Phase
+            try:
+                sink(build_phase(Phase.RETRYING, detail='Waiting for storage'))
+            except Exception as hint_error:
+                logger.debug('Storage wait hint unavailable: %s', type(hint_error).__name__)
+
+    def observe_in_call_wait(error):
+        nonlocal last_error
+        last_error = error
+        check_control()
+        present_wait()
+
     try:
         while True:
             check_control()
             try:
-                result = operation()
+                with storage_wait_owner(observe_in_call_wait):
+                    result = operation()
                 last_error = None
 
                 acknowledged = True
                 check_control()
                 if phase is not None:
                     logger.info('[AgentPersistence] task=%s operation=%s succeeded after '
-                                '%d transient failures (%.1fs)', str(task.get('id') or '')[:8],
+                                '%d transient failures (%.1fs)', str(task.get('id') or ''),
                                 label, attempt, time.time() - phase['since'])
                 return result
             except Exception as error:
@@ -92,34 +129,14 @@ def wait_for_persistence(task: dict, operation: Callable[[], T], *, label: str,
                     raise
                 last_error = error
                 attempt += 1
-                if phase is None:
-                    phase = {'phase': 'retrying', 'detail': 'Waiting for storage',
-                             'storageOperation': label, 'since': time.time()}
-                    with lock:
-                        if not waits:
-                            task['_storageWaitPreviousPhase'] = task.get('phase')
-                        waits[token] = phase
-                        task['phase'] = phase
-
-                    if callable(getattr(beacon, 'begin_persistence_wait', None)):
-                        beacon.begin_persistence_wait(progress_key, token)
-                        waiting_beacon = beacon
-                    # Pure presentation hint; it is neither a durability ACK
-                    # nor execution proof. A failed hint cannot poison work.
-                    sink = task.get('_invocationEventSink')
-                    if callable(sink):
-                        from lib.agent_core.events import build_phase, Phase
-                        try:
-                            sink(build_phase(Phase.RETRYING, detail='Waiting for storage'))
-                        except Exception as hint_error:
-                            logger.debug('Storage wait hint unavailable: %s', type(hint_error).__name__)
+                present_wait()
                 phase['attempt'] = attempt
                 if on_retry is not None:
                     on_retry()
                 now = time.monotonic()
                 if now >= next_log:
                     logger.warning('[AgentPersistence] task=%s operation=%s waiting attempt=%d '
-                                   'after %s', str(task.get('id') or '')[:8], label, attempt,
+                                   'after %s', str(task.get('id') or ''), label, attempt,
                                    describe_storage_failure(error))
                     next_log = now + 30.0
                 # Per-operation bounded backoff, not a task failure deadline.

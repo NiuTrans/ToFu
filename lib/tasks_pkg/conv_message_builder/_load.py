@@ -57,14 +57,14 @@ def build_branch_api_messages(
     # Validate indices
     if msg_idx < 0 or msg_idx >= len(raw_messages):
         logger.warning('[MsgBuilder] Branch msg_idx=%d out of range (conv=%s, len=%d)',
-                       msg_idx, conv_id[:8], len(raw_messages))
+                       msg_idx, conv_id, len(raw_messages))
         return None
 
     parent_msg = raw_messages[msg_idx]
     branches = parent_msg.get('branches') or []
     if branch_idx < 0 or branch_idx >= len(branches):
         logger.warning('[MsgBuilder] Branch branch_idx=%d out of range (conv=%s, msg_idx=%d, len=%d)',
-                       branch_idx, conv_id[:8], msg_idx, len(branches))
+                       branch_idx, conv_id, msg_idx, len(branches))
         return None
 
     branch = branches[branch_idx]
@@ -99,7 +99,7 @@ def build_branch_api_messages(
     # ── Combine and transform ──
     combined = main_context + trimmed_branch
     logger.info('[MsgBuilder] Branch conv=%s msg=%d branch=%d: context=%d + branch=%d msgs',
-                conv_id[:8], msg_idx, branch_idx, len(main_context), len(trimmed_branch))
+                conv_id, msg_idx, branch_idx, len(main_context), len(trimmed_branch))
 
     transformed = _transform_messages(combined, config, user_id=user_id)
     prefix = f'[分支话题: {branch.get("title", "")}]'
@@ -167,7 +167,7 @@ def build_api_messages_from_db(
         if _append_note_as_tail_user(built, caution):
             logger.warning('[MsgBuilder] conv=%s lifecycle no-refire note '
                            'injected (interrupted tail carried a restart-class '
-                           'call)', conv_id[:8])
+                           'call)', conv_id)
             try:
                 from lib.log import audit_log
                 audit_log('lifecycle_recovery_norefire_note', conv_id=conv_id)
@@ -228,14 +228,14 @@ def _load_messages_from_db(
         from lib.conversations.repository import get_conversation
         snapshot = get_conversation(conv_id, user_id=int(user_id))
         if snapshot is None:
-            logger.warning('[MsgBuilder] conv=%s not found', conv_id[:8])
+            logger.warning('[MsgBuilder] conv=%s not found', conv_id)
             return None
         messages = snapshot.messages
         if not isinstance(messages, list):
             logger.warning('[MsgBuilder] conv=%s messages is not a list: %s',
-                           conv_id[:8], type(messages).__name__)
+                           conv_id, type(messages).__name__)
             return None
         return messages
     except Exception as e:
-        logger.error('[MsgBuilder] Failed to load conv=%s: %s', conv_id[:8], e, exc_info=True)
+        logger.error('[MsgBuilder] Failed to load conv=%s: %s', conv_id, e, exc_info=True)
         return None

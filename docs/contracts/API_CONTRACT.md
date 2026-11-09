@@ -1215,6 +1215,17 @@ running/retrying or pending agents and running commands keep its badge active;
 a retained all-terminal swarm or pending result delivery does not. Successful
 snapshots replace this derived index; failed reads preserve its last state.
 
+Swarm sessions and background commands live in the process that runs their
+conversation, which in the split deployment is the resident execution host,
+not the API process that serves these routes. The snapshot is therefore the
+union of the API's own view and the execution host's, read through the private
+execution control (`lib/tasks_pkg/command_control_runtime.py`,
+`contracts/command_control_v1.json`); swarm abort and agent stop reach the
+session the same way, the local process first. When the execution host does
+not confirm, each of these routes answers 503: an unconfirmed view is never
+reported as empty, and a control is never reported as absent. Spec:
+`tests/swarm/test_swarm_execution_controls.py` (a real second process).
+
 ```json
 {
   "swarms": [{"swarm_key": "…", "conv_id": "…",
@@ -1315,6 +1326,40 @@ is introduced. Preview/code-consent presentation follows [the render contract](.
 * Query-string **JSON** args → `decode_proxy_json_value(raw)` (same proxy;
   JSON text never begins with `%`, so only a still-encoded value is decoded).
 
+## Native mobile setup and publication
+
+**Problem:** exporting the browser's bearer credential in an install QR leaks
+account authority, and a source-version badge does not identify a published APK.
+**Decision:** `routes/api_v1/mobile.py` declares authenticated v4 setup adapters;
+`lib/mobile_distribution/` owns credential-free address validation and health
+publication metadata from `android/published-release.json`.
+
+- `/api/v4/mobile/connect` and `/connect/link` encode only a server URL and
+  optional name. Saved/QR URLs reject userinfo and recognized credential,
+  token, cookie and signed-URL fields, including nested percent encoding. Native
+  links open review drafts, never save/login commands. Transient SSO navigation
+  has a separate admission boundary and cannot be persisted as a profile.
+- `/api/v4/mobile/android`, `/android/link` and `/android/apk` never reflect a
+  browser credential. The phone authenticates independently. Explicit `base`
+  must be a credential-free same-host root without query/fragment; scan pages
+  derive the complete proxy prefix from their own browser location. Local APK
+  bytes are operator-configured, not signature-certified by this route.
+- Health performs no external release lookup or receipt promotion. A custom
+  Android asset needs an explicitly paired version to display a badge; empty or
+  invalid URLs disable the link. iOS remains unavailable without a separately
+  configured signed distribution. Startup-pinned metadata changes only through
+  a reviewed receipt/configuration and normal operator deployment.
+- Release signing rejects the public debug identity. A new private certificate
+  requires explicit legacy-device migration. CI verification certifies a local
+  APK, not an uploaded asset; publication and downloaded-byte verification are
+  separate from source implementation.
+
+**Alternatives rejected:** credential-bearing bootstrap links, floating latest
+URLs labelled with source versions, and public-key compatibility over update
+integrity. Tests: `test_mobile_connect_security.py`,
+`test_frontend_mobile_connect.py`, `test_visual_mobile_connect.py`,
+`test_mobile_release_metadata.py` and the Android signing/validator suites.
+
 ## 4. Carve-out registry
 
 Some endpoints are **deliberately outside the envelope**. A carve-out is
@@ -1398,6 +1443,11 @@ Unconfirmed delivery returns 503 and is never replayed automatically. The
 existing two-second handoff confirmation budget bounds the entire exchange.
 The execution lifespan withdraws admission and joins entered callbacks before
 worker cleanup, including when the network observer disconnects or cancels.
+The admin `/metrics` exposition uses the same channel's `storage_rpc_metrics`
+owner method to export the execution host's storage RPC histogram as
+`tofu_execution_storage_rpc_seconds`, with `tofu_execution_metrics_available`
+reporting whether that incarnation confirmed the read (see
+[storage operations](../STORAGE_OPERATIONS.md)).
 
 ## 6. Adding a new endpoint — checklist
 

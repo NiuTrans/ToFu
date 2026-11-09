@@ -239,8 +239,8 @@ final class WebViewStore: NSObject, ObservableObject {
     }
 
     private func loadBaseUrl(into webView: WKWebView) {
-        guard let url = URL(string: profile.baseUrl) else {
-            loadError = "Invalid URL: \(profile.baseUrl)"
+        guard let url = ServerUrl.parse(profile.baseUrl)?.components.url else {
+            loadError = "Invalid server URL"
             return
         }
         webView.load(URLRequest(url: url))

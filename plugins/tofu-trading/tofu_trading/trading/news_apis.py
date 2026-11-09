@@ -27,6 +27,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 import requests
+from lib.http_transport import http_get
 
 from lib.log import get_logger
 
@@ -103,7 +104,7 @@ def fetch_eastmoney_news(
                     'types': '1,20',
                     'req_trace': str(int(time.time() * 1000)),
                 }
-                resp = requests.get(
+                resp = http_get(
                     base_url, params=params, headers=_HEADERS, timeout=10,
                 )
                 if not resp.ok:
@@ -209,7 +210,7 @@ def fetch_sina_finance_rss(
 
     for feed_url, (label, category) in _SINA_FEEDS.items():
         try:
-            resp = requests.get(
+            resp = http_get(
                 feed_url,
                 headers={
                     **_HEADERS,
@@ -313,7 +314,7 @@ def fetch_investing_rss(
 
     for feed_url, (label, category) in _INVESTING_FEEDS.items():
         try:
-            resp = requests.get(
+            resp = http_get(
                 feed_url,
                 headers={
                     **_HEADERS,

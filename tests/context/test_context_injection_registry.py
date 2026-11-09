@@ -5,6 +5,7 @@ import ast
 import copy
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -19,6 +20,8 @@ from lib.tasks_pkg.context_composer.registry import (
 from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD
 
 pytestmark = pytest.mark.unit
+
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/future_context.py'}
 
 
 def test_registry_rejects_unknown_ids_and_telemetry_cannot_reach_model():
@@ -385,13 +388,29 @@ def test_guidance_never_promises_absent_or_disabled_execution_lanes():
 def _raw_prompt_writes(source, *, allow_user_projection=False):
     """Catch literal/aliased carriers and list addition, not just append(dict)."""
     tree = ast.parse(source)
-    assignments = {target.id: node.value for node in ast.walk(tree)
-                   if isinstance(node, ast.Assign) for target in node.targets
-                   if isinstance(target, ast.Name)}
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def scope(node):
+        node = parents.get(node)
+        while node is not None and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            node = parents.get(node)
+        return node
+
+    assignments = {(scope(node), node.arg): None for node in ast.walk(tree) if isinstance(node, ast.arg)}
+    assignments.update({(scope(node), target.id): node.value for node in ast.walk(tree)
+                        if isinstance(node, ast.Assign) for target in node.targets
+                        if isinstance(target, ast.Name)})
+    current_scope = None
+
+    def binding(name):
+        owner = current_scope
+        while (owner, name) not in assignments and owner is not None:
+            owner = scope(owner)
+        return assignments.get((owner, name))
 
     def is_carrier(node, seen=frozenset()):
-        if isinstance(node, ast.Name) and node.id in assignments and node.id not in seen:
-            return is_carrier(assignments[node.id], seen | {node.id})
+        if isinstance(node, ast.Name) and node.id not in seen:
+            return is_carrier(binding(node.id), seen | {node.id})
         if isinstance(node, (ast.List, ast.Tuple)):
             return any(is_carrier(child, seen) for child in node.elts)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -406,6 +425,7 @@ def _raw_prompt_writes(source, *, allow_user_projection=False):
 
     violations = []
     for node in ast.walk(tree):
+        current_scope = scope(node)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ('append', 'insert', 'extend')
                 and any(is_carrier(arg) for arg in node.args)):
@@ -427,33 +447,57 @@ def test_no_bypass_guard_detects_literal_alias_and_list_addition(mutation):
     assert _raw_prompt_writes(mutation)
 
 
-def test_runtime_prompt_writers_cannot_bypass_shared_interface():
-    """Recovery, inbox and auxiliary guidance cannot hand-append user dicts."""
-    root = Path(__file__).resolve().parents[2]
-    paths = [
-        'lib/tasks_pkg/orchestrator/_tool_loop_breaker.py',
-        'lib/tasks_pkg/orchestrator/_swarm_inbox.py',
-        'lib/tasks_pkg/orchestrator/_turn.py',
+def test_no_bypass_guard_does_not_borrow_another_functions_bindings():
+    source = '''
+def make_input():
+    message = {'role': 'user', 'content': 'input'}
+    return message
+def project(messages, message):
+    messages.append(message)
+'''
+    assert not _raw_prompt_writes(source)
 
-        'lib/swarm/run_messages.py',
-        'lib/conversations/project_messages.py',
-        'lib/agent_inbox/__init__.py',
-        'lib/tasks_pkg/orchestrator/_finalize.py',
-        'lib/tasks_pkg/stream_handler/_analyse.py',
-        'lib/tasks_pkg/stream_handler/_terminal_recovery.py',
-        'lib/tasks_pkg/message_builder/_prefetch.py',
-        'lib/tasks_pkg/compaction/_pipeline.py',
-        'lib/tasks_pkg/conv_message_builder/_load.py',
-        'lib/paper/tools.py',
-    ]
-    violations = [(relative, line) for relative in paths
-                  for line in _raw_prompt_writes((root / relative).read_text())]
-    # Worker objective/context are genuine delegated input projections. Even
-    # there, synthetic/tagged guidance must use the registered writer.
-    for relative in ('lib/swarm/agent.py', 'lib/swarm/master.py', 'lib/swarm/scheduler.py'):
-        violations.extend((relative, line) for line in _raw_prompt_writes(
-            (root / relative).read_text(), allow_user_projection=True))
+
+_RAW_PROMPT_PROJECTION_OWNERS = {
+    'lib/image_gen/_chat.py': 'Image request text and image input projection',
+    'lib/llm/anthropic_outbound/_to_anthropic.py': 'Canonical-to-provider message conversion',
+    'lib/oauth/outbound.py': 'OAuth provider request conversion',
+    'lib/orchestration/composer_prompt.py': 'Explicit graph-planning request input',
+    'lib/paper/insight_engine/_synthesize.py': 'Report evidence for an auxiliary model request',
+    'lib/paper/qa_context.py': 'Actual question and retained dialogue projection',
+    'lib/tasks_pkg/child_invocation.py': 'Explicit delegated user objective',
+    'lib/tasks_pkg/compaction/_layer2/_prompt.py': 'History input to the summary request',
+    'lib/token_counter/anthropic_api.py': 'Provider token-count probe input',
+}
+_REGISTERED_PROMPT_WRITERS = {
+    'lib/tasks_pkg/context_composer/_render.py',
+    'lib/tasks_pkg/context_composer/injections.py',
+}
+
+
+def _runtime_prompt_writer_violations(root):
+    # Include new/untracked modules: coverage cannot depend on someone adding
+    # the future producer to this test. Git also excludes vendored/local trees.
+    paths = subprocess.check_output([
+        'git', 'ls-files', '--cached', '--others', '--exclude-standard', '--',
+        'lib/*.py', 'routes/*.py', 'tofu_agent/*.py', 'serverctl_pkg/*.py', 'packages/*.py',
+    ], cwd=root, text=True).splitlines()
+    return [(relative, line) for relative in paths if relative not in _REGISTERED_PROMPT_WRITERS
+            for line in _raw_prompt_writes((root / relative).read_text(),
+                allow_user_projection=relative in _RAW_PROMPT_PROJECTION_OWNERS)]
+
+
+def test_runtime_prompt_writers_cannot_bypass_shared_interface():
+    violations = _runtime_prompt_writer_violations(Path(__file__).resolve().parents[2])
     assert not violations, violations
+
+
+def test_new_untracked_producer_is_discovered_without_editing_a_scan_list(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    path = tmp_path / 'lib/future_context.py'
+    path.parent.mkdir()
+    path.write_text("def inject(messages):\n    messages.append({'role': 'user', 'content': 'nudge'})\n")
+    assert _runtime_prompt_writer_violations(tmp_path) == [('lib/future_context.py', 2)]
 
 
 def test_carrier_append_failure_cannot_create_a_ghost_display_note():

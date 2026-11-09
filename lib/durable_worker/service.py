@@ -33,15 +33,23 @@ class _ClaimObservation:
 
 class _ObservedJobStore(StorageWorkerJobStore):
     def __init__(self, factory, observation, wake):
-        super().__init__(client_factory=factory, retain_claim_receipts=False)
+        super().__init__(client_factory=factory)
+        self._claim_started = False
         self._observation = observation
         self._wake = wake
 
     def claim_next(self, **arguments):
         # The read path answers an empty or not-yet-due queue. Only a horizon
         # of 0 enters the exclusive writer, whose claim re-validates everything.
-        delay = self.claim_horizon(task_kinds=arguments['task_kinds'])
-        document = super().claim_next(**arguments) if delay == 0 else None
+        delay = 0 if self._claim_started else self.claim_horizon(task_kinds=arguments['task_kinds'])
+        if delay == 0:
+            # Keep one exact acquisition through a lost ACK. Re-probing the
+            # horizon could hide the already committed, process-owned claim.
+            self._claim_started = True
+            document = super().claim_next(**arguments)
+            self._claim_started = False
+        else:
+            document = None
         # This is a concurrency hint; only the runner's owned fence proof can
         # authorize dispatch. A lost acknowledgement never becomes execution.
         self._observation.claimed = document is not None
@@ -81,7 +89,9 @@ class DurableWorkerService:
         self.max_workers = max_workers
         self._factory, self._now_ms = client_factory, now_ms
         self._registrations = tuple(registrations)
-        self._instance = uuid.uuid4().hex
+        from lib.storage.worker_process import worker_process_id
+        self._worker_prefix = worker_process_id(uuid.uuid4().hex,
+            legacy_prefix=policy['threadNamePrefix']).rsplit(':', 1)[0] + ':'
         self._stop = threading.Event()
         self._wake = threading.Event()
         # Set by a committed producer command; cleared just before a probe is
@@ -98,7 +108,9 @@ class DurableWorkerService:
     def _runner(self, observation):
         policy = self._policy
         return SynchronousWorkerRunner(
-            worker_id=policy['threadNamePrefix'] + ':' + self._instance,
+            # Simultaneous acquisitions must never share a receipt identity,
+            # even when the application clock has the same millisecond.
+            worker_id=self._worker_prefix + uuid.uuid4().hex,
             store=_ObservedJobStore(self._factory, observation, self._wake),
             registrations=self._registrations, now_ms=self._now_ms,
             lease_ms=policy['workerLeaseMilliseconds'],
@@ -172,7 +184,8 @@ class DurableWorkerService:
                 case 'succeeded' | 'failed' | 'cancelled' | 'suspended' | 'idle':
                     pass
                 case 'lease_lost' | 'protocol_error' | 'terminal_unconfirmed' | 'suspension_unconfirmed' | 'settlement_unconfirmed':
-                    logger.warning('[DurableWorker] worker outcome requires recovery: %s', result.state)
+                    logger.warning('[DurableWorker] worker outcome requires recovery: %s task=%s detail=%s',
+                                   result.state, result.task_id or '-', result.detail or '-')
                     backoff_until = now + self._policy['failureBackoffMilliseconds'] / 1000
                 case _:
                     assert_never(result.state)

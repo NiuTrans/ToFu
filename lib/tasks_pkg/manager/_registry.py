@@ -15,7 +15,7 @@ import uuid
 from lib.agent_core.execution_session import ExecutionSession
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import to_json as _err_to_json
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from lib.tasks_pkg.manager.runtime import (
     _abort_tombstones,
@@ -165,6 +165,13 @@ def _create_chat_task(
             and '_projectDispatchWorkspaceTaskId' in config):
         prepared_task_id = config['_projectDispatchWorkspaceTaskId']
     task_id = prepared_task_id or str(uuid.uuid4())
+    if prepared_task_id is not None and not transient:
+        # Registration would replace the live carrier, and the birth row would
+        # rewrite the task result it still owns. Same text as the executor's
+        # refusal, which this precedes.
+        from lib.tasks_pkg.spawn import task_identity_scheduled
+        if task_identity_scheduled(task_id):
+            raise RuntimeError(f'agent task already scheduled: {task_id}')
     if worker_context is not None:
         from lib.tasks_pkg.worker_binding import worker_task_identity
         identity = worker_task_identity(worker_context, conversation_id=conv_id,
@@ -224,7 +231,7 @@ def _create_chat_task(
                 last_user_query = _rewritten[:500]
         except Exception as e:
             logger.warning('[Task %s] UserPromptSubmit hooks failed: %s',
-                           task_id[:8], e, exc_info=True)
+                           task_log_tag(task_id), e, exc_info=True)
 
     # Create through TaskRuntime so the task is registered in the unified
     # store. Then augment with every chat-specific field that downstream
@@ -291,8 +298,11 @@ def _create_chat_task(
     })
     if _shutdown_admission_closed.is_set():
         # Registered after the shutdown quiesce snapshot (or reset by the
-        # initialization above): settle as the same restart interruption.
+        # initialization above): settle as the same restart interruption,
+        # which the next server generation resumes like the snapshot's.
         _mark_shutdown_quiesced(task, time.time(), 'server_shutdown')
+        from lib.conversations.restart_resume import record_quiesced_conversations
+        record_quiesced_conversations([task])
     if worker_context is not None:
         from lib.tasks_pkg.worker_binding import bind_conversation_worker
         try:
@@ -433,7 +443,7 @@ def _create_chat_task(
         task['_requestId'] = _current_request_id() or task.get('_requestId', '')
     except Exception as e:
         logger.debug('[Task %s] request correlation capture failed: %s',
-                     task_id[:8], e)
+                     task_log_tag(task_id), e)
     # ── Ingress affinity capture ──────────────────────────────────────
     # The browser derives this key before task creation (stable per
     # conversation, random only without one) and the load balancer hashes it.
@@ -459,7 +469,7 @@ def _create_chat_task(
                 _direct_affinity = bool(_affinity_key)
         except Exception as e:
             logger.debug('[Task %s] request affinity capture failed: %s',
-                         task_id[:8], e)
+                         task_log_tag(task_id), e)
     if not transient:
         try:
             from lib.runtime.runtime_state_store import get_store
@@ -474,7 +484,7 @@ def _create_chat_task(
                     'conv-affinity', conv_id, _affinity_key, 365 * 24 * 3600)
         except Exception as e:
             logger.debug('[Task %s] shared affinity mirror failed: %s',
-                         task_id[:8], e)
+                         task_log_tag(task_id), e)
     if _affinity_key:
         task['_affinityKey'] = _affinity_key
     task['_reconnectable'] = _direct_affinity
@@ -530,7 +540,7 @@ def _create_chat_task(
         except Exception as e:
             logger.warning(
                 '[Task %s] durable-at-birth row write failed (non-fatal): %s',
-                task_id[:8], e)
+                task_log_tag(task_id), e)
         finally:
             if birth_checkpoint_budget_seconds is not None:
                 task['_birthCheckpointElapsedSeconds'] = max(0.0, time.monotonic() - birth_checkpoint_started)
@@ -553,8 +563,8 @@ def _create_chat_task(
                 )
             except Exception as e:
                 logger.warning('[Task %s] supersede abort sweep failed: %s',
-                               task_id[:8], e, exc_info=True)
-    logger.info('[Task %s] Created for conv=%s lastUserQuery=%r', task_id[:8], conv_id, last_user_query[:80])
+                               task_log_tag(task_id), e, exc_info=True)
+    logger.info('[Task %s] Created for conv=%s lastUserQuery=%r', task_log_tag(task_id), conv_id, last_user_query[:80])
     return task
 
 
@@ -605,7 +615,7 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
                     exc,
                 )
     logger.info('[Manager] discard_task: task=%s conv=%s popped=%s caller=%s',
-                (task_id or '?')[:8], (conv_id or '')[:8],
+                (task_id or '?'), (conv_id or ''),
                 bool(_popped), _caller)
     if _popped:
         try:
@@ -639,7 +649,7 @@ def _db_abort_tombstoned(task_id: str, *, user_id: int) -> bool:
         return bool((result or {}).get('requested'))
     except Exception as e:
         logger.debug('[Manager] abort-signal probe failed task=%s: %s',
-                     task_id[:8], e)
+                     task_log_tag(task_id), e)
         return False
 
 
@@ -658,7 +668,7 @@ def _write_abort_tombstone_row(
         return bool(result.get('signaled'))
     except Exception as e:
         logger.debug('[Manager] durable abort signal failed task=%s: %s',
-                     task_id[:8], e)
+                     task_log_tag(task_id), e)
         return False
 
 
@@ -686,7 +696,7 @@ def plant_abort_tombstone(
         _abort_tombstones.add(task_id)
     logger.info('[Manager] ⚠️ abort tombstone planted for task=%s (source=%s) — '
                 'registry lost this task; the live worker consumes the mark '
-                'at its next abort poll', task_id[:8], source)
+                'at its next abort poll', task_log_tag(task_id), source)
     try:
         from lib.log import audit_log as _audit
         _audit('task_abort_tombstone', task_id=task_id, source=source)
@@ -717,10 +727,10 @@ def plant_abort_tombstones_for_conv(
         if result.get('capped'):
             logger.warning(
                 '[Manager] conv abort-signal summary scan hit its 10000-row '
-                'work cap conv=%s', conv_id[:8])
+                'work cap conv=%s', conv_id)
     except Exception as e:
         logger.warning('[Manager] conv abort-signal scan failed conv=%s: %s',
-                       conv_id[:8], e)
+                       conv_id, e)
         return 0
     n = 0
     live_ids = chat_task_runtime.task_ids()
@@ -732,7 +742,7 @@ def plant_abort_tombstones_for_conv(
                 n += 1
     if n:
         logger.info('[Manager] conv=%s tombstoned %d registry-lost running '
-                    'task(s)', conv_id[:8], n)
+                    'task(s)', conv_id, n)
     return n
 
 
@@ -776,7 +786,7 @@ def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
                 with _st_lock:
                     _st['hit'] = True
                 logger.info('[Task %s] abort tombstone consumed (async db '
-                            'channel) — aborting', task_id[:8])
+                            'channel) — aborting', task_log_tag(task_id))
         finally:
             with _st_lock:
                 _st['probe_in_flight'] = False
@@ -790,7 +800,7 @@ def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
         try:
             worker = threading.Thread(
                 target=_probe_storage,
-                name=f'tofu-abort-probe-{task_id[:8] or "unknown"}',
+                name=f'tofu-abort-probe-{task_log_tag(task_id) or "unknown"}',
                 daemon=True,
             )
             worker.start()
@@ -798,7 +808,7 @@ def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
             with _st_lock:
                 _st['probe_in_flight'] = False
             logger.debug('[Manager] abort-signal async probe start failed '
-                         'task=%s: %s', task_id[:8], e)
+                         'task=%s: %s', task_log_tag(task_id), e)
 
     def _check() -> bool:
         with _st_lock:
@@ -813,7 +823,7 @@ def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
             if task_id in _abort_tombstones:
                 _st['hit'] = True
                 logger.info('[Task %s] abort tombstone consumed (in-memory '
-                            'channel) — aborting', task_id[:8])
+                            'channel) — aborting', task_log_tag(task_id))
                 return True
         now = time.monotonic()
         with _st_lock:
@@ -828,7 +838,7 @@ def make_task_abort_check(task: dict, *, nonblocking_storage: bool = False):
                     with _st_lock:
                         _st['hit'] = True
                     logger.info('[Task %s] abort tombstone consumed (db channel) '
-                                '— aborting', task_id[:8])
+                                '— aborting', task_log_tag(task_id))
                     return True
         with _st_lock:
             if _st['hit']:
@@ -978,7 +988,7 @@ def notify_terminal_conversation_change(task) -> None:
         notify_conv_changed(conv_id, rev=None, user_id=task_user_id(task))
     except Exception as e:
         logger.debug('[Manager] terminal busy notify failed task=%s: %s',
-                     ((task or {}).get('id') or '?')[:8], e)
+                     ((task or {}).get('id') or '?'), e)
 
 
 def hint_scheduled_compaction(
@@ -1089,8 +1099,8 @@ def abort_running_tasks_for_conv(
         logger.info(
             '[Task %s] conv=%s ⚠️ AUTO-ABORTED: reason=%s replacement=%s — '
             'content=%dchars elapsed=%.1fs',
-            tid[:8], conv_id[:8], abort_reason,
-            (exclude_task_id or '?')[:8],
+            task_log_tag(tid), conv_id, abort_reason,
+            (exclude_task_id or '?'),
             len(t.get('content') or ''),
             time.time() - t.get('created_at', time.time()),
         )
@@ -1122,7 +1132,7 @@ def abort_running_tasks_for_conv(
             except Exception as error:
                 logger.warning(
                     '[Task %s] queued supersede cancellation failed: %s',
-                    tid[:8], error, exc_info=True,
+                    task_log_tag(tid), error, exc_info=True,
                 )
     # Zombie-task terminal floor (outside tasks_lock — this does DB I/O).
     #   An aborted task normally reaches a terminal task_results row only when
@@ -1139,7 +1149,7 @@ def abort_running_tasks_for_conv(
             _write_aborted_terminal_floor(_t)
     if aborted:
         logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
-                    conv_id[:8], aborted, (exclude_task_id or '?')[:8])
+                    conv_id, aborted, (exclude_task_id or '?'))
         # ── pt_conv_state_ssot P3: task lifecycle stop broadcast ──
         # Aborting a stale task flips ``t['aborted']=True`` but nobody
         # calls notify_conv_changed for this conv — the frame carrying
@@ -1157,7 +1167,7 @@ def abort_running_tasks_for_conv(
         except Exception as _ne:
             logger.warning(
                 '[Manager] conv=%s supersede-abort notify skipped: %s',
-                conv_id[:8], _ne)
+                conv_id, _ne)
     return aborted
 # Closed by the shutdown quiesce. Background producers keep running until their
 # owners stop them, and a turn they start would only be killed by the teardown
@@ -1213,16 +1223,23 @@ def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
             logger.warning('[Manager] swarm suspension for shutdown failed: %s', e)
     try:
         abort_time = time.time()
-        aborted = len(chat_task_runtime.update_matching(
+        quiesced = chat_task_runtime.update_matching(
             predicate=lambda task: (
                 task.get('status') in ('pending', 'running')
                 and not task.get('aborted')
             ),
             updater=lambda task: _mark_shutdown_quiesced(task, abort_time, reason),
-        ))
+        )
+        aborted = len(quiesced)
     except Exception as e:
         logger.warning('[Manager] quiesce_running_tasks failed: %s', e)
         return aborted
+    if reason == 'server_shutdown' and quiesced:
+        # The next server generation resumes these Turns from their checkpoint
+        # (docs/RUN_CONTINUITY.md, restart-paused conversations); recorded
+        # before they settle, while storage still serves.
+        from lib.conversations.restart_resume import record_quiesced_conversations
+        record_quiesced_conversations(quiesced)
     if aborted:
         logger.info('[Manager] Quiesced %d running task(s) for shutdown (reason=%s)',
                     aborted, reason)
@@ -1251,7 +1268,7 @@ def _write_aborted_terminal_floor(task) -> None:
                          thinking=task.get('thinking') or '', status='aborted',
                          error_json=error_json, tr_json=tr_json, meta_json=meta_json)
         logger.debug('[Task %s] conv=%s Wrote aborted terminal floor to task_results',
-                     task['id'][:8], conv_id[:8])
+                     task_log_tag(task['id']), conv_id)
     except Exception as e:
         logger.warning('[Task %s] Failed to write aborted terminal floor: %s',
-                       task.get('id', '?')[:8], e, exc_info=True)
+                       task_log_tag(task.get('id', '?')), e, exc_info=True)

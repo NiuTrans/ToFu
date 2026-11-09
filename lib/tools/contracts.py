@@ -532,11 +532,6 @@ class ArgumentAlternatives:
 
 
 ARGUMENT_ALTERNATIVES: dict[str, ArgumentAlternatives] = {
-    "write_file": ArgumentAlternatives(
-        ("content", "content_ref"), exactly_one=True,
-        next_action=(
-            "Pass content with the complete text (an empty string creates "
-            "an empty file), or content_ref to reuse a prior tool result.")),
     "browser_preview_page": ArgumentAlternatives(
         ("path", "url"), exactly_one=True,
         next_action=(

@@ -43,7 +43,7 @@ import time
 import uuid
 from collections.abc import Mapping
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.storage.errors import StorageError
 from lib.turn_source_queue_contract import (
     KIND_AUTOPILOT,
@@ -224,7 +224,7 @@ def enqueue_message(
         except Exception as e:
             logger.warning(
                 "[Queue] Goal preempt on enqueue failed conv=%s: %s",
-                conv_id[:8], e,
+                conv_id, e,
             )
     return result
 
@@ -299,13 +299,13 @@ def _preempt_autonomous_work_for_real_message(
                 "[Queue] Real message supersedes %s task %s for conv=%s; "
                 "the queued human turn owns the next lane",
                 "GoalRun" if is_goal_root else "compatibility VU",
-                task_id[:8],
-                conv_id[:8],
+                task_log_tag(task_id),
+                conv_id,
             )
         return preempted
     except Exception as e:
         logger.warning(
-            "[Queue] Goal preempt probe failed conv=%s: %s", conv_id[:8], e)
+            "[Queue] Goal preempt probe failed conv=%s: %s", conv_id, e)
         return False
 
 
@@ -445,7 +445,7 @@ def reap_expired_queue_leases(force_reclaim: bool = False) -> list[str]:
         try:
             task_id = dispatch_next_queued(conv_id, user_id=user_id, _wait=5)
         except Exception as e:
-            logger.warning("[Queue] stranded drain failed conv=%s: %s", conv_id[:8], e)
+            logger.warning("[Queue] stranded drain failed conv=%s: %s", conv_id, e)
             continue
         if task_id:
             spawned.append(task_id)
@@ -504,7 +504,7 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
     logger.info(
         "[Queue] redispatch-on-startup: %d conv(s) have orphaned queued turn(s): %s",
         len(conversations),
-        [str(c["convId"])[:8] for c in conversations],
+        [str(c["convId"]) for c in conversations],
     )
 
     # Same herd guard as the steady-state reaper: a mass-stranding restart
@@ -532,7 +532,7 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
             logger.info(
                 "[Queue] redispatch-on-startup: conv=%s already has a "
                 "live task — leaving its queue for the completion hook",
-                conv_id[:8],
+                conv_id,
             )
             continue
 
@@ -544,7 +544,7 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
         except Exception as e:
             logger.warning(
                 "[Queue] redispatch-on-startup: dispatch failed for conv=%s: %s",
-                conv_id[:8],
+                conv_id,
                 e,
                 exc_info=True,
             )
@@ -555,7 +555,7 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
 
             audit_log("queue_redispatch_after_restart", conv_id=conv_id, task_id=tid)
             logger.info(
-                "[Queue] redispatch-on-startup: conv=%s → task %s", conv_id[:8], tid[:8]
+                "[Queue] redispatch-on-startup: conv=%s → task %s", conv_id, task_log_tag(tid)
             )
 
     if spawned:
@@ -624,7 +624,7 @@ def _conv_has_wake_peer_row(conv_id: str, *, user_id: int) -> bool:
         logger.warning(
             "[Queue] wake-peer-row probe failed conv=%s (fail-open: "
             "treating as wake): %s",
-            conv_id[:8],
+            conv_id,
             e,
         )
         return True
@@ -633,7 +633,7 @@ def _conv_has_wake_peer_row(conv_id: str, *, user_id: int) -> bool:
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
         except (json.JSONDecodeError, TypeError) as e:
             logger.debug(
-                "[Queue] wake probe payload parse failed conv=%s: %s", conv_id[:8], e
+                "[Queue] wake probe payload parse failed conv=%s: %s", conv_id, e
             )
             data = {}
         if not data.get("_peerNoWake"):
@@ -712,7 +712,7 @@ def drain_idle_peer_messages() -> list[str]:
         except Exception as e:
             logger.debug(
                 "[Queue] peer idle-drain live-task probe failed conv=%s (skipping): %s",
-                conv_id[:8],
+                conv_id,
                 e,
             )
             continue
@@ -723,7 +723,7 @@ def drain_idle_peer_messages() -> list[str]:
             logger.debug(
                 "[Queue] peer idle-drain: conv=%s holds only no-wake "
                 "peer row(s) — leaving for its next natural turn",
-                conv_id[:8],
+                conv_id,
             )
             continue
         try:
@@ -731,7 +731,7 @@ def drain_idle_peer_messages() -> list[str]:
         except Exception as e:
             logger.warning(
                 "[Queue] peer idle-drain: dispatch failed for conv=%s: %s",
-                conv_id[:8],
+                conv_id,
                 e,
                 exc_info=True,
             )
@@ -744,8 +744,8 @@ def drain_idle_peer_messages() -> list[str]:
             logger.info(
                 "[Queue] peer idle-drain: woke idle conv=%s → task %s "
                 "(pending peer message delivered as a fresh turn)",
-                conv_id[:8],
-                tid[:8],
+                conv_id,
+                task_log_tag(tid),
             )
     if spawned:
         logger.info(
@@ -903,11 +903,19 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
     # Work this process still runs for the conversation (its turn, or a child
     # invocation under it) defers the wake. Its absence proves nothing about
     # other processes; only the lane fence below can establish idleness.
+    carriers = [task for task in chat_task_runtime.snapshot_owned(user_id=user_id)
+                if task.get('convId') == conv_id]
     if (not conversation_results_complete(conv_id=conv_id, user_id=user_id)
-            or any(task.get('convId') == conv_id
-                   and task.get('status') in ('pending', 'running')
-                   and not task.get('aborted')
-                   for task in chat_task_runtime.snapshot_owned(user_id=user_id))):
+            or any(task.get('status') in ('pending', 'running')
+                   and not task.get('aborted') for task in carriers)):
+        return None
+    # A stopping server starts no successor (docs/contracts/TURN_SETTLEMENT.md):
+    # the shutdown quiesce kills the paused lane's handed-off commands, whose
+    # completions land here. The next process resumes the Turn and its resumed
+    # attempt consumes these durable receipts.
+    if any(task.get('_abort_reason') == 'server_shutdown' for task in carriers):
+        logger.info('[Queue] background wake left to startup recovery conv=%s: '
+                    'its Turn was paused by this server\'s shutdown', conv_id)
         return None
     receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
     if not receipts:
@@ -956,14 +964,29 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
             latest = trusted.repository.turn_get(
                 conv_id, assignment['execution']['turnId'], user_id=user_id,
                 include_projection=False)
-            outcome = conversation_turn_commands.resume_turn(
-                conv_id, assignment['execution']['turnId'], user_id, {
-                    'commandId': command_id,
-                    'operation': 'continue',
-                    'expectedProjectionRevision': latest['projectionRevision'],
-                    'config': config,
-                }, request_started_at=time.time(),
-                principal=trusted.principal, trusted_dispatch=trusted)
+            from lib.turn_lifecycle import LifecycleConflict
+            try:
+                outcome = conversation_turn_commands.resume_turn(
+                    conv_id, assignment['execution']['turnId'], user_id, {
+                        'commandId': command_id,
+                        'operation': 'continue',
+                        'expectedProjectionRevision': latest['projectionRevision'],
+                        'config': config,
+                    }, request_started_at=time.time(),
+                    principal=trusted.principal, trusted_dispatch=trusted)
+            except LifecycleConflict as conflict:
+                if conflict.code != 'lane_busy':
+                    raise
+                # Its previous attempt still occupies the lane; the receipts
+                # stay durable for the maintenance tick after it exits.
+                logger.info('[Queue] background continuation deferred conv=%s: %s',
+                            conv_id, conflict)
+                return None
+            if (outcome.value.get('idempotentReplay')
+                    and outcome.value['attempt'].get('status') not in ('pending', 'running')):
+                # A later human attempt can supersede the batch's one Continue.
+                # Its settled receipt is acknowledgement, not another launch.
+                return None
             if not outcome.value.get('aborted'):
                 return outcome.value['attempt']['attemptId']
     return _start_background_batch_turn(
@@ -1002,7 +1025,7 @@ def _start_background_batch_turn(
     except LifecycleConflict as exc:
         logger.info(
             '[Queue] background batch wake conv=%s stood down (%s); the lane '
-            'owner consumes the results', conv_id[:8], exc.code)
+            'owner consumes the results', conv_id, exc.code)
         return None
     except LifecycleNotFound:
         return None
@@ -1014,7 +1037,7 @@ def _start_background_batch_turn(
         logger.warning(
             '[Queue] background batch wake created but executor start failed '
             'conv=%s attempt=%s — resume options ride the turn',
-            conv_id[:8], attempt_id[:8])
+            conv_id, attempt_id)
         return attempt_id
     if result.get('aborted'):
         return None
@@ -1026,7 +1049,7 @@ def _start_background_batch_turn(
         return None
     attempt_id = result['attempt']['attemptId']
     logger.info('[Queue] background batch wake → attempt %s for conv=%s '
-                '(%d result(s))', attempt_id[:8], conv_id[:8], len(receipts))
+                '(%d result(s))', attempt_id, conv_id, len(receipts))
     _notify_conversation_changed(conv_id, user_id=user_id)
     return attempt_id
 
@@ -1134,7 +1157,7 @@ def dedup_inbox_durable_rows(
     except Exception as e:
         logger.warning(
             "[Queue] injection durable-row de-dup failed conv=%s: %s "
-            "— the rows may re-dispatch as duplicates", conv_id[:8], e,
+            "— the rows may re-dispatch as duplicates", conv_id, e,
         )
         return 0
     if removed:
@@ -1142,7 +1165,7 @@ def dedup_inbox_durable_rows(
             "[Queue] forward de-dup removed %d peer durable row(s) for "
             "conv=%s (delivered via the fast-path inbox)",
             removed,
-            conv_id[:8],
+            conv_id,
         )
     return removed
 
@@ -1282,7 +1305,7 @@ def _conv_has_live_task(conv_id: str, *, user_id: int) -> bool:
                 for t in chat_task_runtime.snapshot_owned(user_id=int(user_id))
             )
     except Exception as e:
-        logger.debug("[Queue] live-task probe failed for conv=%s: %s", conv_id[:8], e)
+        logger.debug("[Queue] live-task probe failed for conv=%s: %s", conv_id, e)
         return False
 
 
@@ -1377,7 +1400,7 @@ def _dispatch_queued_turn(
         # derived again from the remaining receipts (dispatch_completed_background_batch).
         _finalize_queue_dispatch(conv_id, item['queueId'], user_id=user_id)
         logger.info('[Queue] retired stored background batch wake %s conv=%s',
-                    str(item['queueId'])[:8], conv_id[:8])
+                    str(item['queueId'])[:8], conv_id)
         return None
     if pre_built_user_msg:
         user_msg = dict(pre_built_user_msg)
@@ -1474,7 +1497,7 @@ def _dispatch_queued_turn(
             logger.info(
                 "[Queue] retired Goal continuation %s superseded by a "
                 "newer human turn for conv=%s",
-                str(item["queueId"])[:8], conv_id[:8],
+                str(item["queueId"])[:8], conv_id,
             )
             return None
         if linked_turn_pair and exc.code != "lane_busy":
@@ -1487,7 +1510,7 @@ def _dispatch_queued_turn(
                 conv_id, item["queueId"], user_id=user_id)
             logger.warning(
                 "[Queue] retired undispatchable queued pair %s conv=%s (%s)",
-                str(item["queueId"])[:8], conv_id[:8], exc.code,
+                str(item["queueId"])[:8], conv_id, exc.code,
             )
             return None
         # The lane filled between the settlement hook and this drain (a
@@ -1496,7 +1519,7 @@ def _dispatch_queued_turn(
         # re-drains when IT concludes.
         logger.info(
             "[Queue] lane busy at drain time conv=%s (%s) — row stays queued",
-            conv_id[:8],
+            conv_id,
             exc.code,
         )
         _release_queue_lease(item["queueId"], user_id=user_id)
@@ -1508,7 +1531,7 @@ def _dispatch_queued_turn(
         logger.warning(
             "[Queue] Dropped queued row %s for deleted conversation %s",
             item["queueId"][:8],
-            conv_id[:8],
+            conv_id,
         )
         return None
     except Exception as exc:
@@ -1527,13 +1550,13 @@ def _dispatch_queued_turn(
                 conv_id, item["queueId"], user_id=user_id)
             logger.warning(
                 "[Queue] retired queued row %s conv=%s: pair turns missing",
-                item["queueId"][:8], conv_id[:8],
+                item["queueId"][:8], conv_id,
             )
             return None
         _release_queue_lease(item["queueId"], user_id=user_id)
         logger.error(
             "[Queue] queued command failed conv=%s row=%s: %s",
-            conv_id[:8],
+            conv_id,
             item["queueId"][:8],
             exc,
             exc_info=True,
@@ -1548,8 +1571,8 @@ def _dispatch_queued_turn(
             "[Queue] queued turn created but executor start "
             "failed conv=%s attempt=%s — row finalized, resume "
             "options ride the turn",
-            conv_id[:8],
-            attempt_id[:8],
+            conv_id,
+            attempt_id,
         )
 
     # No lease task-stamp: the public attempt shape deliberately never exposes
@@ -1567,8 +1590,8 @@ def _dispatch_queued_turn(
 
     logger.info(
         "[Queue] dispatched queued message → attempt %s for conv=%s",
-        attempt_id[:8],
-        conv_id[:8],
+        attempt_id,
+        conv_id,
     )
 
     _notify_conversation_changed(conv_id, user_id=user_id)
@@ -1602,13 +1625,13 @@ def dispatch_next_queued(
     if _dispatch_owner == threading.get_ident():
         logger.info(
             "[Queue] nested dispatch on the owning thread conv=%s — tick skips",
-            conv_id[:8])
+            conv_id)
         return None
     if _wait is None:
         _dispatch_lock.acquire()
     elif not _dispatch_lock.acquire(timeout=_wait):
         logger.info(
-            "[Queue] dispatch lock busy (>%ss) conv=%s — tick skips", _wait, conv_id[:8]
+            "[Queue] dispatch lock busy (>%ss) conv=%s — tick skips", _wait, conv_id
         )
         return None
     _dispatch_owner = threading.get_ident()
@@ -1628,7 +1651,7 @@ def dispatch_next_queued(
             logger.info(
                 "[Queue] conv=%s already has a live task — dispatch "
                 "refused; the completion hook will drain",
-                conv_id[:8],
+                conv_id,
             )
             return None
         # Older releases stored command completions as dispatchable workflow
@@ -1656,7 +1679,7 @@ def dispatch_next_queued(
             logger.error(
                 "[Queue] discarded Goal Mode continuation without an "
                 "authoritative objective conv=%s row=%s",
-                conv_id[:8], str(item["queueId"])[:8],
+                conv_id, str(item["queueId"])[:8],
             )
             return None
 
@@ -1677,7 +1700,7 @@ def dispatch_next_queued(
                 consume_peer(conv_id, [item["queueId"]])
             except Exception as e:
                 logger.debug(
-                    "[Queue] peer inbox-twin de-dup skipped conv=%s: %s", conv_id[:8], e
+                    "[Queue] peer inbox-twin de-dup skipped conv=%s: %s", conv_id, e
                 )
         # _user_msg: pre-built (and already translated) user message dict
         #   from /api/chat/send.  If present, skip translation and use directly.
@@ -1685,7 +1708,7 @@ def dispatch_next_queued(
 
         logger.info(
             "[Queue] Dispatching queued message for conv=%s text=%d chars pre_built=%s",
-            conv_id[:8],
+            conv_id,
             len(text),
             bool(pre_built_user_msg),
         )
@@ -1781,6 +1804,6 @@ def has_pending_human_turn(conv_id: str, *, user_id: int) -> bool:
         return any(r["isHuman"] for r in rows)
     except Exception as e:
         logger.debug(
-            "[Queue] human-turn probe failed conv=%s (non-fatal): %s", conv_id[:8], e
+            "[Queue] human-turn probe failed conv=%s (non-fatal): %s", conv_id, e
         )
         return False

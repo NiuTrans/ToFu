@@ -3,10 +3,10 @@ package com.tofu.client.ssh
 import com.tofu.client.data.AuthType
 import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
-import com.tofu.client.data.ProfileDao
 import com.tofu.client.data.SshEndpoint
 import com.tofu.client.session.KernelState
 import com.tofu.client.session.KernelUnavailableException
+import com.tofu.client.session.ProfileDaoFixture
 import com.tofu.client.session.SecretLookup
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -300,7 +300,7 @@ class SshKernelControllerTest {
     private data class Pin(val id: Long, val host: String, val port: Int, val sha256: String)
 
     /** Rows in memory; [pinSshHostKey] keeps the DAO's conditional first-trust contract. */
-    private class FakeDao : ProfileDao {
+    private class FakeDao : ProfileDaoFixture {
         val rows = mutableMapOf<Long, Profile>()
         val pins = mutableListOf<Pin>()
         override fun observeAll(): Flow<List<Profile>> = flowOf(rows.values.toList())

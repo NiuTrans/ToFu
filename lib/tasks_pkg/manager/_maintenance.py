@@ -9,7 +9,7 @@ import time
 from lib.agent_core.events import EventType, build_event
 from lib.agent_core.storage_errors import is_transient_storage_error
 from lib.error_envelope import to_json as _err_to_json
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 
 from lib.tasks_pkg.manager.runtime import (
@@ -75,7 +75,7 @@ def retry_pending_terminal_persistence(
         except Exception as exc:
             logger.error(
                 '[Task %s] terminal persistence retry failed: %s',
-                str(task.get('id') or '?')[:8], exc, exc_info=True,
+                str(task.get('id') or '?'), exc, exc_info=True,
             )
     if attempted:
         logger.info(
@@ -191,7 +191,8 @@ def cleanup_old_tasks():
         from lib.message_queue import (reap_expired_queue_leases,
                                        drain_idle_background_batches)
         reap_expired_queue_leases()
-        drain_idle_background_batches()
+        if _owns_background_command_recovery():
+            drain_idle_background_batches()
     except Exception as e:
         logger.warning('[Manager] reap_expired_queue_leases failed: %s', e,
                        exc_info=not is_transient_storage_error(e))
@@ -208,6 +209,22 @@ def cleanup_old_tasks():
         else:
             _finish_orphan_result_report()
     trim_released_task_heap()
+
+
+def _owns_background_command_recovery() -> bool:
+    """Whether this process may rebuild collective background-completion wakes.
+
+    The wake is complete only against a recovered command registry and the
+    process's own carriers. Only the task-recovery owner scans the command
+    records at boot and runs the boot drain this tick retries; a personal API
+    host sees neither, so its tick resumed Worker lanes whose commands and
+    carriers belong to the execution host (2026-11-06 11:04:22, 73000186 and
+    beac53a8).
+    """
+    from runtime_guards import load_deployment_configuration
+    from lib.process_roles import CAPABILITY_TASK_RECOVERY, process_role_has
+    return process_role_has(load_deployment_configuration().process_role,
+                            CAPABILITY_TASK_RECOVERY)
 
 
 def _malloc_trim() -> bool:
@@ -402,7 +419,7 @@ def reap_stuck_running_tasks() -> int:
             logger.warning(
                 '[Task %s] conv=%s ⚠️ run_command pid=%s silent for %.0fs — '
                 'interrupting that command; the task and its other commands remain live',
-                str(task.get('id') or '')[:8], str(task.get('convId') or '')[:8],
+                str(task.get('id') or ''), str(task.get('convId') or ''),
                 verdict.pid, verdict.command_silence,
             )
             return
@@ -465,12 +482,12 @@ def reap_stuck_running_tasks() -> int:
             logger.warning(
                 '[Task %s] conv=%s ⚠️ WEDGED child invocation — no progress for %.0fs; '
                 'its invocation owner settles the typed stall and reports to the parent',
-                str(child.get('id') or '')[:8], str(child.get('convId') or '')[:8],
+                str(child.get('id') or ''), str(child.get('convId') or ''),
                 verdict.silent_seconds)
     for t, silent_seconds in stuck:
         logger.warning('[Task %s] conv=%s ⚠️ WEDGED — no event/dispatch progress for '
                        '%.0fs (had_output=%s), force-failed and finalizing',
-                       t['id'][:8], (t.get('convId') or '')[:8],
+                       task_log_tag(t['id']), (t.get('convId') or ''),
                        silent_seconds, t.get('_reap_had_output'))
         _finalize_reaped_stuck_task(t)
         try:
@@ -484,19 +501,19 @@ def reap_stuck_running_tasks() -> int:
                 logger.warning(
                     '[Task %s] quarantined wedged worker; bounded replacement '
                     'restored one agent execution slot',
-                    str(t.get('id') or '')[:8],
+                    str(t.get('id') or ''),
                 )
             elif agent_scheduling_snapshot(
                     str(t.get('id') or '')).get('taskState') == 'running':
                 logger.error(
                     '[Task %s] wedged worker was finalized but no replacement '
                     'slot was available; inspect executor abandonment metrics',
-                    str(t.get('id') or '')[:8],
+                    str(t.get('id') or ''),
                 )
         except Exception as error:
             logger.error(
                 '[Task %s] executor capacity recovery failed: %s',
-                str(t.get('id') or '')[:8], error, exc_info=True,
+                str(t.get('id') or ''), error, exc_info=True,
             )
     if stuck:
         logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
@@ -601,7 +618,7 @@ def report_orphan_running_results() -> int:
         'resolves. Most are finished autopilot/inline CARRIERS, which have no '
         'terminal write path by design.',
         len(orphans), _orphan_result_max_age_secs(),
-        oldest['task_id'][:8], (oldest['conv_id'] or '-')[:8], oldest['age_secs'],
+        oldest['task_id'], (oldest['conv_id'] or '-'), oldest['age_secs'],
     )
     return len(orphans)
 
@@ -621,10 +638,10 @@ def _write_stuck_terminal_floor(task) -> None:
                          thinking=task.get('thinking') or '', status='error',
                          error_json=error_json, tr_json=None, meta_json=meta_json)
         logger.debug('[Task %s] conv=%s Wrote stuck terminal floor to task_results',
-                     task['id'][:8], conv_id[:8])
+                     task_log_tag(task['id']), conv_id)
     except Exception as e:
         logger.warning('[Task %s] Failed to write stuck terminal floor: %s',
-                       task.get('id', '?')[:8], e, exc_info=True)
+                       task_log_tag(task.get('id', '?')), e, exc_info=True)
 
 
 
@@ -646,7 +663,7 @@ def _finalize_reaped_stuck_task(task) -> None:
       2. Terminal ``DONE(error)`` event — the turn authority settles the
          assistant projection and drains the durable queue in one event path.
     """
-    tid = task.get('id', '?')[:8]
+    tid = task_log_tag(task.get('id', '?'))
 
     # (1) Terminal floor first — poll resolves terminally regardless.
     _write_stuck_terminal_floor(task)

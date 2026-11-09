@@ -68,8 +68,8 @@ _FAIL_THRESHOLD = 2        # consecutive failures before a path is "bad"
 _LAT_MARGIN = 0.75         # challenger must be ≤75% of incumbent's EWMA
 _MIN_SAMPLES = 2           # measurements required before latency switch
 _EWMA_ALPHA = 0.3          # latency smoothing factor
-_MAX_HOSTS = 64            # LRU cap on tracked hosts
-_HOST_TTL = 24 * 3600      # stop probing hosts not seen for this long
+from lib.network_routes import HEALTH_CACHE_ORIGINS as _MAX_HOSTS
+from lib.network_routes import HEALTH_CACHE_TTL_S as _HOST_TTL
 _SAVE_THROTTLE = 30        # seconds between disk writes
 _MAX_LAT_MS = 30_000       # discard insane latency outliers
 _MIN_PROBE_INTERVAL = 30.0

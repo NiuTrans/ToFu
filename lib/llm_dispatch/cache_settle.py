@@ -8,6 +8,14 @@ and fast tool rounds reach the provider immediately. Explicit
 ``TOFU_CACHE_SETTLE=1`` retains the bounded, cancellable cost-saving policy below.
 Cache diagnostics and stable routing remain active independently.
 
+Status (2026-11-08): the premise below, a write-visibility window that a
+sequential next round can race, did not hold on the Sankuai Claude route.
+After a cold write the next round read it less often the longer it waited,
+and single writes probed again at +150 s were not read: these misses are
+per-request upstream server routing. The gate stays opt-in and off, and the
+cache detector no longer files them as a client timing race
+(docs/LLM_COST_OPTIMIZATION.md, "Cache-break attribution corrections").
+
 Why this exists
 ===============
 Anthropic's prompt cache has a documented write-visibility race: a cache entry
@@ -173,9 +181,8 @@ def settle_cold_enabled() -> bool:
     rates) to skip the block, versus ~10s of user wait to enforce it. For a
     cost-indifferent, experience-sensitive deployment that trade is BACKWARDS,
     so the long block is OFF by default: cold writes keep the ordinary short
-    window (accept the cheap re-write, never stall the user). The detector
-    still names the miss ``cache_write_unsettled`` (non-blocking, honest
-    attribution) regardless. Set ``TOFU_CACHE_SETTLE_COLD=1`` to enable the
+    window (accept the cheap re-write, never stall the user). Set
+    ``TOFU_CACHE_SETTLE_COLD=1`` to enable the
     blocking cold window where saving the re-write tokens is worth the latency."""
     val = os.environ.get('TOFU_CACHE_SETTLE_COLD', '0')
     return val.strip().lower() in ('1', 'true', 'yes', 'on')
@@ -619,7 +626,7 @@ def _compute_wait_s(conv_id: str, est_tokens: int, now: float | None) -> tuple[f
     # second round of nearly every conversation to save a sub-cent re-write.
     # When the cold block is disabled, a cold prior round falls back to the
     # ordinary short window — we accept the cheap re-write instead of blocking
-    # the user, and the detector still names it cache_write_unsettled.
+    # the user.
     if last_cold and settle_cold_enabled():
         window_s = settle_cold_window_ms() / 1000.0
         cap_s = settle_cold_max_wait_ms() / 1000.0
@@ -643,7 +650,7 @@ def _log_hold(wait_s: float, est_tokens: int, conv_id: str, elapsed: float,
     logger.info('%s [CacheSettle] holding %.2fs before big prefix (~%dk tok) '
                 'conv=%s so prior round cache write settles (%.2fs since prior '
                 'stream end, window %.2fs)', log_prefix, wait_s,
-                est_tokens // 1000, conv_id[:8], elapsed, window_s)
+                est_tokens // 1000, conv_id, elapsed, window_s)
 
 
 def settle_before_send(conv_id: str, est_tokens: int, *,
@@ -669,7 +676,7 @@ def settle_before_send(conv_id: str, est_tokens: int, *,
             conv_id, est_tokens, started_at)
         if wait_s > 0:
             logger.info('%s [CacheSettle] holding %.2fs for Codex conv=%s '
-                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id[:8],
+                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id,
                         est_tokens // 1000, reason)
             try:
                 from lib.llm._transport import abortable_sleep
@@ -709,7 +716,7 @@ async def async_settle_before_send(conv_id: str, est_tokens: int, *,
             conv_id, est_tokens, started_at)
         if wait_s > 0:
             logger.info('%s [CacheSettle] holding %.2fs for Codex conv=%s '
-                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id[:8],
+                        '(~%dk tok; %s)', log_prefix, wait_s, conv_id,
                         est_tokens // 1000, reason)
             try:
                 from lib.llm._transport import async_abortable_sleep
@@ -880,12 +887,12 @@ def observe_codex_cache(conv_id: str, usage) -> dict:
             'drop=%d input=%d append_only=%s. The client wire and routing '
             'prefix are unchanged; this is an upstream implicit-breakpoint '
             'fallback/miss, not a Tofu prefix rewrite.',
-            conv_id[:8], call, status, previous_read, cache_read,
+            conv_id, call, status, previous_read, cache_read,
             result['drop_tokens'], input_tokens, append_only)
     elif status == 'write_visibility_miss':
         logger.info('[CodexCache] conv=%s call=%d second cold read; unmetered '
                     'write was not visible yet (input=%d)',
-                    conv_id[:8], call, input_tokens)
+                    conv_id, call, input_tokens)
     return result
 
 

@@ -1,6 +1,7 @@
 package com.tofu.client.session
 
 import com.tofu.client.data.AuthType
+import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import kotlinx.coroutines.flow.Flow
@@ -39,7 +40,7 @@ class SessionManagerSubmitReportTest {
         override fun secretFor(alias: String): String? = null
     }
 
-    private class FakeDao(private val current: Profile) : ProfileDao {
+    private class FakeDao(private val current: Profile) : ProfileDaoFixture {
         override fun observeAll(): Flow<List<Profile>> = flowOf(listOf(current))
         override suspend fun getById(id: Long): Profile? = current
         override suspend fun getAllOnce(): List<Profile> = listOf(current)
@@ -50,7 +51,7 @@ class SessionManagerSubmitReportTest {
         override suspend fun setCookieHost(id: Long, host: String?): Int = 1
         override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
             val row = getById(id) ?: return 0
-            return if (row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
+            return if (row.kind == KernelKind.REMOTE_URL && row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int = 1
         override suspend fun setAuthType(id: Long, authType: AuthType): Int = 1
@@ -108,6 +109,14 @@ class SessionManagerSubmitReportTest {
         val result = manager(server).submitReport(
             profile("https://host.test/proxy/15000/"), "{}")
         assertTrue(result.contains("500"))
+    }
+
+    @Test fun credential_base_url_is_reported_safely_before_http() = runTest {
+        val server = CapturingServer(200)
+        val result = manager(server).submitReport(profile("https://host.test/?token=fixture-value"), "{}")
+        assertTrue(result.contains("credentials"))
+        assertTrue(!result.contains("fixture-value"))
+        assertNull(server.request)
     }
 
     @Test

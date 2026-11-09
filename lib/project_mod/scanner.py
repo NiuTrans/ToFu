@@ -90,7 +90,7 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
                            readonly_paths=readonly_paths)
         except Exception as e:
             logger.warning('[Project] set_conv_roots failed conv=%s: %s',
-                           conv_id[:12] if conv_id else '?', e)
+                           conv_id if conv_id else '?', e)
         # 2026-06-22 — STOP here for task-context calls.  The global
         #   _state/_roots singleton is the UI-facing "active project" the
         #   project bar reflects (via get_state() / /api/v1/project/status).

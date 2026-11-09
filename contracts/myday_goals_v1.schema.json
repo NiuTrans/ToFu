@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/myday_goals_v1.schema.json",
+  "title": "My Day goals",
+  "description": "Owner-written goals decomposed into items with an estimated progress (docs/modules/scheduling_ops.md, My Day goals). One portable record per goal holds its items. Items keep stable IDs, provenance, a manual-override flag and status timestamps; agent suggestions stay proposals until the owner adopts them. Goals are not dated: an unfinished item stays open across days.",
+  "namespaces": {
+    "goals": "myday.goal.v1"
+  },
+  "policy": {
+    "casAttempts": 8
+  },
+  "$defs": {
+    "goalId": {"type": "string", "pattern": "^g-[0-9a-f]{16}$"},
+    "itemId": {
+      "type": "string",
+      "pattern": "^[iaw]-[0-9a-f]{16}$",
+      "description": "i- owner item (random), a- agent suggestion (derived from the goal and its normalized text, so a regeneration re-derives the same ID), w- Worker evidence (derived from the assignment ID)."
+    },
+    "timestamp": {"type": "integer", "minimum": 0, "description": "Unix milliseconds."},
+    "optionalTimestamp": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+    "goalText": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "itemText": {"type": "string", "minLength": 1, "maxLength": 200},
+    "status": {
+      "enum": ["pending", "in_progress", "completed"],
+      "description": "The checklist and task-board vocabulary: not started, in progress, done."
+    },
+    "dispatchId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "origin", "status", "manual", "createdAt", "statusChangedAt", "startedAt", "completedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/itemId"},
+        "text": {"$ref": "#/$defs/itemText"},
+        "origin": {
+          "enum": ["owner", "agent", "evidence"],
+          "description": "owner: written by the owner. agent: proposed by a decomposition. evidence: the owner's override of a linked Worker; it is stored only while the override exists."
+        },
+        "proposal": {
+          "enum": ["pending", "accepted", "dismissed"],
+          "description": "Agent items only. A pending or dismissed proposal never counts toward progress; any owner action on it (accept, set status, edit) adopts it."
+        },
+        "status": {"$ref": "#/$defs/status"},
+        "manual": {
+          "type": "boolean",
+          "description": "The owner set this status. A manual status is authoritative: evidence and regeneration never change it."
+        },
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "statusChangedAt": {"$ref": "#/$defs/timestamp"},
+        "startedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "completedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "assignmentId": {"$ref": "#/$defs/dispatchId"}
+      },
+      "allOf": [
+        {"if": {"properties": {"origin": {"const": "agent"}}},
+         "then": {"required": ["proposal"]}, "else": {"not": {"required": ["proposal"]}}},
+        {"if": {"properties": {"origin": {"const": "evidence"}}},
+         "then": {"required": ["assignmentId"], "properties": {"manual": {"const": true}}},
+         "else": {"not": {"required": ["assignmentId"]}}}
+      ]
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The Coordinator request this goal maps to. Its delegated Workers are the goal's evidence items, read fresh from project dispatch on every view.",
+      "required": ["projectPath", "coordinatorId", "sourceAttemptId", "requestTurnId", "label", "linkedAt"],
+      "properties": {
+        "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "coordinatorId": {"$ref": "#/$defs/dispatchId"},
+        "sourceAttemptId": {"$ref": "#/$defs/dispatchId", "description": "request.delegation.attemptId shared by the request's Workers."},
+        "requestTurnId": {"$ref": "#/$defs/dispatchId", "description": "The owner's request Turn (request.authorizationSource.turnId)."},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "linkedAt": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "owner", "id", "text", "origin", "state", "createdAt", "updatedAt", "archivedAt", "decomposedAt", "items", "link"],
+      "properties": {
+        "version": {"const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "id": {"$ref": "#/$defs/goalId"},
+        "text": {"$ref": "#/$defs/goalText"},
+        "origin": {"const": "owner", "description": "Goals are written by the owner. Agents propose items inside a goal, never goals."},
+        "state": {"enum": ["active", "archived"]},
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "updatedAt": {"$ref": "#/$defs/timestamp"},
+        "archivedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "decomposedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "items": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/item"}},
+        "link": {"anyOf": [{"$ref": "#/$defs/link"}, {"type": "null"}]}
+      }
+    },
+    "createGoalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {"text": {"$ref": "#/$defs/goalText"}}
+    },
+    "updateGoalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "text": {"$ref": "#/$defs/goalText"},
+        "state": {"enum": ["active", "archived"]}
+      }
+    },
+    "addItemRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {"text": {"$ref": "#/$defs/itemText"}}
+    },
+    "updateItemRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "dependentSchemas": {"followEvidence": {"maxProperties": 1}},
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "text": {"$ref": "#/$defs/itemText"},
+        "proposal": {"const": "accepted"},
+        "followEvidence": {"const": true, "description": "Drop the owner's override of a Worker evidence item."}
+      }
+    },
+    "suggestionsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision"],
+      "properties": {"decision": {"enum": ["accept", "dismiss"]}}
+    },
+    "linkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectPath", "sourceAttemptId"],
+      "properties": {
+        "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sourceAttemptId": {"$ref": "#/$defs/dispatchId"}
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An estimate: every counted item weighs the same. percent = floor(100 * completed / counted), so 100 means every counted item is done; null when nothing counts or a linked request's Workers cannot be read (the counts then describe the visible items only).",
+      "required": ["counted", "completed", "inProgress", "pending", "suggested", "percent"],
+      "properties": {
+        "counted": {"type": "integer", "minimum": 0, "description": "Owner items, adopted suggestions and Worker evidence that is not cancelled."},
+        "completed": {"type": "integer", "minimum": 0},
+        "inProgress": {"type": "integer", "minimum": 0},
+        "pending": {"type": "integer", "minimum": 0},
+        "suggested": {"type": "integer", "minimum": 0, "description": "Pending agent proposals; never counted."},
+        "percent": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 100}, {"type": "null"}]}
+      }
+    },
+    "workerEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One Worker of the linked request, projected from its dispatch row alone (grant, execution association, Coordinator review, rework links) plus the owner's live-task set; no attempt or transcript is read.",
+      "required": ["assignmentId", "conversationId", "review", "state", "reason"],
+      "properties": {
+        "assignmentId": {"$ref": "#/$defs/dispatchId"},
+        "conversationId": {"$ref": "#/$defs/dispatchId"},
+        "review": {"anyOf": [{"enum": ["accept", "rework", "reject"]}, {"type": "null"}]},
+        "state": {"enum": ["pending", "in_progress", "completed", "cancelled"]},
+        "reason": {
+          "enum": ["queued", "running", "awaiting_review", "accepted", "rework", "rejected", "cancelled", "superseded"],
+          "description": "cancelled: grant revoked; superseded: a later Worker of the request reworks it; accepted: the Coordinator accepted its result; rejected: the Coordinator rejected it (final, not counted); queued: not started; running: a live task; rework: the Coordinator asked for rework; awaiting_review: started, not running, no review yet."
+        }
+      }
+    },
+    "itemView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "origin", "status", "manual", "counted", "createdAt", "statusChangedAt", "startedAt", "completedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/itemId"},
+        "text": {"$ref": "#/$defs/itemText"},
+        "origin": {"enum": ["owner", "agent", "evidence"]},
+        "proposal": {"enum": ["pending", "accepted"]},
+        "status": {"enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Effective status: the manual status, else the Worker evidence, else the stored status."},
+        "manual": {"type": "boolean"},
+        "counted": {"type": "boolean"},
+        "createdAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "statusChangedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "startedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "completedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "evidence": {"$ref": "#/$defs/workerEvidence"}
+      }
+    },
+    "requestEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "settled", "workers", "reason"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "settled": {"type": "boolean", "description": "The Coordinator finished this request (finish_project_request)."},
+        "workers": {"type": "integer", "minimum": 0},
+        "reason": {"anyOf": [{"type": "string", "maxLength": 300}, {"type": "null"}]}
+      }
+    },
+    "goalView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "origin", "state", "createdAt", "updatedAt", "archivedAt", "decomposedAt", "decomposing", "items", "progress", "link", "request"],
+      "properties": {
+        "id": {"$ref": "#/$defs/goalId"},
+        "text": {"$ref": "#/$defs/goalText"},
+        "origin": {"const": "owner"},
+        "state": {"enum": ["active", "archived"]},
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "updatedAt": {"$ref": "#/$defs/timestamp"},
+        "archivedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "decomposedAt": {"$ref": "#/$defs/optionalTimestamp"},
+        "decomposing": {"type": "boolean"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/itemView"}},
+        "progress": {"$ref": "#/$defs/progress"},
+        "link": {"anyOf": [{"$ref": "#/$defs/link"}, {"type": "null"}]},
+        "request": {"anyOf": [{"$ref": "#/$defs/requestEvidence"}, {"type": "null"}]}
+      }
+    },
+    "linkableRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectPath", "coordinatorId", "sourceAttemptId", "requestTurnId", "label", "createdAt", "workers"],
+      "properties": {
+        "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "coordinatorId": {"$ref": "#/$defs/dispatchId"},
+        "sourceAttemptId": {"$ref": "#/$defs/dispatchId"},
+        "requestTurnId": {"$ref": "#/$defs/dispatchId"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "createdAt": {"$ref": "#/$defs/timestamp"},
+        "workers": {"type": "integer", "minimum": 1, "description": "Workers of this request on the newest history page."}
+      }
+    }
+  }
+}

@@ -89,6 +89,55 @@ def _stop_releasing_drain(service, record, **options):
         return stopped.result(30)
 
 
+def test_source_drift_before_boot_recovers_after_physical_exit_without_manual_restart(tmp_path):
+    service = ProbeService(str(tmp_path), sys.executable)
+    original = {'format': 'tofu.execution-plan/v1', 'python': sys.executable,
+        'sourceSha256': 'first', 'sourceFiles': 1, 'environmentFingerprint': 'installed',
+        'configurationSha256': 'configuration'}
+    current = {**original, 'sourceSha256': 'second'}
+    (tmp_path / 'source-generation').write_text('second')
+    service.prepare = lambda env: current
+    state, observations, failures, dependencies = {}, [], [], []
+    clock = [1000.0]
+
+    def account_failure():
+        failures.append(clock[0])
+        return clock[0], len(failures), len(failures)
+
+    def recover():
+        return service.recover(state=state, max_failures=3, clock=lambda: clock[0],
+            account_failure=account_failure, retry_delay=lambda *_: 1,
+            observe=lambda *value: observations.append(value),
+            environment_factory=lambda: environment(tmp_path),
+            validate_source_refresh=lambda: dependencies.append('verified'))
+
+    try:
+        service.ensure(original, environment(tmp_path))
+        first = wait_for(lambda: (value if (value := service.record()).get('state') == 'failed' else None))
+        wait_for(lambda: not service.host_matches(first))
+        assert first['failureKind'] == 'source_changed_before_boot'
+        assert not (tmp_path / 'entered').exists()
+        assert not recover()
+        assert not recover()
+        assert failures == [1000.0]
+        clock[0] = 1001.0
+        assert not recover()
+        second = wait_for(lambda: (value if (value := service.record()).get('state') == 'ready' else None))
+        assert second['serviceId'] != first['serviceId']
+        assert second['plan'] == current
+        assert 'failureKind' not in second
+        assert (tmp_path / 'entered').exists()
+        assert dependencies == ['verified']
+        assert recover()
+        assert state['executionRecovery'] == {}
+        assert failures == [1000.0]
+    finally:
+        remaining = service.record()
+        if service.host_matches(remaining):
+            os.kill(remaining['pid'], signal.SIGUSR1)
+        service.stop(30)
+
+
 def test_failed_close_is_preserved_unless_an_explicit_replacement_retires_it(tmp_path):
     service = ProbeService(str(tmp_path), sys.executable)
     plan = {'application': 'controlled-execution'}

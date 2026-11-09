@@ -25,7 +25,7 @@ INCIDENT_SETTINGS = {
     'planMode': False, 'preferredProviderId': '',
     'preset': 'claude-opus-5.5',
     'projectPath': '/mnt/proj', 'projectPaths': ['/mnt/proj'],
-    'provider_id': 'sankuai', 'readOnlyPaths': [], 'schedulerEnabled': False,
+    'provider_id': 'example-corp', 'readOnlyPaths': [], 'schedulerEnabled': False,
     'searchMode': 'multi', 'thinkingDepth': 'max',
 }
 

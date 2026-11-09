@@ -1392,6 +1392,7 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolCount': 'exact final provider tool count',
                       'schemaTokens': 'model-tokenizer schema estimate',
                       'schemaFingerprint': 'opaque exact provider-schema digest',
+                      'contextLineage': '(optional) content-free context source map bound to this sealed request',
                       'schemaBudgetTokens': 'explicit cost target, zero=uncapped',
                       'budgetDroppedNames': 'names omitted by explicit budget',
                       'compactedNames': 'names annotation-compacted by budget',
@@ -1409,6 +1410,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('toolCount', 'int', required=True),
                   FieldSpec('schemaTokens', 'int', required=True),
                   FieldSpec('schemaFingerprint', 'str', required=True),
+                  FieldSpec('contextLineage', 'dict'),
                   FieldSpec('schemaBudgetTokens', 'int', required=True),
                   FieldSpec('budgetDroppedNames', 'list', required=True),
                   FieldSpec('compactedNames', 'list', required=True),
@@ -1584,6 +1586,7 @@ _SPECS: tuple[EventSpec, ...] = (
                       'label': 'human label',
                       'contextManifest': '(optional) bounded context-manifest '
                                          'entries',
+                      'contextLineage': '(optional) content-free source ranges in this snapshot',
                       'turn': '(optional) flow phase label',
                       'params': '(optional, request kind) sampling params '
                                 '{maxTokens, temperature, thinkingEnabled, …}',
@@ -1600,6 +1603,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('roundNum', 'int | str', required=True),
                   FieldSpec('label', 'str', required=True),
                   FieldSpec('contextManifest', 'list'),
+                  FieldSpec('contextLineage', 'dict'),
                   FieldSpec('turn', 'str'),
                   FieldSpec('params', 'dict'),
                   FieldSpec('tools', 'list'),

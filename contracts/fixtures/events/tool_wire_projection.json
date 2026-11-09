@@ -4,6 +4,7 @@
   "backend": "s",
   "budgetDroppedNames": [],
   "compactedNames": [],
+  "contextLineage": {},
   "conversationId": "s",
   "dispatchSeq": 1,
   "emits": "s",

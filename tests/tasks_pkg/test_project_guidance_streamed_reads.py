@@ -167,6 +167,8 @@ def test_file_grant_scope_reads_no_rule_files_on_the_streamed_path(task, monkeyp
     monkeypatch.setattr(admission, 'owned_workspace',
                         lambda _task, _binding: {'workspace_path': root})
     monkeypatch.setattr(scope, 'admit_tool', lambda *_args, **_kwargs: grant)
+    # The prefetch decides through admit_call, which also returns its admission.
+    monkeypatch.setattr(scope, 'admit_call', lambda *_args, **_kwargs: (grant, None))
     messages = [{'role': 'user', 'content': 'inspect sub'}]
     _prepare_round(task, messages)
 

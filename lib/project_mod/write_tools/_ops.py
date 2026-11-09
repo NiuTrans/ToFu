@@ -2,8 +2,8 @@
 
 Extracted verbatim from the former flat ``write_tools.py``: the public tool
 entry points (``tool_write_file`` / ``save_uploaded_file`` / ``tool_apply_diff``
-/ ``tool_apply_diffs`` / ``tool_insert_content`` / ``tool_insert_contents``) plus
-their single-edit cores (``_apply_one_diff`` / ``_insert_one``). Every operation
+/ ``tool_apply_diffs`` / ``tool_edit_file``) plus the single-edit core
+``_apply_one_diff``. Every operation
 resolves + attributes through the ``_paths`` core and matches through the
 ``_text`` helpers.
 """
@@ -17,6 +17,7 @@ from difflib import SequenceMatcher
 
 from lib.log import get_logger
 from lib.tools.execution_timing import timing_phase
+from lib.tools.project import retired_edit_operation_error
 from lib.project_mod.modifications import _record_modification
 from lib.project_mod.session_lock import SessionLockBusy
 from lib.project_mod.path_resolution import _resolve_base
@@ -82,7 +83,7 @@ def _with_workspace_writer(function):
                 continue
             try:
                 if edits is not None:
-                    resolution_conv = (None if function.__name__ in ('tool_apply_diffs', 'tool_insert_contents')
+                    resolution_conv = (None if function.__name__ == 'tool_apply_diffs'
                                        else bound.get('conv_id'))
                     root, relative = _resolve_base(base, path, conv_id=resolution_conv)
                 else:
@@ -186,7 +187,7 @@ def _journal_busy_failure(action, path, error):
 # ``[2] FAIL x.py [replace] [ambiguous-match]: …`` — so the model can tell at
 # a glance WHICH repair move applies (re-read the file, widen the anchor,
 # fix the path, …) instead of parsing prose. The tag never changes the
-# ``Write failed`` / ``Diff failed`` / ``Insert failed`` prefixes or the
+# ``Write failed`` / ``Diff failed`` prefixes or the
 # ``[N] FAIL`` batch marker: the read-gate success probe and the meta parser
 # contract on those.
 EK_MATCH_NOT_FOUND = 'match-not-found'   # search/anchor text absent from the file
@@ -195,7 +196,6 @@ EK_FILE_NOT_FOUND = 'file-not-found'     # target file does not exist
 EK_PATH_INVALID = 'path-invalid'         # path rejected (outside roots, readonly, …)
 EK_READ_FAILED = 'read-failed'           # file exists but could not be read
 EK_WRITE_FAILED = 'write-failed'         # computed edit could not be persisted
-EK_ECHO_CONTENT = 'echo-content'         # insert content merely repeats anchor/context
 EK_MAPPING_FAILED = 'mapping-failed'     # normalized match lost its line mapping
 EK_INVALID_EDIT = 'invalid-edit'         # batch entry malformed (fields/operation)
 
@@ -1502,7 +1502,7 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None,
         if fail_count:
             header += f' ({fail_count} failed)'
         if partial_count:
-            header = header.replace('Applied ', 'Completed ', 1).replace('Inserted ', 'Completed ', 1)
+            header = header.replace('Applied ', 'Completed ', 1)
             header += f'; {partial_count} edits were applied without confirmed undo'
     return header + '\n' + '\n'.join(results)
 
@@ -1510,10 +1510,10 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None,
 
 
 # ═══════════════════════════════════════════════════════
-#  insert boundary-echo repair + post-write .py syntax guard
+#  post-write syntax guard (report-only)
 # ═══════════════════════════════════════════════════════
 
-_ECHO_REPAIR_MAX_CHARS = 2_000_000
+_SYNTAX_GUARD_MAX_CHARS = 2_000_000
 
 
 def _py_parses(text):
@@ -1528,167 +1528,6 @@ def _py_parses(text):
         return True, None
 
 
-def _splice_insertion(file_content, anchor_idx, anchor, content, position):
-    """Byte-identical insert splice (factored from _insert_one)."""
-    if position == 'before':
-        it = content if content.endswith('\n') else content + '\n'
-        return file_content[:anchor_idx] + it + file_content[anchor_idx:], it
-    after_idx = anchor_idx + len(anchor)
-    it = content
-    if after_idx < len(file_content) and file_content[after_idx] != '\n':
-        it = '\n' + it
-    elif after_idx < len(file_content):
-        after_idx += 1
-    elif after_idx and file_content[after_idx - 1] != '\n':
-        # An unterminated final line still needs a separator before the new
-        # line. An anchor that already includes its final newline does not.
-        it = '\n' + it
-    if not it.endswith('\n'):
-        it += '\n'
-    return file_content[:after_idx] + it + file_content[after_idx:], it
-
-
-def _line_window_after(file_content, anchor_idx, anchor):
-    """Lines right after the anchor ([] at EOF); None if not at a line end."""
-    after_idx = anchor_idx + len(anchor)
-    if after_idx == len(file_content):
-        return []
-    if file_content[after_idx] != '\n':
-        return None
-    return file_content[after_idx + 1:].split('\n')
-
-
-def _line_window_before(file_content, anchor_idx):
-    """Lines right above the anchor ([] at BOF); None if anchor is not at
-    a line start."""
-    if anchor_idx == 0:
-        return []
-    if file_content[anchor_idx - 1] != '\n':
-        return None
-    return file_content[:anchor_idx - 1].split('\n')
-
-
-def _anchor_echo_lines(anchor, content, *, from_end):
-    """Whole-line boundary copy of the complete, non-structural anchor.
-
-    A partial overlap cannot prove duplication: independent blocks share
-    returns, closing tags, braces and blank lines. Even a complete anchor made
-    only of punctuation/whitespace is not identifying context. Preserve those
-    bytes; deliberate duplication of an identifying anchor uses ``replace``.
-    """
-    anchor_lines = anchor.split('\n')
-    body = content[:-1] if content.endswith('\n') else content
-    content_lines = body.split('\n') if body else []
-    count = len(anchor_lines)
-    run = content_lines[-count:] if from_end else content_lines[:count]
-    if run == anchor_lines and any(char.isalnum() for char in anchor):
-        return count
-    return 0
-
-
-def _strict_echo_run(content_lines, neighbour, position):
-    """Exact boundary match count, no blank skipping."""
-    if position == 'after':
-        k = 0
-        while (k < len(content_lines) and k < len(neighbour)
-               and content_lines[k] == neighbour[k]):
-            k += 1
-        return k
-    k = 0
-    while (k < len(content_lines) and k < len(neighbour)
-           and content_lines[-1 - k] == neighbour[-1 - k]):
-        k += 1
-    return k
-
-
-def _neighbour_echo_run(content_lines, neighbour, position):
-    """Blank-skipping boundary match. Returns (c_start, k): the matched run
-    is content_lines[c_start:c_start+k]; lines outside it are blank-only on
-    the near side."""
-    if position == 'after':
-        c0 = 0
-        while c0 < len(content_lines) and not content_lines[c0].strip():
-            c0 += 1
-        n0 = 0
-        while n0 < len(neighbour) and not neighbour[n0].strip():
-            n0 += 1
-        k = 0
-        while (c0 + k < len(content_lines) and n0 + k < len(neighbour)
-               and content_lines[c0 + k] == neighbour[n0 + k]):
-            k += 1
-        return c0, k
-    ce = len(content_lines) - 1
-    while ce >= 0 and not content_lines[ce].strip():
-        ce -= 1
-    ne = len(neighbour) - 1
-    while ne >= 0 and not neighbour[ne].strip():
-        ne -= 1
-    k = 0
-    while (ce - k >= 0 and ne - k >= 0
-           and content_lines[ce - k] == neighbour[ne - k]):
-        k += 1
-    return ce - k + 1, k
-
-
-def _strip_anchor_echo(file_content, anchor_idx, anchor, content, position):
-    """Repair one insert's whole-line anchor echo.
-
-    Returns ``(content, stripped_chars, error)``. The anchor always stays, so a
-    complete copy at the insertion edge is duplication and is stripped.
-    Partial overlaps and structural-only anchors stay literal: equality of
-    common syntax cannot establish that a new block is copied context.
-
-    An echo on the FAR side is refused instead: content then says both "insert
-    this next to the anchor" and "and here is the anchor again", which either
-    means the block belongs on the other side (``insert_before``) or that a
-    deliberate copy was intended (``operation=replace``). Picking one silently
-    either duplicates the anchor or moves the anchor's own body into the
-    inserted block, and both results parse.
-
-    Whole-line anchors only — a mid-line overlap stays ambiguous and untouched.
-    """
-    if not content or not anchor:
-        return content, 0, None
-    after_idx = anchor_idx + len(anchor)
-    at_ls = anchor_idx == 0 or file_content[anchor_idx - 1] == '\n'
-    at_le = after_idx == len(file_content) or file_content[after_idx] == '\n'
-    if not (at_ls and at_le):
-        return content, 0, None
-    trailing_newline = content.endswith('\n')
-    body = content[:-1] if trailing_newline else content
-    lines = body.split('\n') if body else []
-    start = _anchor_echo_lines(anchor, content, from_end=False)
-    end = _anchor_echo_lines(anchor, content, from_end=True)
-    near, far = (start, end) if position == 'after' else (end, start)
-    if not near and not far:
-        return content, 0, None
-    if near + far >= len(lines):
-        return '', len(content), None
-    if far:
-        other = 'insert_before' if position == 'after' else 'insert_after'
-        side = 'end' if position == 'after' else 'start'
-        return content, 0, (
-            f'content repeats anchor text at its {side}; insert_{position} '
-            'already keeps the anchor. Use operation=replace with anchor=the '
-            'existing text and content=the complete desired replacement, '
-            'including retained anchor text and newlines. If only adding lines, '
-            f'keep insert_{position} for that side or choose {other} for the '
-            'opposite side, with content=new lines only. Direction was not guessed.')
-    kept = lines[start:len(lines) - end]
-    rest = '\n'.join(kept) + ('\n' if trailing_newline else '')
-    return rest, len(content) - len(rest), None
-
-
-def _whole_echo_error(k, position):
-    where = 'after' if position == 'after' else 'before'
-    return (f'content is entirely a verbatim copy of the {k} line(s) '
-            f'already sitting right {where} the anchor — the edit would '
-            'duplicate existing text and add nothing. Re-issue with ONLY '
-            'the new text; to duplicate those lines deliberately, use '
-            'operation=replace with anchor=<those lines> and '
-            'content=<both copies>.')
-
-
 def _py_syntax_guard(rel_path, before_text, new_text):
     """Report-only .py guard: warn when a write breaks a previously
     parseable file (or creates a broken new one). Never raises/blocks."""
@@ -1696,10 +1535,10 @@ def _py_syntax_guard(rel_path, before_text, new_text):
         return ''
     if not isinstance(rel_path, str) or not rel_path.endswith('.py'):
         return ''
-    if not isinstance(new_text, str) or len(new_text) > _ECHO_REPAIR_MAX_CHARS:
+    if not isinstance(new_text, str) or len(new_text) > _SYNTAX_GUARD_MAX_CHARS:
         return ''
     if before_text is not None:
-        if len(before_text) > _ECHO_REPAIR_MAX_CHARS:
+        if len(before_text) > _SYNTAX_GUARD_MAX_CHARS:
             return ''
         pre_ok, _e = _py_parses(before_text)
         if not pre_ok:
@@ -1733,477 +1572,16 @@ def _post_edit_guard(rel_path, before_text, new_text, abs_path=None):
         rel_path, before_text, new_text, abs_path=abs_path)
 
 
-def _neighbour_echo_strip(file_content, anchor_idx, anchor, content,
-                          position, rel_path):
-    """Parse-arbitered neighbour-echo repair for .py inserts.
-
-    Returns (content, stripped_lines, fail_msg). Only fires when the
-    as-given splice breaks a previously-parseable file; then the smallest
-    boundary strip whose splice parses again wins."""
-    if not rel_path.endswith('.py'):
-        return content, 0, None
-    if len(file_content) + len(content) > _ECHO_REPAIR_MAX_CHARS:
-        return content, 0, None
-    if position == 'after':
-        neighbour = _line_window_after(file_content, anchor_idx, anchor)
-    else:
-        neighbour = _line_window_before(file_content, anchor_idx)
-    if not neighbour:
-        return content, 0, None
-    content_lines = content.split('\n')
-    c_start, k_max = _neighbour_echo_run(content_lines, neighbour, position)
-    if not k_max:
-        return content, 0, None
-    pre_ok, _e = _py_parses(file_content)
-    if not pre_ok:
-        return content, 0, None
-    as_given, _it = _splice_insertion(
-        file_content, anchor_idx, anchor, content, position)
-    as_ok, _e2 = _py_parses(as_given)
-    if as_ok:
-        return content, 0, None
-    for k in range(1, k_max + 1):
-        remaining = content_lines[:c_start] + content_lines[c_start + k:]
-        if not any(line.strip() for line in remaining):
-            return content, 0, _whole_echo_error(k, position)
-        candidate = '\n'.join(remaining)
-        new_text, _ins = _splice_insertion(
-            file_content, anchor_idx, anchor, candidate, position)
-        ok, _e3 = _py_parses(new_text)
-        if ok:
-            return candidate, k, None
-    return content, 0, None
-
-
-def _finalize_insertion(file_content, anchor_idx, anchor, content,
-                        position, rel_path, *, syntax_guard=True,
-                        abs_path=None):
-    """Echo repair + splice + syntax guard for one insert edit.
-
-    Returns {'ok', 'content', 'new_content', 'insert_text', 'notes',
-    'warning'} or {'ok': False, 'error'} (provably-contentless echo edits
-    never touch the file). TOFU_EDIT_ECHO_REPAIR=0 disables the repair.
-    """
-    notes = []
-    if os.environ.get('TOFU_EDIT_ECHO_REPAIR', '1') != '0':
-        stripped, n_chars, echo_error = _strip_anchor_echo(
-            file_content, anchor_idx, anchor, content, position)
-        if echo_error:
-            return {'ok': False, 'error': echo_error,
-                    'errorKind': EK_ECHO_CONTENT}
-        if n_chars:
-            if not stripped.strip():
-                return {'ok': False, 'error': (
-                    'content is just the anchor text repeated — '
-                    f'insert_{position} keeps the anchor in place '
-                    'automatically. Re-issue with ONLY the new text in '
-                    'content (do not repeat the anchor).'),
-                    'errorKind': EK_ECHO_CONTENT}
-            side = 'start' if position == 'after' else 'end'
-            notes.append(
-                f'auto-repaired: stripped the anchor copy ({n_chars} '
-                f'chars) from the {side} of content — insert_{position} '
-                'keeps the anchor automatically; pass ONLY the new text')
-            content = stripped
-        neighbour = (_line_window_after(file_content, anchor_idx, anchor)
-                     if position == 'after'
-                     else _line_window_before(file_content, anchor_idx))
-        if neighbour:
-            content_lines = content.split('\n')
-            k = _strict_echo_run(content_lines, neighbour, position)
-            if position == 'after':
-                matched = content_lines[:k]
-                remaining = content_lines[k:]
-            elif k:
-                matched = content_lines[-k:]
-                remaining = content_lines[:-k]
-            else:
-                matched, remaining = [], content_lines
-            if (k and any(line.strip() for line in matched)
-                    and not any(line.strip() for line in remaining)):
-                return {'ok': False, 'error': _whole_echo_error(k, position),
-                        'errorKind': EK_ECHO_CONTENT}
-        stripped2, k2, fail = _neighbour_echo_strip(
-            file_content, anchor_idx, anchor, content, position, rel_path)
-        if fail:
-            return {'ok': False, 'error': fail,
-                    'errorKind': EK_ECHO_CONTENT}
-        if k2:
-            where = 'after' if position == 'after' else 'before'
-            notes.append(
-                f'auto-repaired: stripped {k2} echoed context line'
-                f'{"s" if k2 > 1 else ""} already present right {where} '
-                'the anchor — pass ONLY the new text')
-            content = stripped2
-    new_content, insert_text = _splice_insertion(
-        file_content, anchor_idx, anchor, content, position)
-    warning = (_post_edit_guard(rel_path, file_content, new_content,
-                                abs_path=abs_path)
-               if syntax_guard else '')
-    return {'ok': True, 'content': content, 'new_content': new_content,
-            'insert_text': insert_text, 'notes': notes, 'warning': warning}
-
-
-# ═══════════════════════════════════════════════════════
-#  insert_content
-# ═══════════════════════════════════════════════════════
-
-def _compute_insert(file_content, rel_path, anchor, content, position='after',
-                    *, syntax_guard=True, abs_path=None):
-    """Pure match/splice half of ``_insert_one`` (no disk I/O).
-
-    Returns ``{'ok': True, ...}`` with everything the commit step needs, or
-    ``{'ok': False, ...}`` in the exact error shapes ``_insert_one`` produced.
-    """
-    # Inserts retain their line-oriented universal-newline behavior. The
-    # unified batch now reads raw line endings so exact replacements preserve
-    # CRLF; do not let that change make an insert splice in front of '\r'.
-    original_file_content = file_content
-    file_content = file_content.replace('\r\n', '\n').replace('\r', '\n')
-    # ── Locate anchor (same normalization strategy as apply_diff) ──
-    norm_content = file_content
-    norm_anchor = anchor
-    _normalized = False
-
-    count = file_content.count(anchor)
-    if count == 0:
-        # Try CRLF → LF normalization
-        norm_content = file_content.replace('\r\n', '\n')
-        norm_anchor = anchor.replace('\r\n', '\n')
-        count = norm_content.count(norm_anchor)
-        if count > 0:
-            _normalized = True
-        else:
-            # Try trailing-whitespace normalization
-            def _rstrip_lines(s):
-                return '\n'.join(l.rstrip() for l in s.split('\n'))
-
-            tw_content = _rstrip_lines(norm_content)
-            tw_anchor = _rstrip_lines(norm_anchor)
-            tw_count = tw_content.count(tw_anchor)
-
-            # ── Tier 4: unicode-escape normalization ──
-            # Glyph-vs-literal-escape drift (anchor "⏰" vs file "\u23f0").
-            # Decode \uXXXX / \UXXXXXXXX / \xXX on both sides for matching,
-            # then reconstruct the real anchor text from the file lines.
-            if tw_count == 0:
-                esc_content_lines = [_decode_unicode_escapes(l).rstrip()
-                                     for l in norm_content.split('\n')]
-                esc_anchor_lines = [_decode_unicode_escapes(l).rstrip()
-                                    for l in norm_anchor.split('\n')]
-                n_el = len(esc_anchor_lines)
-                esc_starts = [i for i in range(len(esc_content_lines) - n_el + 1)
-                              if esc_content_lines[i:i + n_el] == esc_anchor_lines]
-                if len(esc_starts) == 1:
-                    real_lines = norm_content.split('\n')[esc_starts[0]:esc_starts[0] + n_el]
-                    norm_anchor = '\n'.join(real_lines)
-                    count = 1
-                    _normalized = True
-                    logger.debug('insert_content: unicode-escape normalized match in %s', rel_path)
-                elif len(esc_starts) > 1:
-                    esc_content = '\n'.join(esc_content_lines)
-                    esc_anchor = '\n'.join(esc_anchor_lines)
-                    locs = _describe_duplicate_matches(esc_content, esc_anchor)
-                    error_msg = (f'Anchor text matches {len(esc_starts)} locations (after unicode-escape '
-                                 f'normalization). Make it more specific by adding surrounding lines so it '
-                                 f'matches exactly once.')
-                    if locs:
-                        error_msg += f'\n\n{locs}'
-                    return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                            'error': error_msg,
-                            'errorKind': EK_AMBIGUOUS_MATCH}
-
-            if tw_count == 0 and not _normalized:
-                hint = _find_closest_match(norm_content, norm_anchor)
-                error_msg = (f'Anchor text not found in {rel_path}. '
-                             f'File has {file_content.count(chr(10))+1} lines. '
-                             f'Use read_files to verify the exact content first.')
-                if hint:
-                    error_msg += (f'\n\nMost similar block (line {hint["line"]}, '
-                                  f'{hint["similarity"]:.0%} match):\n```\n{hint["text"]}\n```')
-                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                        'error': error_msg, 'anchorLen': len(anchor),
-                        'errorKind': EK_MATCH_NOT_FOUND}
-
-            if tw_count > 1:
-                locs = _describe_duplicate_matches(tw_content, tw_anchor)
-                error_msg = (f'Anchor text matches {tw_count} locations (after trailing-whitespace '
-                             f'normalization). Make it more specific by adding surrounding lines so it '
-                             f'matches exactly once.')
-                if locs:
-                    error_msg += f'\n\n{locs}'
-                return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                        'error': error_msg,
-                        'errorKind': EK_AMBIGUOUS_MATCH}
-
-            # Single match after TW normalization — find the real position
-            # by matching line-by-line in the original content.
-            # Skipped when tier-4 escape normalization already resolved a match.
-            if tw_count == 1 and not _normalized:
-                tw_lines = tw_content.split('\n')
-                anchor_lines = tw_anchor.split('\n')
-                n_al = len(anchor_lines)
-                content_lines = norm_content.split('\n')
-
-                match_start = None
-                for i in range(len(tw_lines) - n_al + 1):
-                    if tw_lines[i:i + n_al] == anchor_lines:
-                        match_start = i
-                        break
-
-                if match_start is not None:
-                    # Reconstruct the original anchor text from the file
-                    orig_anchor_lines = content_lines[match_start:match_start + n_al]
-                    norm_anchor = '\n'.join(orig_anchor_lines)
-                    count = 1
-                    _normalized = True
-                    logger.debug('insert_content: trailing-WS normalized match in %s', rel_path)
-                else:
-                    return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                            'error': 'Anchor matched after normalization but line mapping failed. '
-                                     'Please use read_files to get the exact content.',
-                            'errorKind': EK_MAPPING_FAILED}
-
-    if _normalized:
-        file_content = norm_content
-        anchor = norm_anchor
-
-    if count > 1:
-        locs = _describe_duplicate_matches(file_content, anchor)
-        error_msg = (f'Anchor text matches {count} locations. Make it more specific to identify a '
-                     f'unique position by adding surrounding lines.')
-        if locs:
-            error_msg += f'\n\n{locs}'
-        return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                'error': error_msg,
-                'errorKind': EK_AMBIGUOUS_MATCH}
-
-    # ── Boundary-echo repair + splice + syntax guard ──
-    anchor_idx = file_content.index(anchor)
-    fin = _finalize_insertion(file_content, anchor_idx, anchor, content,
-                              position, rel_path, syntax_guard=syntax_guard,
-                              abs_path=abs_path)
-    if not fin['ok']:
-        err = {'ok': False, 'action': 'insert_content', 'path': rel_path,
-               'error': fin['error']}
-        if fin.get('errorKind'):
-            err['errorKind'] = fin['errorKind']
-        return err
-    content = fin['content']
-    new_content = fin['new_content']
-    insert_text = fin['insert_text']
-
-    # ── Build reverse patch for undo ──
-    if position == 'before':
-        reverse_patch = {'search': insert_text + anchor, 'replace': anchor}
-    else:
-        chunk_start = anchor_idx
-        chunk_end = anchor_idx + len(anchor) + len(insert_text)
-        # Adjust if we consumed the trailing newline of anchor
-        if file_content[anchor_idx + len(anchor):anchor_idx + len(anchor) + 1] == '\n':
-            chunk_end = anchor_idx + len(anchor) + 1 + len(insert_text)
-        inserted_block = new_content[chunk_start:chunk_end]
-        reverse_patch = {'search': inserted_block, 'replace': file_content[anchor_idx:anchor_idx + len(anchor) + (1 if file_content[anchor_idx + len(anchor):anchor_idx + len(anchor) + 1] == '\n' else 0)]}
-
-    if new_content.replace(reverse_patch['search'], reverse_patch['replace'], 1) != original_file_content:
-        reverse_patch = {'search': new_content, 'replace': original_file_content}
-
-    return {
-        'ok': True,
-        'new_content': new_content,
-        'original_content': original_file_content,
-        'reverse_patch': reverse_patch,
-        'position': position,
-        'anchor_line': file_content[:anchor_idx].count('\n') + 1,
-        'inserted_lines': content.count('\n') + 1,
-        'old_lines': file_content.count('\n') + 1,
-        'notes': fin['notes'],
-        'warning': fin['warning'],
-    }
-
-
-def _insert_result_from_comp(rel_path, comp, description):
-    """Build the success result dict + logging for one computed insert (no I/O)."""
-    new_lines = comp['new_content'].count('\n') + 1
-    result = {
-        'ok': True, 'action': 'insert_content', 'path': rel_path,
-        'position': comp['position'],
-        'anchorLine': comp['anchor_line'],
-        'linesInserted': comp['inserted_lines'],
-        'oldLines': comp['old_lines'], 'newLines': new_lines,
-        'description': description,
-    }
-    if comp['notes']:
-        result['echoRepairs'] = comp['notes']
-        for _note in comp['notes']:
-            logger.info('[EditEchoRepair] %s: %s', rel_path, _note)
-    if comp['warning']:
-        result['syntaxWarning'] = comp['warning']
-        logger.warning('[SyntaxGuard] %s', comp['warning'])
-    logger.info('insert_content: %s (%d lines inserted %s anchor at L%d, %dL → %dL)',
-                 rel_path, comp['inserted_lines'], comp['position'], comp['anchor_line'],
-                 comp['old_lines'], new_lines)
-    return result
-
-
-def _commit_insert(target, base, rel_path, comp, description='', conv_id=None, task_id=None):
-    """Atomic write + freshness/advisory + undo for one computed insert."""
-    try:
-        _write_with_undo(target, comp['new_content'], base, rel_path,
-                         comp['original_content'], mod_type='apply_diff',
-                         reverse_patch=comp['reverse_patch'], conv_id=conv_id, task_id=task_id)
-        _touch_for_vscode(target)
-        _record_write_freshness(conv_id, target, comp['new_content'].encode('utf-8'))
-        return _insert_result_from_comp(rel_path, comp, description)
-    except SessionLockBusy as e:
-        return _journal_busy_failure('insert_content', rel_path, e)
-    except _AppliedWriteFailure as e:
-        return _applied_write_failure('insert_content', rel_path, e)
-    except Exception as e:
-        logger.error('[Tools] insert_content write failed for %s: %s', rel_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path,
-                'errorKind': EK_WRITE_FAILED}
-
-
-def _insert_one(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None,
-                allow_outside=False):
-    """Insert content before or after an anchor string in a file.
-
-    Args:
-        base: Project base path.
-        rel_path: Relative file path.
-        anchor: Literal string to locate the insertion point.
-        content: New content to insert.
-        position: 'before' or 'after' the anchor.
-        description: Optional description.
-        conv_id: Conversation ID for undo tracking.
-        task_id: Task ID for undo tracking.
-
-    Returns:
-        dict with ok, action, path, error (on failure), or ok + line info (on success).
-    """
-    try:
-        target = _resolve_write_path(base, rel_path, conv_id=conv_id,
-                                     allow_outside=allow_outside)
-    except ValueError as e:
-        logger.debug('[Tools] insert_content path rejected %s: %s', rel_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e), 'action': 'insert_content', 'path': rel_path,
-                'errorKind': EK_PATH_INVALID}
-
-    if not os.path.isfile(target):
-        return {'ok': False, 'error': f'File not found: {rel_path}',
-                'action': 'insert_content', 'path': rel_path,
-                'errorKind': EK_FILE_NOT_FOUND}
-
-    try:
-        file_content = _read_original_text(target)
-    except Exception as e:
-        logger.warning('[Tools] insert_content read failed for %s: %s', rel_path, e, exc_info=True)
-        return {'ok': False, 'error': f'Cannot read file: {e}',
-                'action': 'insert_content', 'path': rel_path,
-                'errorKind': EK_READ_FAILED}
-
-    comp = _compute_insert(file_content, rel_path, anchor, content,
-                           position=position, abs_path=target)
-    if not comp['ok']:
-        return comp
-    return _commit_insert(target, base, rel_path, comp, description=description,
-                          conv_id=conv_id, task_id=task_id)
-
-
-@_with_workspace_writer
-def tool_insert_content(base, rel_path, anchor, content, position='after', description='', conv_id=None, task_id=None,
-                        allow_outside=False):
-    """Insert content before or after an anchor string (single edit entry point)."""
-    return _insert_one(base, rel_path, anchor, content, position, description, conv_id, task_id=task_id,
-                       allow_outside=allow_outside)
-
-
-@_with_workspace_writer
-def tool_insert_contents(base_path, edits, conv_id=None, task_id=None,
-                         allow_outside=False):
-    """Apply multiple insert_content edits in one batch."""
-    if not edits:
-        return 'No edits provided.'
-
-    results = []
-    ok_count = 0
-    partial_count = 0
-    fail_count = 0
-
-    for i, edit in enumerate(edits, 1):
-        if not isinstance(edit, dict):
-            results.append(_invalid_edit_entry_msg(i, edit))
-            fail_count += 1
-            continue
-
-        rp = edit.get('path', '')
-        anchor = edit.get('anchor', '')
-        content = edit.get('content', '')
-        position = edit.get('position', 'after')
-        desc = edit.get('description', '')
-
-        if not rp or not anchor:
-            results.append(f'[{i}] FAIL [{EK_INVALID_EDIT}] Missing required field (path or anchor)')
-            fail_count += 1
-            continue
-
-        if position not in ('before', 'after'):
-            results.append(
-                f'[{i}] FAIL [{EK_INVALID_EDIT}] Invalid position: '
-                f'{position} (must be "before" or "after")')
-            fail_count += 1
-            continue
-
-        try:
-            bp, resolved_rp = _resolve_base(base_path, rp)
-        except ValueError as _rve:
-            logger.debug('[write_tools] tool_insert_contents caught %s: %s', type(_rve).__name__, _rve)
-            fail_count += 1
-            results.append(f'[{i}] FAIL {rp} [{EK_PATH_INVALID}]: {_rve}')
-            continue
-        result = _insert_one(bp, resolved_rp, anchor, content, position, desc, conv_id, task_id=task_id,
-                             allow_outside=allow_outside)
-
-        partial_count += int(bool(result.get('mutationApplied')))
-        if result['ok']:
-            ok_count += 1
-            extra = ''.join(f' [{n}]' for n in result.get('echoRepairs') or [])
-            if result.get('syntaxWarning'):
-                extra += ' ' + result['syntaxWarning']
-            results.append(
-                f'[{i}] OK {result["path"]}: {result["linesInserted"]} lines inserted '
-                f'{result["position"]} anchor at L{result["anchorLine"]} '
-                f'({result["oldLines"]}L → {result["newLines"]}L){extra}'
-                + (f' — {desc}' if desc else '')
-            )
-        else:
-            fail_count += 1
-            results.append(f'[{i}] FAIL {rp}{_fail_tag(result)}: {result["error"]}')
-
-    header = f'Inserted {ok_count}/{ok_count + fail_count} edits'
-    if fail_count:
-        header += f' ({fail_count} failed)'
-    if partial_count:
-        header = header.replace('Applied ', 'Completed ', 1).replace('Inserted ', 'Completed ', 1)
-        header += f'; {partial_count} edits were applied without confirmed undo'
-    return header + '\n' + '\n'.join(results)
-
-
 # ═══════════════════════════════════════════════════════
 #  edit_file — unified model-facing edit entry point
 # ═══════════════════════════════════════════════════════
 
-_EDIT_OPERATIONS = frozenset({'insert_after', 'insert_before', 'replace'})
-
-
-def _log_edit_efficiency(operation, anchor, content, *, ok):
+def _log_edit_efficiency(anchor, content, *, ok):
     """Emit the per-edit efficiency line for the unified edit_file surface."""
     logger.info(
-        '[EditEfficiency] surface=edit_file operation=%s ok=%s '
+        '[EditEfficiency] surface=edit_file ok=%s '
         'anchor_chars=%d content_chars=%d arg_chars=%d',
-        operation, bool(ok), len(anchor), len(content),
-        len(anchor) + len(content),
+        bool(ok), len(anchor), len(content), len(anchor) + len(content),
     )
 
 
@@ -2267,8 +1645,8 @@ def _admit_edit_groups(groups, conv_id, stack):
     return options, errors
 
 
-def _edit_group_failure(operation, path, error):
-    action = 'apply_diff' if operation == 'replace' else 'insert_content'
+def _edit_group_failure(path, error):
+    action = 'apply_diff'
     if isinstance(error, SessionLockBusy):
         return _journal_busy_failure(action, path, error)
     if isinstance(error, _AppliedWriteFailure):
@@ -2280,9 +1658,9 @@ def _edit_group_failure(operation, path, error):
 @_with_workspace_writer
 def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
                    allow_outside=False, atomic=True, batch_path=None):
-    """Preflight a sequential mixed batch, then publish one transition per file.
+    """Preflight a sequential replacement batch, then publish one transition per file.
 
-    Atomic preflight is the default: an invalid operation, destination or match
+    Atomic preflight is the default: an invalid edit, destination or match
     prevents every write. Only explicit ``atomic=False`` permits legacy partial
     application. This does not promise cross-file rollback after I/O failure.
     Later edits see earlier in-memory changes; receipts keep original indexes.
@@ -2303,13 +1681,12 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
     for i, edit in enumerate(edits, 1):
         if not isinstance(edit, dict):
             strings[i] = _invalid_edit_entry_msg(
-                i, edit, '{path, operation, anchor, content}')
+                i, edit, '{anchor, content}')
             continue
 
         own_path = edit.get('path')
         rp = own_path if isinstance(own_path, str) and own_path.strip() \
             else (batch_path or '')
-        operation = edit.get('operation', '')
         anchor = edit.get('anchor', '')
         content = edit.get('content')
         desc = edit.get('description', '')
@@ -2322,17 +1699,13 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
                 'Missing required field (path, anchor, or content) — name the '
                 'file once in the batch `path`, or on this edit')
             continue
-        if not isinstance(operation, str) or operation not in _EDIT_OPERATIONS:
-            strings[i] = (f'[{i}] FAIL [{EK_INVALID_EDIT}] Invalid operation: '
-                          f'{operation!r} '
-                          '(must be insert_after, insert_before, or replace)')
+        # Input repair refuses these before dispatch; a caller that bypasses it
+        # must not have an insert executed as a replace that drops its anchor.
+        retired = retired_edit_operation_error(edit.get('operation'))
+        if retired:
+            strings[i] = f'[{i}] FAIL [{EK_INVALID_EDIT}] {retired}'
             continue
-        # ``replace_all`` has no meaning for an insertion.  Normalize it away
-        # instead of rejecting a unique insertion and spending another model
-        # round on a parameter-only correction.  _compute_insert still rejects
-        # ambiguous anchors, so a stray true value never enables multi-site
-        # insertion.
-        replace_all = operation == 'replace' and bool(edit.get('replace_all'))
+        replace_all = bool(edit.get('replace_all'))
         try:
             bp, resolved_rp = _resolve_base(base_path, rp, conv_id=conv_id)
         except ValueError as exc:
@@ -2342,9 +1715,8 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
 
         prepared.append({
             'i': i, 'rp': rp, 'resolved_rp': resolved_rp, 'bp': bp,
-            'operation': operation, 'anchor': anchor, 'content': content,
+            'anchor': anchor, 'content': content,
             'desc': desc, 'replace_all': replace_all,
-            'position': ('after' if operation == 'insert_after' else 'before'),
         })
 
     # Resolve canonical targets and group edits by file.
@@ -2362,9 +1734,9 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
     # Path failures join the same whole-batch preflight, before any publication.
     for p in prepared:
         if 'resolve_err' in p:
-            _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+            _log_edit_efficiency(p['anchor'], p['content'], ok=False)
             strings[p['i']] = (
-                f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}] '
+                f'[{p["i"]}] FAIL {p["rp"]} [replace] '
                 f'[{EK_PATH_INVALID}]: {p["resolve_err"]}')
 
     return _execute_edit_file_plan(
@@ -2415,7 +1787,7 @@ def _admitted_edit_plan(plan, admission_errors):
     if target not in admission_errors:
         return plan
     comps = [(p, None, err or _edit_group_failure(
-        p['operation'], p['resolved_rp'], admission_errors[target]))
+        p['resolved_rp'], admission_errors[target]))
         for p, _comp, err in comps]
     return target, ops, before_batch, current, comps, []
 
@@ -2427,9 +1799,9 @@ def _plan_edit_groups(groups, strings):
     for target, ops in groups.items():
         if not os.path.isfile(target):
             for p in ops:
-                _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+                _log_edit_efficiency(p['anchor'], p['content'], ok=False)
                 strings[p['i']] = (
-                    f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}] '
+                    f'[{p["i"]}] FAIL {p["rp"]} [replace] '
                     f'[{EK_FILE_NOT_FOUND}]: '
                     f'File not found: {p["resolved_rp"]}')
                 fail_count += 1
@@ -2439,9 +1811,9 @@ def _plan_edit_groups(groups, strings):
         except Exception as e:
             logger.warning('[Tools] edit_file read failed for %s: %s', target, e, exc_info=True)
             for p in ops:
-                _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+                _log_edit_efficiency(p['anchor'], p['content'], ok=False)
                 strings[p['i']] = (
-                    f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}] '
+                    f'[{p["i"]}] FAIL {p["rp"]} [replace] '
                     f'[{EK_READ_FAILED}]: '
                     f'Cannot read file: {e}')
                 fail_count += 1
@@ -2451,13 +1823,8 @@ def _plan_edit_groups(groups, strings):
         comps = []
         recs = []
         for p in ops:
-            if p['operation'] == 'replace':
-                comp = _compute_diff(current, p['resolved_rp'], p['anchor'],
-                                     p['content'], replace_all=p['replace_all'])
-            else:
-                comp = _compute_insert(current, p['resolved_rp'], p['anchor'],
-                                       p['content'], position=p['position'],
-                                       syntax_guard=False)
+            comp = _compute_diff(current, p['resolved_rp'], p['anchor'],
+                                 p['content'], replace_all=p['replace_all'])
             if comp['ok']:
                 current = comp['new_content']
                 recs.append({
@@ -2495,44 +1862,37 @@ def _report_edit_plans(plans, strings, total, fail_count, write_errors, *, rejec
             if comp is not None:
                 if rejected:
                     strings[p['i']] = (
-                        f'[{p["i"]}] SKIP {p["rp"]} [{p["operation"]}]: '
+                        f'[{p["i"]}] SKIP {p["rp"]} [replace]: '
                         'Not applied because atomic preflight failed.')
                     skipped_count += 1
-                    _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+                    _log_edit_efficiency(p['anchor'], p['content'], ok=False)
                     continue
                 if write_err is None:
-                    if p['operation'] == 'replace':
-                        result = _diff_result_from_comp(
-                            p['resolved_rp'], comp, p['desc'], syntax_guard=False)
-                    else:
-                        result = _insert_result_from_comp(p['resolved_rp'], comp, p['desc'])
+                    result = _diff_result_from_comp(
+                        p['resolved_rp'], comp, p['desc'], syntax_guard=False)
                 else:
-                    result = _edit_group_failure(p['operation'], p['resolved_rp'], write_err)
+                    result = _edit_group_failure(p['resolved_rp'], write_err)
             else:
                 result = err_dict
-            _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=result['ok'])
+            _log_edit_efficiency(p['anchor'], p['content'], ok=result['ok'])
 
             partial_count += int(bool(result.get('mutationApplied')))
             if result['ok']:
                 ok_count += 1
-                if p['operation'] == 'replace':
-                    detail = f'{result["linesChanged"]} lines changed'
-                    if result.get('replacedCount'):
-                        detail += f' [{result["replacedCount"]} occurrences]'
-                else:
-                    detail = (f'{result["linesInserted"]} lines inserted '
-                              f'{result["position"]} anchor at L{result["anchorLine"]}')
-                extra = ''.join(f' [{n}]' for n in result.get('echoRepairs') or [])
+                detail = f'{result["linesChanged"]} lines changed'
+                if result.get('replacedCount'):
+                    detail += f' [{result["replacedCount"]} occurrences]'
+                extra = ''
                 if result.get('syntaxWarning'):
-                    extra += ' ' + result['syntaxWarning']
+                    extra = ' ' + result['syntaxWarning']
                 strings[p['i']] = (
-                    f'[{p["i"]}] OK {result["path"]} [{p["operation"]}]: {detail} '
+                    f'[{p["i"]}] OK {result["path"]} [replace]: {detail} '
                     f'({result["oldLines"]}L → {result["newLines"]}L){extra}'
                     + (f' — {p["desc"]}' if p['desc'] else ''))
             else:
                 fail_count += 1
                 strings[p['i']] = (
-                    f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}]'
+                    f'[{p["i"]}] FAIL {p["rp"]} [replace]'
                     f'{_fail_tag(result)}: {result["error"]}')
 
         # Only committed final bytes can justify follow-up work. Checking
@@ -2554,6 +1914,6 @@ def _report_edit_plans(plans, strings, total, fail_count, write_errors, *, rejec
     if rejected:
         header += f'; atomic preflight failed; no files written; {skipped_count} skipped'
     if partial_count:
-        header = header.replace('Applied ', 'Completed ', 1).replace('Inserted ', 'Completed ', 1)
+        header = header.replace('Applied ', 'Completed ', 1)
         header += f'; {partial_count} edits were applied without confirmed undo'
     return header + '\n' + '\n'.join(results)

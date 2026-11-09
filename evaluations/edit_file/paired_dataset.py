@@ -24,9 +24,8 @@ CODEX_REFERENCES = {
 }
 
 
-def _edit(path, anchor, content, operation="replace", **kwargs):
-    return {"path": path, "operation": operation, "anchor": anchor,
-            "content": content, **kwargs}
+def _edit(path, anchor, content, **kwargs):
+    return {"path": path, "anchor": anchor, "content": content, **kwargs}
 
 
 def _patch(path, body):
@@ -55,9 +54,9 @@ def _existing(case_id, edit, body):
 
 
 PAIRED_CASES = [
-    _existing("insert_between_blocks", _edit("sample.txt", "A", "B", "insert_after"),
+    _existing("insert_between_blocks", _edit("sample.txt", "A", "A\nB"),
               "@@\n A\n+B\n C\n"),
-    _existing("add_import", _edit("app.py", "import os", "import json", "insert_after"),
+    _existing("add_import", _edit("app.py", "import os", "import os\nimport json"),
               "@@\n import os\n+import json\n \n VALUE = 1\n"),
     _existing("replace_value", _edit("config.py", "TIMEOUT = 10", "TIMEOUT = 30"),
               "@@\n-TIMEOUT = 10\n+TIMEOUT = 30\n"),

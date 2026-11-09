@@ -8,7 +8,7 @@ from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.llm import AbortedError
 from lib.llm.conversion import ProtocolConversionError
 from lib.llm.llm_errors import _ERR_BODY_LIMIT, ModelRefusalError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
 from lib.tasks_pkg.manager import _events as task_events
 
@@ -40,7 +40,7 @@ def call_configured_fallback(
     from lib.tasks_pkg.message_input_receipts import MessageInputScopeError
 
     try:
-        tid = task['id'][:8]
+        tid = task_log_tag(task['id'])
         e = error
         err_str = str(e)[:_ERR_BODY_LIMIT]
         # ── Fallback: switch to configured fallback model ──

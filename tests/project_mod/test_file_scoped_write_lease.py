@@ -395,7 +395,7 @@ def test_registry_and_descriptor_growth_only_tracks_active_holders(repo):
         _clean()
 
 
-@pytest.mark.parametrize('route', ['write', 'append', 'diff', 'diffs', 'insert', 'inserts', 'upload'])
+@pytest.mark.parametrize('route', ['write', 'append', 'diff', 'diffs', 'upload'])
 def test_file_tools_hold_only_the_edit_mutex_through_publish(repo, monkeypatch, route):
     from lib.project_mod.file_edit_mutex import _entries
     monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
@@ -420,10 +420,6 @@ def test_file_tools_hold_only_the_edit_mutex_through_publish(repo, monkeypatch, 
             result = _ops.tool_apply_diff(base, 'b.txt', 'b', 'changed')
         elif route == 'diffs':
             result = _ops.tool_apply_diffs(base, [{'path': 'b.txt', 'search': 'b', 'replace': 'changed'}])
-        elif route == 'insert':
-            result = _ops.tool_insert_content(base, 'b.txt', 'b', 'changed')
-        elif route == 'inserts':
-            result = _ops.tool_insert_contents(base, [{'path': 'b.txt', 'anchor': 'b', 'content': 'changed'}])
         else:
             result = _ops.save_uploaded_file(base, 'b.txt', b'changed\n', on_conflict='overwrite')
         if isinstance(result, dict):

@@ -95,6 +95,33 @@ def test_gateway_schema_teaches_search_execute_and_javascript_precisely():
     assert 'No imports/timers/files/processes/network' in code['description']
 
 
+@pytest.mark.parametrize('name', ['hidden_tool', 'mcp__docs__lookup'])
+def test_named_tool_choice_restores_only_its_live_authorized_schema(name):
+    hidden = _tool(name, properties={'id': {'type': 'string'}}, required=['id'])
+    visible = [_tool(f'tool_{index}')
+               for index in range(tool_gateway.LOCAL_TOOL_SEARCH_MIN_FUNCTIONS)]
+    request = {
+        'model': 'compatible-model',
+        'messages': [{'role': 'user', 'content': 'read the result'}],
+        'tools': visible, '_tool_wire_catalog': visible,
+        '_executable_tool_catalog': visible + [hidden],
+        '_tool_discovery_policy_by_name': {name: 'searchable'},
+        '_tool_search_catalog_size': len(visible) + 1,
+        '_tool_searchable_count': 1, '_tool_search_mode': 'local',
+        'tool_choice': {'type': 'function', 'function': {'name': name}},
+    }
+    plan = prepare_request(
+        request, api_protocol='openai', base_url='https://compatible.example/v1')
+    assert hidden in plan.body['tools']
+    assert plan.body['tool_choice'] == request['tool_choice']
+    assert name not in _names(visible), 'projection must not mutate the input'
+
+    revoked = prepare_request(
+        {**request, '_executable_tool_catalog': visible},
+        api_protocol='openai', base_url='https://compatible.example/v1')
+    assert name not in _names(revoked.body['tools'])
+
+
 def test_search_result_names_the_stable_execution_gateway():
     result = search_executable_catalog([_tool('read_doc')], 'read document')
     assert result['execute_with'] == EXECUTE_TOOLS_NAME

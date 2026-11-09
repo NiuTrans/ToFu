@@ -637,8 +637,9 @@ def _attempt_stop(monkeypatch, c, lock):
     monkeypatch.setattr(turns, '_notify_abort_busy_projection',
                         lambda conversation_id, user_id: notified.append(conversation_id))
     withdraw = recovery.revoke_conversation_dispatch
-    def stop(conversation_id, *, user_id):
-        return withdraw(conversation_id, user_id=user_id, conversations=c.conversations,
+    def stop(conversation_id, *, user_id, occurred_at=None):
+        return withdraw(conversation_id, user_id=user_id, occurred_at=occurred_at,
+            conversations=c.conversations,
             repository_factory=lambda owner, project: c.repo,
             lock_factory=lambda project: lock[0](project), stop_client=c.client)
     monkeypatch.setattr(recovery, 'revoke_conversation_dispatch', stop)
@@ -664,6 +665,38 @@ def test_cancelled_attempt_confirms_stop_when_only_grant_revocation_is_contended
     assert stop.abort() == {'attemptId': 'attempt', 'status': 'interrupted',
                             'alreadyTerminal': True, 'dispatchWithdrawal': 'complete'}
     assert c.repo.read(grant['id'])['grant']['revoked'] is True
+
+
+def test_stop_of_an_ended_attempt_never_withdraws_later_work(context, monkeypatch):
+    """A repeated Stop on a settled Attempt is not a new conversation-wide Stop.
+
+    ``control_session`` already refuses to plant a fresh withdrawal for a
+    settled Attempt; the shared abort entry point did the opposite: it recorded
+    a new watermark and revoked every earlier grant in the conversation, even
+    grants created after the human's original Stop. The acknowledged watermark
+    is monotonic, so the retry must still retire the original withdrawal, but
+    it must not move it forward.
+    """
+    from contextlib import nullcontext
+    c = context
+    first = c.repo.authorize(c.request, c.principal, 'first-grant')
+    binding = c.repo.admission(first['id'])
+    stop = _attempt_stop(monkeypatch, c, [lambda project: nullcontext()])
+    # The human's original Stop settled the attempt; a grant delegated later
+    # must not inherit a fresh withdrawal from a repeated Stop of that attempt.
+    c.now[0] = 1002
+    stop.row.update(status='interrupted', settledAt=int(c.now[0] * 1000))
+    first = c.repo.authorize(c.request, c.principal, 'first-grant')
+    c.now[0] = 1005
+    later = c.repo.authorize({**c.request, 'brief': 'new work after the Stop'},
+                             c.principal, 'later-grant')
+    stop.abort()
+    assert c.repo.read(first['id'])['grant']['revoked'] is True
+    assert c.repo.read(later['id'])['grant']['revoked'] is False
+    assert c.repo.validate(c.repo.admission(later['id']))['id'] == later['id']
+    # The first withdrawal is still retired from its original watermark.
+    with pytest.raises(Exception, match='Grant revoked|durable conversation Stop'):
+        c.repo.validate(binding)
 
 
 def test_cancelled_attempt_is_not_confirmed_when_stop_watermark_fails(context, monkeypatch):
@@ -703,10 +736,11 @@ def test_http_stop_answers_ok_only_once_the_stop_watermark_is_durable(
             else (lambda project: nullcontext())]
     withdraw = recovery.revoke_conversation_dispatch
 
-    def stop(conversation, *, user_id):
+    def stop(conversation, *, user_id, occurred_at=None):
         assert (conversation, user_id) == (conversation_id, 1)
         # Bridge the HTTP owner to this fixture's owner-scoped dispatch ports.
-        return withdraw('recipient', user_id=7, conversations=c.conversations,
+        return withdraw('recipient', user_id=7, occurred_at=occurred_at,
+            conversations=c.conversations,
             repository_factory=lambda owner, project: c.repo,
             lock_factory=lambda project: lock[0](project), stop_client=c.client)
 
@@ -767,3 +801,27 @@ def test_native_attempt_stop_calls_durable_withdrawal_after_cancel_and_on_termin
     row['status'] = 'interrupted'; calls.clear()
     assert turns.abort_attempt('attempt', user_id=7)['alreadyTerminal']
     assert calls == [('recipient', 7)]
+
+
+def test_terminal_attempt_stop_reuses_the_original_watermark(monkeypatch):
+    """The retry still retires the original withdrawal; it never moves it forward."""
+    from lib import turn_lifecycle as turns
+    row = {'attemptId': 'attempt', 'conversationId': 'recipient', 'turnId': 'turn',
+           'taskId': 'task', 'status': 'running'}
+    monkeypatch.setattr(turns, '_turn_client', lambda **kw: SimpleNamespace(query=lambda *a, **kw: deepcopy(row)))
+    monkeypatch.setattr('lib.tasks_pkg.manager.cancellation.cancel_task', lambda *a, **kw: {'found': True})
+    monkeypatch.setattr(turns, '_notify_abort_busy_projection', lambda *a, **kw: None)
+    stamps = []
+    monkeypatch.setattr(recovery, 'revoke_conversation_dispatch',
+        lambda conv, *, user_id, occurred_at=None, **kw: stamps.append(occurred_at) or
+            {'revoked': 0, 'withdrawal': 'complete'})
+    turns.abort_attempt('attempt', user_id=7)
+    row['status'] = 'interrupted'
+    turns.abort_attempt('attempt', user_id=7)
+    assert stamps == [None, 0.0]
+    # No settlement evidence means no new watermark timestamp at all; with
+    # evidence, the terminal retry is dated at that settlement.
+    stamps.clear()
+    row['settledAt'] = 1_700_000_000_000
+    turns.abort_attempt('attempt', user_id=7)
+    assert stamps == [1_700_000_000.0]

@@ -6,7 +6,7 @@ through _request_metadata, so the shared final tool projection matches an
 ordinary round on that model."""
 
 from lib import llm
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from ._request_metadata import attach_rebuilt_request_metadata
 
@@ -25,7 +25,7 @@ def prepare_fallback_body(
     round_num=0,
 ):
     """Re-admit the destination with the round's request metadata."""
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     _vision_fallback_from = (
         original_model
         if (

@@ -29,6 +29,7 @@ Assertions:
      path-filtered to ``android/**`` (a backend-only push must not build APKs).
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -57,7 +58,8 @@ def test_backend_default_url_filename_matches_asset_constant():
     # The URL's trailing path segment must be the canonical asset name.
     assert DEFAULT_MOBILE_CLIENT_URL.rsplit("/", 1)[-1] == MOBILE_CLIENT_APK_ASSET
     # And it must be a direct-download deep link, not the wrong-platform page.
-    assert "/releases/latest/download/" in DEFAULT_MOBILE_CLIENT_URL
+    assert "/releases/download/" in DEFAULT_MOBILE_CLIENT_URL
+    assert "/latest/" not in DEFAULT_MOBILE_CLIENT_URL
     assert not DEFAULT_MOBILE_CLIENT_URL.rstrip("/").endswith("/releases/latest")
     # A real APK filename, so a phone treats the tap as a download.
     assert MOBILE_CLIENT_APK_ASSET.endswith(".apk")
@@ -134,16 +136,9 @@ def test_ci_workflow_tag_namespace_and_path_filter():
     )
 
 
-def test_backend_version_badge_matches_gradle_version_name():
-    """The About & Update card's Android version badge comes from
-    ``MOBILE_CLIENT_VERSION``. It must equal the Gradle ``versionName`` so the
-    badge always names the APK the user actually downloads.
-    """
-    assert _GRADLE.is_file(), f"Android Gradle file missing: {_GRADLE}"
-    text = _GRADLE.read_text(encoding="utf-8")
-    m = re.search(r'versionName\s*=\s*"([^"]+)"', text)
-    assert m, f"no versionName assignment found in {_GRADLE}"
-    assert m.group(1) == MOBILE_CLIENT_VERSION, (
-        f"MOBILE_CLIENT_VERSION={MOBILE_CLIENT_VERSION!r} drifted from Gradle "
-        f"versionName={m.group(1)!r} — bump both when releasing a new APK"
-    )
+def test_backend_version_badge_matches_published_artifact():
+    """Source versions can advance before an APK is actually published."""
+    receipt = json.loads((_GRADLE.parents[1] / 'published-release.json').read_text())
+    assert MOBILE_CLIENT_VERSION == receipt['versionName']
+    assert DEFAULT_MOBILE_CLIENT_URL == receipt['url']
+    assert DEFAULT_MOBILE_CLIENT_URL.endswith('/' + receipt['tag'] + '/' + receipt['filename'])

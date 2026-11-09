@@ -361,7 +361,7 @@ def compact_trace_document(document, *, source=None):
             aggregate_keys = (
                 'totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
                 'approvalWaitMs', 'flowStepMs', 'orchestrationMs',
-                'unattributedMs', 'ttftMs',
+                'unattributedMs', 'ttftMs', 'failedAttemptMs',
                 'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
                 'startupMs', 'roundPrepMs', 'roundSettleMs', 'finalizeMs',
             )

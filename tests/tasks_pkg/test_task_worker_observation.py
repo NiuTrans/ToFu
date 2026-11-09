@@ -55,6 +55,18 @@ def test_completed_artifact_retains_live_worker_then_starts_normal_ttl(runtime, 
     assert runtime.get(task['id']) is None
 
 
+def test_unrecorded_exit_evidence_survives_reclamation_until_its_receipt(runtime):
+    task = runtime.create(user_id=1)
+    assert runtime.finish(task['id'], result='body')
+    task['_exitReceiptPending'] = True
+    assert runtime.cleanup_stale(max_age=0) == 0
+    runtime.create(user_id=1)
+    assert runtime.get(task['id']) is task  # capacity is eviction-only
+    task.pop('_exitReceiptPending')
+    assert runtime.cleanup_stale(max_age=0) >= 1
+    assert runtime.get(task['id']) is None
+
+
 @pytest.mark.parametrize('failure', [ValueError('worker fault'), KeyboardInterrupt()])
 def test_worker_observation_retires_on_every_exit(runtime, failure):
     task = runtime.create(user_id=1)

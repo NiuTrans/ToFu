@@ -1,7 +1,7 @@
 """Internal exports carry every shareable capability and credential.
 
 Owner decision 2026-11-01: ``export.py --mode internal`` (and ``--handoff``)
-must arrive able to use the Meituan middle platform with no manual MCP,
+must arrive able to use the YourProvider middle platform with no manual MCP,
 skill or API-key setup. These tests pin the new contract, including the
 things that must still stay behind for FUNCTIONAL reasons (per-person SSO
 identity, per-install keys, personal history) and the packaging defects that
@@ -185,7 +185,7 @@ def test_memories_carry_lessons_but_not_the_user_profile(project, tmp_path):
     memories = project / 'data' / 'memories'
     (memories / 'global').mkdir(parents=True)
     (memories / 'global' / 'lesson.md').write_text(
-        '---\ntags: [meituan, mcp]\n---\nlesson\n', encoding='utf-8')
+        '---\ntags: [yourprovider, mcp]\n---\nlesson\n', encoding='utf-8')
     (memories / 'global' / 'tofu-debug.md').write_text(
         '---\ntags: [refactor, frontend]\n---\nproject debug note\n', encoding='utf-8')
     (memories / '.tofu_user_profile.md').write_text('personal profile', encoding='utf-8')
@@ -193,7 +193,7 @@ def test_memories_carry_lessons_but_not_the_user_profile(project, tmp_path):
     (memories / 'profiles' / '1.json').write_text('{}', encoding='utf-8')
     (project / '.tofu' / 'memories').mkdir(parents=True)
     (project / '.tofu' / 'memories' / 'project-lesson.md').write_text(
-        '---\ntags: [sandbox, meituan]\n---\np\n', encoding='utf-8')
+        '---\ntags: [sandbox, yourprovider]\n---\np\n', encoding='utf-8')
     internal._copy_carried_memories(tmp_path, 'internal')
     assert (tmp_path / 'data' / 'memories' / 'global' / 'lesson.md').exists()
     assert (tmp_path / '.tofu' / 'memories' / 'project-lesson.md').exists()
@@ -237,7 +237,7 @@ def test_skill_export_keeps_vendored_engine_and_drops_session_state(project, tmp
 def test_carried_model_routing_is_staged_owner_only(project, tmp_path, monkeypatch):
     monkeypatch.setattr('export_pkg._live_state.read_carried_model_routing', lambda: {
         'document': {'contract_version': 'tofu.model-routing/v2', 'revision': 7,
-                     'providers': [{'provider_id': 'sankuai'}],
+                     'providers': [{'provider_id': 'example-corp'}],
                      'credentials': [{'credential_id': 'c1', 'kind': 'api_key',
                                       'secret_reference': 'mrs_1'}]},
         'secrets': {'c1': 'current-key'},

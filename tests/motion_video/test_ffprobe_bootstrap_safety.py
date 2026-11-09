@@ -6,7 +6,7 @@ import hashlib
 import io
 import os
 from types import SimpleNamespace
-import urllib.request
+from lib.http_transport import client as http_client
 import zipfile
 
 import pytest
@@ -21,7 +21,14 @@ class _Response:
             'Content-Length': str(len(body) if declared is None else declared)
         }
 
-    def read(self, size=-1):
+    @property
+    def raw(self):
+        return self
+
+    def raise_for_status(self):
+        pass
+
+    def read(self, size=-1, **_kwargs):
         return self._stream.read(size)
 
     def __enter__(self):
@@ -49,7 +56,7 @@ def _wire(monkeypatch, tmp_path, body, *, run_ok=True):
     monkeypatch.setattr(env, 'media_shim_dir', lambda: str(tmp_path))
     monkeypatch.setattr(env, '_FFPROBE_ARCHIVE_SHA256',
                         hashlib.sha256(body).hexdigest())
-    monkeypatch.setattr(urllib.request, 'urlopen',
+    monkeypatch.setattr(http_client, 'http_get',
                         lambda *_args, **_kwargs: _Response(body))
     monkeypatch.setattr(env.subprocess, 'run', lambda *_args, **_kwargs:
                         SimpleNamespace(
@@ -105,7 +112,7 @@ def test_declared_oversize_is_rejected_before_read(monkeypatch, tmp_path):
     archive = _zip()
     monkeypatch.setattr(env, 'ffprobe_bin', lambda: '')
     monkeypatch.setattr(env, 'media_shim_dir', lambda: str(tmp_path))
-    monkeypatch.setattr(urllib.request, 'urlopen', lambda *_args, **_kwargs:
+    monkeypatch.setattr(http_client, 'http_get', lambda *_args, **_kwargs:
                         _Response(archive, env._FFPROBE_ARCHIVE_MAX_BYTES + 1))
 
     assert env.ensure_ffprobe() == ''

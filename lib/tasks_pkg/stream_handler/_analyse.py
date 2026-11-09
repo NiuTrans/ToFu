@@ -309,6 +309,28 @@ def _analyse_tool_call_round(assistant_msg, last_finish_reason, task, tid, model
     return result
 
 
+def _deliberate_silence_or_denied(task, assistant_msg, messages, last_finish_reason, usage,
+                                 result, round_num):
+    """Deliberate silence, or a denied declaration whose public text was reset.
+
+    ``project_terminal_control_text`` keeps the provider's declaration for
+    replay; a refused one resets public text to empty, so the ordinary
+    empty-stop recovery must treat it as an empty stop rather than an answer
+    that would have shown the control token. Returns ``result`` when silence
+    was declared, ``True`` when it was refused, else ``None``.
+    """
+    from lib.tasks_pkg.stream_handler._router_silence import project_terminal_control_text
+    if last_finish_reason not in ('stop', 'end_turn') or (usage or {}).get('_stream_anomaly'):
+        return None
+    silent, rejected = project_terminal_control_text(
+        task, assistant_msg, messages, llm_round=round_num)
+    if silent:
+        result['action'] = 'break'
+        result['loop_exit_reason'] = f'deliberate_silence_round_{round_num}'
+        return result
+    return rejected or None
+
+
 def analyse_stream_result(
     assistant_msg, last_finish_reason, task, tid, model,
     round_num, _premature_retry_count, messages, usage=None,
@@ -387,12 +409,8 @@ def analyse_stream_result(
             return program_result
 
 
-        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
-        if (last_finish_reason in ('stop', 'end_turn') and not (usage or {}).get('_stream_anomaly')
-                and declare_silent_turn(task, assistant_msg, messages, llm_round=round_num)):
-            result['action'] = 'break'
-            result['loop_exit_reason'] = f'deliberate_silence_round_{round_num}'
-            return result
+        rejected_empty = _deliberate_silence_or_denied(task, assistant_msg, messages,
+                                          last_finish_reason, usage, result, round_num)
 
         from lib.tasks_pkg.stream_handler._terminal_recovery import (
             recover_abnormal_terminal,
@@ -419,6 +437,9 @@ def analyse_stream_result(
         (_trace_id, _resp_trace, _stream_elapsed_ms, _stream_anomaly,
          _empty_stop, _route_id, _route_mode, _failure_stage,
          _semantic_progress_timeout, _chunks_received) = _stream_diagnostics(usage)
+        # A denied silence declaration left no public text: recover it as an
+        # empty stop instead of settling an empty answer.
+        _empty_stop = _empty_stop or rejected_empty
 
         # Prefer observed chunk counts over the legacy elapsed/thinking
         # heuristic. Protocol-only empty replies share the zero-output

@@ -164,6 +164,7 @@ pub mod transaction;
 pub mod transaction_ir;
 mod turn;
 mod turn_projection_patch;
+mod generated_system_note_vocabulary;
 mod turn_projection_segments;
 pub mod turn_search_projection;
 mod turn_search_runtime;
@@ -197,3 +198,5 @@ mod worker_control;
 mod query_result_cache;
 #[cfg(test)]
 mod test_stop_vfs;
+#[cfg(test)]
+mod test_wal_gate_vfs;

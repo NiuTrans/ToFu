@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 from lib.error_envelope import BadRequest
 from lib.human_gate_contract import MAX_HUMAN_GATE_RESPONSE_LENGTH
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.human_gate_registry import (
     GATE_GUIDANCE,
     human_gate_registry,
@@ -72,7 +72,7 @@ def request_human_guidance(
     logger.info('[HumanGuidance] Request %s blocking (no timeout, '
                 'abort_poll=%.1fs, task=%s)', guidance_id,
                 _ABORT_POLL_INTERVAL,
-                task.get('id', '?')[:8] if task else 'none')
+                task_log_tag(task.get('id', '?')) if task else 'none')
     entry = human_gate_registry.register(
         GATE_GUIDANCE,
         guidance_id,

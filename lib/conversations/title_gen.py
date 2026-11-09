@@ -17,7 +17,6 @@ import re
 import time
 
 from lib.log import get_logger
-from lib.http_transport.ui_languages import UI_LANGUAGE_ENGLISH_NAMES
 
 logger = get_logger(__name__)
 
@@ -130,14 +129,8 @@ _SYSTEM_PROMPT_BASE = (
     'add a prefix like "Title:". Output ONLY the title text.'
 )
 
-# Per-UI-language title rule. When the caller passes an explicit interface
-# language we force the title into it; otherwise the title mirrors the
-# conversation's own language. Every selectable UI language has a rule.
-_LANG_RULES = {
-    code: f'- Write the title in {name}, regardless of the '
-          "conversation's language."
-    for code, name in UI_LANGUAGE_ENGLISH_NAMES.items()
-}
+# When the caller passes an explicit interface language we force the title
+# into it; otherwise the title mirrors the conversation's own language.
 _LANG_RULE_DEFAULT = (
     "- Use the SAME language as the user's message "
     '(Chinese title for a Chinese conversation, English for English).'
@@ -161,10 +154,16 @@ _LENGTH_RULE_DEFAULT = (
 
 def _system_prompt(lang: str | None) -> str:
     """Build the title system prompt, forcing output language when given."""
+    # The UI language manifest is a frontend asset outside the agent wheel,
+    # which imports this package without ever generating a title.
+    from lib.http_transport.ui_languages import UI_LANGUAGE_ENGLISH_NAMES
+
     key = (lang or '').lower()
-    rule = _LANG_RULES.get(key, _LANG_RULE_DEFAULT)
+    forced = key in UI_LANGUAGE_ENGLISH_NAMES
+    rule = (f'- Write the title in {UI_LANGUAGE_ENGLISH_NAMES[key]}, regardless '
+            "of the conversation's language." if forced else _LANG_RULE_DEFAULT)
     length = _LENGTH_RULES.get(
-        key, _WORD_LENGTH_RULE if key in _LANG_RULES else _LENGTH_RULE_DEFAULT)
+        key, _WORD_LENGTH_RULE if forced else _LENGTH_RULE_DEFAULT)
     return _SYSTEM_PROMPT_BASE.format(lang_rule=rule, length_rule=length)
 
 

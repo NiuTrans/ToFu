@@ -162,8 +162,8 @@ def _record(
     try:
         audit_log(
             'provider_prompt_admission',
-            conv=str(task.get('convId') or '')[:16],
-            task=str(task.get('id') or '')[:16],
+            conv=str(task.get('convId') or ''),
+            task=str(task.get('id') or ''),
             **evidence,
         )
     except Exception as exc:

@@ -195,7 +195,8 @@ def test_v3_registry_miss_preserves_owner_tombstone_and_projection(monkeypatch, 
     assert lifecycle.abort_attempt('attempt', user_id=7)['status'] == 'abort_signaled'
     assert tombstones == ([(task_id, {'source': 'turn_attempt_abort', 'user_id': 7})]
                           if task_id else [])
-    assert revoked == [('conv', {'user_id': 7})]
+    # A live Stop has no timestamp of its own: revocation uses its own clock.
+    assert revoked == [('conv', {'user_id': 7, 'occurred_at': None})]
     assert events[0][0]['_userId'] == 7
     assert events[0][0]['content'] == 'partial'
 

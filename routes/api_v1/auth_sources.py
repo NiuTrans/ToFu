@@ -112,7 +112,8 @@ def toggle_auth_source(domain):
     data = parse_body(exact=('enabled',))
     enabled = bool(data.get('enabled', True))
     if not set_enabled(domain, enabled):
-        return api_error(f'Unknown source: {domain}', status=404)
+        from lib.error_envelope import make_envelope
+        return api_error(make_envelope('not_found', detail=f'Unknown source: {domain}'), status=404)
     return api_ok({'domain': domain, 'enabled': enabled})
 
 
@@ -153,7 +154,8 @@ def auth_source_live_session(domain):
 def delete_auth_source(domain):
     from lib.auth_sources import delete_source
     if not delete_source(domain):
-        return api_error(f'Unknown source: {domain}', status=404)
+        from lib.error_envelope import make_envelope
+        return api_error(make_envelope('not_found', detail=f'Unknown source: {domain}'), status=404)
     return api_ok({'domain': domain})
 
 

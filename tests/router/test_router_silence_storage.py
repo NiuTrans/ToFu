@@ -59,6 +59,44 @@ def test_real_channel_turn_allows_silence_and_owner_turn_does_not(router_turn):
     assert silence_declaration_allowed(human_task, []) is False
 
 
+def test_tool_round_silence_reloads_with_empty_public_text_and_private_replay(router_turn):
+    import threading
+    from lib.tasks_pkg.segments import assemble_segments, segments_to_json
+    from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
+    from lib.turn_lifecycle import get_turn, record_task_event
+    owner, binding, _pair, task = router_turn
+    task.update(content='[SILENT]', thinking='', content_lock=threading.Lock(),
+                events=[], status='running', toolRounds=[])
+    assert declare_silent_turn(task, {'content': '[SILENT]'}, [], llm_round=0) is True
+    assert record_task_event(task, {'type': 'delta_reset', 'discard': True})
+    task['toolRounds'] = [{
+        'type': 'tool_start', 'toolCallId': 'call-read', 'toolName': 'read_files',
+        'toolArgs': '{"path":"AGENTS.md"}', 'toolContent': 'Repository guidance',
+        'status': 'done', 'roundNum': 1, 'llmRound': 0,
+        'assistantModelContent': '[SILENT]'}]
+    assert record_task_event(task, {'type': 'round_committed', 'roundNum': 1})
+    task['segments'] = assemble_segments(task)
+    task['status'] = 'done'
+    assert record_task_event(task, {'type': 'done', 'finishReason': 'stop'})
+    stored = get_turn(task['convId'], task['_turnId'], user_id=owner)
+    projection = stored['projection']
+    assert projection['content'] == ''
+    assert any(segment.get('noteKind') == 'deliberate-silence'
+               for segment in projection['segments'])
+    assert any(segment.get('modelText') == '[SILENT]' and segment.get('text') == ''
+               for segment in projection['segments'])
+    assert all(segment.get('text') != '[SILENT]'
+               for segment in projection['segments'])
+    from lib.turn_lifecycle import build_api_messages
+    replay = build_api_messages(binding['conversationId'], task['_turnId'], {
+        'projectPath': binding['projectPath']}, user_id=owner, allow_model_replay=False)
+    assert any(message.get('role') == 'assistant' and message.get('content') == '[SILENT]'
+               and message.get('tool_calls', [{}])[0].get('id') == 'call-read'
+               for message in replay)
+    assert any(message.get('role') == 'tool' and message.get('tool_call_id') == 'call-read'
+               and message.get('content') == 'Repository guidance' for message in replay)
+
+
 def test_real_owner_steer_revokes_silence_without_changing_the_notice_parent(router_turn):
     from lib.tasks_pkg.stream_handler._router_silence import silence_declaration_allowed
     owner, _binding, _pair, task = router_turn

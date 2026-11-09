@@ -34,7 +34,7 @@ from __future__ import annotations
 import os
 
 from lib import write_freshness
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.handlers._read_gate import _collect_target_paths, _resolve_abs
 
 logger = get_logger(__name__)
@@ -95,7 +95,7 @@ def check_write_freshness(task: dict, fn_name: str, fn_args: dict,
         return None
     msg = _format_stale_refusal(fn_name, stale)
     logger.info('[FreshGate] Refused %s for stale file(s) %s (task=%s)',
-                fn_name, ', '.join(stale), task.get('id', '?')[:8])
+                fn_name, ', '.join(stale), task_log_tag(task.get('id', '?')))
     return msg
 
 

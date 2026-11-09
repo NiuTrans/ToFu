@@ -47,14 +47,16 @@ defined in `docs/STORAGE_TOFUDB.md`, operational bounds in `docs/STORAGE_OPERATI
   availability is a capability, never performance/default promotion.
 - Pools, lanes, busy retries, result sizes, WAL/outbox/projection growth,
   maintenance work, and shutdown are explicitly bounded.
-- `impact_cache.py` owns the reconstructible landing-verification cache in an
-  explicit repository cache file, independent of the selected authority.
-  Project code uses records/fingerprints and `ImpactCacheError`, never SQL or
-  connections. Preserve its schema version and row format; verify the
-  impact-cache, impact-selection, landing-verification and
-  storage-process-boundary tests.
 - Offline maintenance is a separate, explicitly invoked boundary. It never races
   a live writer or silently deletes durable user data.
+- `impact_cache.py` owns the reconstructible landing-verification cache in an
+  explicit repository cache directory, independent of the selected authority.
+  Project code uses records/fingerprints and `ImpactCacheError`, never SQL or
+  connections. v7 splits inert definition headers and conftest helpers out of
+  the module unit and imports v6/v5 evidence once under its original identity;
+  the older files stay available to running older writers. Preserve
+  its versioned format and lock; verify the impact-cache,
+  impact-selection, landing-verification and storage-process-boundary tests.
 - The Tofu-DB SQLite→native offline migration toolkit lives in the
   `migration/` subpackage (`lib/storage_authority_sql/migration/`). It is an
   operator-only, explicitly-invoked boundary — never a startup, wire, or live

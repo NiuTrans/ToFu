@@ -6,28 +6,17 @@ urllib3 resets the socket to the caller's read budget afterward. No global
 connection-class mutation or change to non-model HTTP clients.
 """
 
-import requests
 from urllib.parse import urlsplit
 from urllib3.connection import HTTPSConnection
-from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
+
+from lib.http_transport.connection_setup import ConnectionSetupTimeout, connection_http_adapter
 
 from lib.llm.llm_errors import RequestUploadTimeoutError
 
 
 def model_http_adapter(*, write_timeout, **adapter_options):
     """Create pools with independent upload timeouts, including proxy pools."""
-    class UploadBudget:
-        def connect(self):
-            try:
-                return super().connect()
-            except (TimeoutError, ReadTimeoutError) as exc:
-                # Proxy TCP can be connected while CONNECT/TLS is unfinished.
-                # urllib3 otherwise calls this a response-read timeout, losing
-                # proof that no model request was sent. Keep that proof at the
-                # actual setup boundary; never infer it from error text.
-                raise ConnectTimeoutError(
-                    'Model connection setup timed out') from exc
-
+    class UploadBudget(ConnectionSetupTimeout):
         def request(self, method, url, body=None, headers=None, **kwargs):
             if self.sock is None:
                 self.connect()
@@ -53,37 +42,6 @@ def model_http_adapter(*, write_timeout, **adapter_options):
             finally:
                 self.timeout = connect_budget
 
-    wrapped_pools = {}
-
-    def with_upload_budget(pools):
-        result = {}
-        for scheme, original_pool in pools.items():
-            if issubclass(original_pool.ConnectionCls, UploadBudget):
-                result[scheme] = original_pool
-                continue
-            if original_pool not in wrapped_pools:
-                # Preserve the original transport (including SOCKS DNS and
-                # handshake policy) instead of replacing it with plain TCP.
-                class ModelConnection(UploadBudget, original_pool.ConnectionCls):
-                    pass
-
-                class ModelPool(original_pool):
-                    ConnectionCls = ModelConnection
-
-                wrapped_pools[original_pool] = ModelPool
-            result[scheme] = wrapped_pools[original_pool]
-        return result
-
-    class ModelHTTPAdapter(requests.adapters.HTTPAdapter):
-        def init_poolmanager(self, *args, **kwargs):
-            super().init_poolmanager(*args, **kwargs)
-            self.poolmanager.pool_classes_by_scheme = with_upload_budget(
-                self.poolmanager.pool_classes_by_scheme)
-
-        def proxy_manager_for(self, *args, **kwargs):
-            manager = super().proxy_manager_for(*args, **kwargs)
-            manager.pool_classes_by_scheme = with_upload_budget(
-                manager.pool_classes_by_scheme)
-            return manager
-
-    return ModelHTTPAdapter(**adapter_options)
+    from lib.http_transport.outbound import RoutingHTTPAdapter
+    return connection_http_adapter(
+        UploadBudget, adapter_class=RoutingHTTPAdapter, **adapter_options)

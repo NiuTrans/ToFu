@@ -156,3 +156,14 @@ class TestProjectPresenceBlock:
             runtime.snapshot_owned.return_value = [peer]
             result = _project_presence_block(req)
         assert 'last: "Analyzing the auth flow' in result
+
+
+def test_storage_free_runtime_skips_presence_without_reading_a_binding():
+    from lib.tasks_pkg.context_composer._providers import _project_blocks
+
+    req = _request(task={'config': {'_storageFreeRuntime': True}}, conv_id='coord-1')
+    with patch('lib.conversations.project_coordination.ProjectCoordinationRepository') as repo_cls:
+        blocks = {block.id: block for block in _project_blocks(req, '')}
+    repo_cls.assert_not_called()
+    assert blocks['project_presence'].content == ''
+    assert blocks['project_presence'].suppressed_reason == 'project_disabled'

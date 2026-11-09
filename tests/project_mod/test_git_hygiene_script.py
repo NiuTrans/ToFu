@@ -286,3 +286,23 @@ def test_unreachable_also_merged_revision_is_refused(scene):
     assert 'not reachable' in json.loads(result.stdout)['error']
     assert heads(repo) == before
     assert not (repo / 'data' / 'git-hygiene').exists()
+
+
+def test_pool_directories_under_local_placement_roots_are_inventoried(scene, tmp_path, monkeypatch):
+    from serverctl_pkg.local_placement import local_workspace_roots
+    repo = scene['repo']
+    monkeypatch.setenv('TOFU_LOCAL_DIR', str(tmp_path / 'local-state'))
+    [placed] = local_workspace_roots(repo / 'data')
+    key = hashlib.sha256(str(repo).encode('utf-8')).hexdigest()[:12]
+    local_clone = placed / key / 'u1' / 'local-clone'
+    (local_clone / '.tofu' / 'file-history').mkdir(parents=True)
+    (local_clone / MARKER).write_text('bootstrap marker\n')
+
+    result = run(repo, '--json')
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    pool = json.loads(result.stdout)['poolDirectories']
+    assert pool['roots'] == [str(repo / 'data' / 'integration' / 'worktrees' / key),
+                             str(placed / key)]
+    assert {Path(item['path']).name: item['rebuildable'] for item in pool['items']} == {
+        'reclaimed-clone': True, 'history-clone': False, 'local-clone': True}

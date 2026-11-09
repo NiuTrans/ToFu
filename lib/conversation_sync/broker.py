@@ -379,7 +379,7 @@ def _publish_invalidation(user_id: Any, event: Mapping[str, Any]) -> None:
         # unavailable; log the transport fault without changing command truth.
         logger.warning(
             "Conversation invalidation publish failed conv=%s: %s",
-            conversation_id[:12],
+            conversation_id,
             exc,
         )
 

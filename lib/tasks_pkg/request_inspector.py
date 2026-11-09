@@ -60,7 +60,7 @@ labels; see design §3.1).
 
 from __future__ import annotations
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.orchestration.message_compat import is_flow_event_type
 from lib.tasks_pkg.snapshot_delta import DELTA_MARKER, shared_prefix_len
 from lib.task_replay.generated_request_inspector_projection import PROJECTION as _LIST_PROJECTION
@@ -295,7 +295,7 @@ def _read_snapshot_replay(task_id, *, source_events=None):
     try:
         replay = _SnapshotEventReplay(events)
     except Exception as exc:
-        logger.warning('[RequestInspector] snapshot index failed task=%s: %s', task_id[:8], exc)
+        logger.warning('[RequestInspector] snapshot index failed task=%s: %s', task_log_tag(task_id), exc)
         return None, False
     if base is not None and base[1] is events:
         _cache_store((task_id, True), replay, base[0], base[3],
@@ -404,7 +404,7 @@ def _read_long_snapshot_events(task_id, *, rounds, turn, kind, last):
                     and current[1].reference() is scan):
                 _EVENTS_CACHE.pop(key, None)
         logger.warning('[RequestInspector] long snapshot read failed task=%s: %s',
-                       task_id[:8], exc)
+                       task_log_tag(task_id), exc)
         return [], False
     finally:
         if acquired:
@@ -553,7 +553,7 @@ def _read_events_uncached(task_id: str, *, rebuild: bool, payload_projection='fu
         return structural, True
     except Exception as e:
         logger.warning('[RequestInspector] Sidecar event read failed task=%s: %s',
-                       task_id[:8], e)
+                       task_log_tag(task_id), e)
         return [], False
 
 
@@ -567,7 +567,9 @@ def _rebuild_snapshot_rows(rows: list) -> list:
     ``rebuild_snapshots`` rather than silently truncated.
     """
     snap_idx = [i for i, r in enumerate(rows)
-                if r.get('type') == _SNAPSHOT]
+                if r.get('type') == _SNAPSHOT or (
+                    r.get('type') == _WIRE_PROJECTION
+                    and isinstance((r.get('payload') or {}).get('contextLineage'), dict))]
     if not snap_idx:
         return rows
     try:
@@ -724,7 +726,7 @@ def _child_snapshot_sources(task_id: str) -> tuple[list, bool, bool]:
             deadline=30) or {}
     except Exception as e:
         logger.warning('[RequestInspector] child discovery failed task=%s: %s',
-                       task_id[:8], e)
+                       task_log_tag(task_id), e)
         return [], False, False
     prefix = f'{task_id}#agent:'
     children = []
@@ -774,7 +776,7 @@ def inspector_child_belongs_to_parent(
             deadline=30) or {}
     except Exception as e:
         logger.warning('[RequestInspector] child authorization failed task=%s: %s',
-                       child_task_id[:8], e)
+                       task_log_tag(child_task_id), e)
         return False
     for record in summary.get('records') or []:
         if str(record.get('task_id') or '') != child_task_id:
@@ -793,6 +795,8 @@ def _wire_projection_payload(payload: dict) -> dict:
         'toolCount': int(payload.get('toolCount') or 0),
         'schemaTokens': int(payload.get('schemaTokens') or 0),
         'schemaFingerprint': str(payload.get('schemaFingerprint') or ''),
+        **({'contextLineage': payload['contextLineage']}
+           if isinstance(payload.get('contextLineage'), dict) else {}),
         'schemaBudgetTokens': int(payload.get('schemaBudgetTokens') or 0),
         'budgetDroppedNames': list(payload.get('budgetDroppedNames') or []),
         'compactedNames': list(payload.get('compactedNames') or []),
@@ -1104,6 +1108,7 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
         'messages': p.get('messages') or [],
         'tools': p.get('tools') or [],
         'contextManifest': p.get('contextManifest') or [],
+        **({'contextLineage': p['contextLineage']} if p.get('contextLineage') else {}),
     }
     if fold:
         try:
@@ -1147,7 +1152,7 @@ def get_request_payload(task_id: str, round_num, turn: str = '',
         except Exception as exc:
             logger.warning(
                 '[RequestInspector] raw archive list failed task=%s round=%s: %s',
-                task_id[:8], round_num, exc)
+                task_log_tag(task_id), round_num, exc)
             out['rawArchives'] = []
     return out
 
@@ -1490,7 +1495,7 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 30,
             persisted_ids.add(tid)
     except Exception as e:
         logger.warning('[RequestInspector] durable attempt discovery failed '
-                       'for conv=%s: %s', (conv_id or '')[:8], e)
+                       'for conv=%s: %s', (conv_id or ''), e)
         read_error = True
 
     # Fetch beyond one page so a ``before`` cursor can still fill ``limit``
@@ -1512,7 +1517,7 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 30,
         if result.get('capped'):
             logger.warning(
                 '[RequestInspector] task summary scan hit its 10000-row '
-                'work cap for conv=%s', (conv_id or '')[:8])
+                'work cap for conv=%s', (conv_id or ''))
         legacy_records = result.get('records') or []
         legacy_has_more = len(legacy_records) >= fetch_limit
         for row in legacy_records:
@@ -1532,7 +1537,7 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 30,
             persisted_ids.add(tid)
     except Exception as e:
         logger.warning('[RequestInspector] task_results read failed for '
-                       'conv=%s: %s', (conv_id or '')[:8], e)
+                       'conv=%s: %s', (conv_id or ''), e)
         read_error = True
     tasks = sorted(rows.values(), key=lambda x: x['createdAt'] or 0,
                    reverse=True)[:limit]
@@ -1583,7 +1588,7 @@ def list_conv_tasks(conv_id: str, *, user_id: int, limit: int = 30,
         except Exception as e:
             logger.warning(
                 '[RequestInspector] event summary read failed conv=%s: %s',
-                (conv_id or '')[:8], e)
+                (conv_id or ''), e)
             read_error = True
             for task in tasks:
                 task['readError'] = True

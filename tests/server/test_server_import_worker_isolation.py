@@ -43,7 +43,10 @@ def test_server_import_defers_route_workers_to_serving_lifecycle():
     # lifecycle — never at import time.
     deferred = inspect.getsource(
         background_services.start_deferred_background_services)
-    assert 'start_prober()' in deferred
+    # d2df4d2b70 retired the polling prober worker: outbound route probes are
+    # demand-driven and shared by the HTTP layer, so no prober starts here.
+    assert 'start_prober()' not in deferred
+    assert 'environment_snapshot' in deferred
     wrapper = inspect.getsource(server._start_background_workers)
     assert 'start_background_services(' in wrapper
     module_prefix = source[:source.index('def _start_background_workers')]
@@ -248,6 +251,7 @@ def test_background_service_start_is_per_app_idempotent(monkeypatch):
 
 
 def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
+    import lib.channels.bots.supervisor as bot_supervisor
     import lib.channels.dx.supervisor as channel_supervisor
     import lib.channels.github.supervisor as github_supervisor
     import lib.database_panel.maintenance as database_panel_maintenance
@@ -281,6 +285,8 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
     monkeypatch.setattr(
         github_supervisor, 'stop_github_sessions', stopped('github-sessions'))
     monkeypatch.setattr(
+        bot_supervisor, 'stop_bot_sessions', stopped('bot-sessions'))
+    monkeypatch.setattr(
         database_panel_maintenance, 'stop_maintenance',
         stopped('database-panel-maintenance'))
     monkeypatch.setattr(
@@ -291,7 +297,7 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert background_services.stop_registered_background_services(app, timeout=0.25) == 9
+    assert background_services.stop_registered_background_services(app, timeout=0.25) == 10
     assert background_services.stop_registered_background_services(app, timeout=0.25) == 0
     # Channel sessions stop after the scheduler, whose tick restarts them.
     assert calls == [
@@ -303,11 +309,13 @@ def test_background_service_shutdown_is_paired_and_idempotent(monkeypatch):
         ('scheduler', {'timeout': 0.25}),
         ('channel-bridges', {'timeout': 0.25}),
         ('github-sessions', {'timeout': 0.25}),
+        ('bot-sessions', {'timeout': 0.25}),
         ('database-panel-maintenance', {'timeout': 0.25}),
     ]
 
 
 def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
+    import lib.channels.bots.supervisor as bot_supervisor
     import lib.channels.dx.supervisor as channel_supervisor
     import lib.channels.github.supervisor as github_supervisor
     import lib.database_panel.maintenance as database_panel_maintenance
@@ -334,6 +342,8 @@ def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
     monkeypatch.setattr(
         github_supervisor, 'stop_github_sessions', lambda **_kwargs: True)
     monkeypatch.setattr(
+        bot_supervisor, 'stop_bot_sessions', lambda **_kwargs: True)
+    monkeypatch.setattr(
         database_panel_maintenance, 'stop_maintenance', lambda **_kwargs: True)
     monkeypatch.setattr(plugin_registry, 'run_shutdown_hooks', lambda _app: 0)
 
@@ -341,5 +351,5 @@ def test_background_service_shutdown_retains_latch_on_timeout(monkeypatch):
         extensions = {'tofu_registered_background_services': True}
 
     app = App()
-    assert background_services.stop_registered_background_services(app) == 7
+    assert background_services.stop_registered_background_services(app) == 8
     assert app.extensions['tofu_registered_background_services'] is True

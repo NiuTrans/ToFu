@@ -116,9 +116,9 @@ pub(super) fn unmarked_epoch(capture: OnlineGcCapture, collector: &OnlineGarbage
     let suspects_directory = capture.data_dir.join(WORK_DIRECTORY).join(SUSPECTS_DIRECTORIES[collector.suspects_parity]);
     Epoch { started: Instant::now(), capture, marks: None, suspects_directory,
         suspects_next: None, temp_candidate_next: None,
-        segment_dead_next: BTreeMap::new(), confirmed_loose: Vec::new(), unlinked_loose: Vec::new(),
+        segment_dead_next: BTreeMap::new(), unlinked_loose: Vec::new(),
         confirmed_temp: None,
-        rewrite_victim: None, compaction_ids: Vec::new(), compaction_failure: None, copy_failure: None,
+        rewrite_victim: None, compaction_ids: Vec::new(), scan_failure: None,
         confirmed_loose_planned: false,
         rewrite_planned: false, compaction_planned: false, tracked_suspects: 0,
         reclaimed_bytes: 0, reclaimed_blocks: 0, temporary_files_removed: 0,

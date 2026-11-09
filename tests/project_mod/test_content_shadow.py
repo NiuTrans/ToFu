@@ -41,7 +41,15 @@ def _fill(project, paths=None):
 
 
 @pytest.mark.parametrize('context,count,cap', [(0, False, 100), (1, False, 1), (0, True, 100)])
-def test_mixed_cache_source_matches_live_output_and_remainder(project, context, count, cap):
+def test_mixed_cache_source_matches_live_output_and_remainder(project, context, count, cap,
+                                                             monkeypatch, tmp_path):
+    # rg emits explicit multi-file results in parallel completion order, so
+    # live and cached output are byte-identical only when the file order
+    # matches; production keeps that parallelism. Pin argv order for this
+    # equivalence comparison instead of asserting a scheduler accident.
+    config = tmp_path / 'ripgrep.conf'
+    config.write_text('--threads=1\n')
+    monkeypatch.setenv('RIPGREP_CONFIG_PATH', str(config))
     root, _home = project
     candidates = [str(Path(root) / name) for name in ('a.txt', 'b.txt')]
     _fill(project, candidates[:1])

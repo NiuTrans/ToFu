@@ -18,6 +18,9 @@ Entry points
     ``notify_landing(top, paths, ...)``: after ``scripts/git_land.py``
         published a merge, leave a notice for every writer whose unlanded
         work changes a landed path, and retire the landed checkout's records.
+    ``recorded_paths(task, project_path)``: the paths TASK's conversation
+        recorded in that checkout; the linear checkpoint narrows a failed
+        whole-workspace capture to them (lib/linear_git_checkpoint.py).
 
 Storage
     ``<git-common-dir>/tofu-radar/`` is shared by every checkout of the
@@ -50,6 +53,44 @@ from lib.log import get_logger
 from lib.project_mod.generated_integration import output_family
 
 logger = get_logger(__name__)
+
+_TRANSIENT_ADVISORY_LIMIT = 20
+_overlap_lock = threading.Lock()
+
+
+def queue_transient_advisory(task: dict, key: str, text: str) -> bool:
+    keys = task.setdefault('_projectOverlapKeys', [])
+    if key in keys or len(keys) >= _TRANSIENT_ADVISORY_LIMIT:
+        return False
+    keys.append(key)
+    task.setdefault('_projectOverlapAdvisories', []).append({
+        'key': key, 'value': text[:1600],
+    })
+    return True
+
+
+def queue_radar_notices(task: dict) -> None:
+    """Move notices other writers and landings left for this conversation into its advice.
+
+    This lives here, not in the host persistence owner: the orchestrator's
+    inbox drain is agent core and may not import lib.conversations.
+    """
+    if task.get('_transientRuntime'):
+        return
+    project_path = str((task.get('config') or {}).get('projectPath') or '')
+    if not project_path and not task.get('_radarCommonDirs'):
+        return
+    try:
+        notices = take_notices(task, project_path)
+    except Exception as exc:
+        logger.debug('[Radar] notices failed soft: %s', exc)
+        return
+    advice = [(hashlib.sha256(text.encode('utf-8')).hexdigest()[:24], text)
+              for text in notices]
+    with _overlap_lock:
+        for key, text in advice:
+            queue_transient_advisory(task, key, text)
+
 
 RADAR_DIR = 'tofu-radar'
 _SCHEMA_VERSION = 1
@@ -381,6 +422,18 @@ def _where(record: WriterRecord, main_root: Path) -> str:
 
 # ─── Entry points ──────────────────────────────────────────────────────────
 
+def recorded_paths(task: dict, project_path) -> set[str]:
+    """Repository-relative paths TASK's conversation recorded in PROJECT_PATH's checkout.
+
+    Advice, never authority: a missing or unreadable record yields nothing.
+    """
+    writer, _title = _writer_of(task)
+    checkout = find_checkout(project_path) if writer else None
+    if checkout is None:
+        return set()
+    return set(_known_paths(_record_file(checkout, writer), checkout)[0])
+
+
 def note_writes(task: dict, project_path: str, paths: Iterable[str]) -> list[tuple[str, str]]:
     """Record PATHS written by TASK and return ``(dedup key, advice)`` pairs.
 
@@ -520,8 +573,8 @@ def _landed_advice(task: dict, checkout: Checkout, written: list[str], trunk: st
         advice.append((key, '\n'.join([
             f'[Concurrent change] {name} has landed changes to {relative} since your '
             f'branch point ({base[:10]}):', *shown,
-            f'Merge {name} into your branch before you verify; git_land verifies the '
-            'merged result.'])))
+            f'Merge {name} into your branch before you verify; git_land runs no tests '
+            'on the merged result.'])))
     return advice
 
 
@@ -601,8 +654,8 @@ def notify_landing(top, landed_paths: Iterable[str], *, commit: str, subject: st
             advice = ('Your uncommitted edits in the shared checkout were merged on top '
                       'of it; re-read these files before editing them again.')
         else:
-            advice = (f'Merge {name} into your branch and rerun your tests before '
-                      'landing; git_land verifies the merged result.')
+            advice = (f'Merge {name} into your branch before you verify or land; '
+                      'git_land runs no tests on the merged result.')
         text = (f'[Concurrent change] {branch} landed on {name} (merge {commit[:10]}: '
                 f'"{subject}"). It changes files your unlanded work also changes: '
                 f'{", ".join(live)}.\n{advice}')

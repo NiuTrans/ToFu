@@ -169,7 +169,7 @@ def _delivery_worker(
                         '[ProviderIngress] async delivery attempt %d/%d failed '
                         'task=%s seq=%s: %s; retrying in %.2fs',
                         delivery_attempt + 1, _DELIVERY_MAX_ATTEMPTS,
-                        str(task.get('id') or '?')[:8], sequence,
+                        str(task.get('id') or '?'), sequence,
                         describe_storage_failure(exc), delay)
                     # Plain bounded sleep: stop must NOT interrupt the retry,
                     # otherwise the flush window (stop is set) would defeat
@@ -185,7 +185,7 @@ def _delivery_worker(
                     state.get('deliveryFailures'))
                 logger.warning(
                     '[ProviderIngress] async delivery failed task=%s seq=%s: %s',
-                    str(task.get('id') or '?')[:8], sequence,
+                    str(task.get('id') or '?'), sequence,
                     describe_storage_failure(exc))
                 if task.get('aborted'):
                     fence_hit = True
@@ -243,7 +243,7 @@ def begin_provider_ingress(task: dict[str, Any], *, span_id: str) -> str:
         worker = threading.Thread(
             target=_delivery_worker,
             args=(task, state, delivery_queue),
-            name=f'ingress-deliver-{str(task.get("id") or "?")[:8]}',
+            name=f'ingress-deliver-{str(task.get("id") or "?")}',
             daemon=True,
         )
         state['worker'] = worker
@@ -401,7 +401,7 @@ def end_provider_ingress(task: dict[str, Any], *, token: str,
             logger.warning(
                 '[ProviderIngress] delivery flush timed out task=%s '
                 'remaining~%d; observer gap and in-flight ordering unresolved',
-                str(task.get('id') or '?')[:8], delivery_queue.qsize())
+                str(task.get('id') or '?'), delivery_queue.qsize())
             state['flushIncomplete'] = True
     if task.get('_invocationPublicationFence') and (
             state['flushIncomplete'] or state['deliveryFailures'] or state['droppedEvents']):

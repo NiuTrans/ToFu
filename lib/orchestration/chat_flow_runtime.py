@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.orchestration.chat_launch import (
     build_flow_initial_context,
     build_orchestration_chat_flow_launch,
@@ -162,7 +162,7 @@ def execute_orchestration_chat_flow_task(
     audit_log('flow_via_chat_start', task_id=task_id, flow=label)
     logger.info(
         '[FlowChat] task=%s START label=%s (FlowExecutor path)',
-        task_id[:8], label,
+        task_log_tag(task_id), label,
     )
 
     task_event_sink = OrchestrationChatTaskEventSink(
@@ -234,7 +234,7 @@ def execute_orchestration_chat_flow_task(
     )
     logger.info(
         '[FlowChat] task=%s label=%s DONE status=%s reason=%s',
-        task_id[:8], label, terminal.chat_status, terminal.stop_reason,
+        task_log_tag(task_id), label, terminal.chat_status, terminal.stop_reason,
     )
 
 

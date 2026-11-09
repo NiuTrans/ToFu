@@ -13,7 +13,6 @@ Implementations live in:
     module-level singleton
   * ``._finalize``    — ``_finalize_tool_round`` / ``_build_simple_meta``
     (MONKEYPATCH TARGETS: patched via the handlers.misc facade + tests)
-  * ``._content_ref`` — ``_resolve_content_ref``
   * ``._summary``     — ``_generate_tool_summary`` / ``_prefetch_user_urls``
   * ``._execute``     — ``_execute_tool_one`` (the single-tool dispatch entry)
   * ``._admission_wait`` — workspace-lease admission-wait observer (task events)
@@ -45,11 +44,6 @@ from lib.tasks_pkg.executor._registry import (  # noqa: E402,F401
 from lib.tasks_pkg.executor._finalize import (  # noqa: E402,F401
     _build_simple_meta,
     _finalize_tool_round,
-)
-
-# ── Content-ref resolver (._content_ref) ──────────────────────────────
-from lib.tasks_pkg.executor._content_ref import (  # noqa: E402,F401
-    _resolve_content_ref,
 )
 
 # ── Tool summary + user-URL prefetch (._summary) ──────────────────────
@@ -104,8 +98,6 @@ __all__ = [
     # finalization / meta helpers (monkeypatch targets)
     '_finalize_tool_round',
     '_build_simple_meta',
-    # content-ref resolver
-    '_resolve_content_ref',
     # summary + prefetch
     '_generate_tool_summary',
     '_prefetch_user_urls',

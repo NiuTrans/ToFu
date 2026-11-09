@@ -190,7 +190,7 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
         task.pop('_autoCompactRetryWitness', None)
     try:
         audit_log('context_pressure_l1', conv=owner,
-                  task=str((task or {}).get('id') or '')[:16], **evidence)
+                  task=str((task or {}).get('id') or ''), **evidence)
     except Exception as exc:
         logger.debug('[PressureL1] audit unavailable: %s', exc)
     return True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,25 @@ def test_ensure_gsap_verifies_caches_and_stages(monkeypatch, tmp_path):
     assert (first / runtime.GSAP_REL_PATH).read_bytes() == data
     assert (second / runtime.GSAP_REL_PATH).read_bytes() == data
     assert len(calls) == 1
+
+
+def test_packaged_gsap_stages_offline_and_matches_the_pinned_digest(tmp_path, monkeypatch):
+    from lib.motion_video import _runtime_assets as runtime
+    import shutil
+
+    vendored = Path(runtime.__file__).parent / 'vendor' / runtime.GSAP_FILENAME
+    assert vendored.is_file(), 'the pinned GSAP runtime must ship with the package'
+    assert hashlib.sha256(vendored.read_bytes()).hexdigest() == runtime.GSAP_SHA256
+
+    calls = []
+    monkeypatch.setattr('lib.http_transport.client.http_get',
+                        lambda *a, **k: calls.append(a))
+    monkeypatch.setattr('lib.motion_video._env.motion_root',
+                        lambda: str(tmp_path / 'motion'))
+
+    assert runtime.ensure_gsap(str(tmp_path / 'scene')) == runtime.GSAP_REL_PATH
+    assert calls == []
+    assert (tmp_path / 'scene' / runtime.GSAP_REL_PATH).read_bytes() == vendored.read_bytes()
 
 
 def test_localise_gsap_rewrites_primary_and_network_fallback(monkeypatch,

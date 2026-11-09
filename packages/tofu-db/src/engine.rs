@@ -121,6 +121,16 @@ pub struct HistoryCompactionMetrics {
     pub retired_segments: u32,
 }
 
+/// The published history routing root: `version` 2 may hold locations of
+/// retired sources and is refused by engines before 2026-11-08.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryRouting {
+    pub version: u32,
+    pub entries: u64,
+    pub pages: usize,
+    pub retained_sources: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PayloadCompactionMetrics {
     pub segment_id: Uuid,
@@ -702,8 +712,8 @@ impl Engine {
             None => None,
         };
         // Decode one bounded WAL record at a time; retain only IDs, not a
-        // second copy of carried payloads. Overflow keeps the conservative
-        // per-block recovery path, never drops a WAL reference.
+        // second copy of carried payloads. Cover every selected reference so
+        // a larger WAL cannot fall back to repeated whole-catalog lookups.
         profile.set_work(Work::PayloadSegments, payload_manifest.as_ref().map_or(0, |manifest| manifest.segments.len() as u64));
         profile.advance(Phase::RecoveryIds);
         check_cancelled()?;
@@ -713,19 +723,12 @@ impl Engine {
         recovery_ids.extend(state.authority_state_root.flatten());
         for record in &recovery.records {
             check_cancelled()?;
-            if recovery_ids.len() == crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS { break; }
             // Replay below remains the authority for malformed/ambiguous tails.
             let Ok(envelope) = TransactionEnvelope::decode_skipping_carried(&record.payload) else { break; };
             has_payload_references |= !envelope.block_ids.is_empty()
                 || matches!(envelope.authority_state_update, Some(Some(_)));
-            for id in &envelope.block_ids {
-                if recovery_ids.len() < crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS {
-                    recovery_ids.insert(*id);
-                }
-            }
-            if recovery_ids.len() < crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS {
-                if let Some(Some(root)) = envelope.authority_state_update { recovery_ids.insert(root); }
-            }
+            recovery_ids.extend(envelope.block_ids);
+            if let Some(Some(root)) = envelope.authority_state_update { recovery_ids.insert(root); }
         }
         profile.set_work(Work::SelectedRecoveryIds, recovery_ids.len() as u64);
         profile.advance(Phase::PackedLookup);
@@ -763,6 +766,7 @@ impl Engine {
             }).transpose()?;
             blocks.install_history_payload_catalog(manifest, routing)?;
         }
+        blocks.prepare_history_recovery_until(&mut carried_recovery, should_stop)?;
 
         profile.advance(Phase::PayloadReplay);
         check_cancelled()?;
@@ -854,13 +858,13 @@ impl Engine {
                         Err(error) => return Err(error),
                     },
                 }
-                blocks.stage_pending_sync(root)?;
+                blocks.stage_pending_sync_for_recovery(root, &carried_recovery)?;
             }
             // Every replayed loose file may predate the last power event, so
             // the next checkpoint re-fsyncs all of them before its CONTROL
             // publication can retire these WAL records.
             for block_id in &envelope.block_ids {
-                blocks.stage_pending_sync(*block_id)?;
+                blocks.stage_pending_sync_for_recovery(*block_id, &carried_recovery)?;
             }
             committed.push(CommittedTransaction {
                 sequence: record.sequence,
@@ -1631,9 +1635,50 @@ impl Engine {
         Ok(block_id)
     }
 
+    /// Durable spill for an oversized reference commit. Staged referenced
+    /// payloads are packed into payload segments exactly like a checkpoint
+    /// step (same chunking, full-catalog merge and manifest publication).
+    /// The loose batch then covers whatever the packer could not own: blocks
+    /// reserved by an in-flight background pack, catalog-full fallbacks and
+    /// fsync-only recovery marks. While rotation or an unlocked catalog
+    /// publication owns the physical lane, or a single block spills, the loose
+    /// batch covers all of it.
+    fn spill_referenced_blocks(
+        &mut self, block_ids: &[BlockId], authority_root: Option<BlockId>,
+    ) -> io::Result<()> {
+        let references: BTreeSet<BlockId> =
+            block_ids.iter().copied().chain(authority_root).collect();
+        if !self.rotation_in_flight
+            && !self.async_publication_in_flight
+            && self.blocks.payload_segment_store().is_ok()
+        {
+            let snapshot = match self.blocks.pending_checkpoint_snapshot() {
+                Ok((payloads, _)) => Some(payloads),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(payloads) = snapshot {
+                let mut selected: Vec<(BlockId, u64)> = payloads
+                    .iter()
+                    .filter(|(id, _)| references.contains(id))
+                    .map(|(id, payload)| (*id, payload.len() as u64))
+                    .collect();
+                // A one-block segment buys nothing over that block's own loose
+                // file and adds a catalog entry plus its publication barriers.
+                if selected.len() > 1 {
+                    selected.sort_unstable();
+                    self.pack_staged_payloads(selected, u64::MAX)?;
+                }
+            }
+        }
+        crate::fsync_stats::note_flush_deferred();
+        self.blocks.flush_pending_references(&references)
+    }
+
     /// Materializes and fsyncs every pending staged block in one batch.
-    /// Called by oversized commits that spill back to identifier-only
-    /// references; the checkpoint path uses `materialize_deferred_blocks`.
+    /// Called by oversized raw-payload commits that spill back to
+    /// identifier-only references; the checkpoint path uses
+    /// `materialize_deferred_blocks`.
     fn flush_deferred_blocks(
         &self, block_ids: &[BlockId], authority_root: Option<BlockId>,
     ) -> io::Result<()> {
@@ -1920,6 +1965,19 @@ impl Engine {
             .map(|(id, payload)| (*id, payload.len() as u64))
             .collect();
         sorted.sort_unstable();
+        let (processed_bytes, fallback) = self.pack_staged_payloads(sorted, byte_budget)?;
+        self.blocks.flush_pending_subset(&fallback)?;
+        Ok(total_bytes.saturating_sub(processed_bytes))
+    }
+
+    /// Packs sorted staged payloads into payload segments until roughly
+    /// `byte_budget` bytes have been routed, publishes the extended catalog
+    /// atomically through the CONTROL slots and retires the packed staged
+    /// copies. Returns the routed bytes and the chunk IDs a full catalog
+    /// could not absorb; those stay staged for the caller's loose batch.
+    fn pack_staged_payloads(
+        &mut self, sorted: Vec<(BlockId, u64)>, byte_budget: u64,
+    ) -> io::Result<(u64, BTreeSet<BlockId>)> {
         let existing = self
             .payload_manifest
             .as_ref()
@@ -1971,8 +2029,7 @@ impl Engine {
             }
             self.blocks.retire_staged_payloads(&plan.packed)?;
         }
-        self.blocks.flush_pending_subset(&plan.fallback)?;
-        Ok(total_bytes.saturating_sub(processed_bytes))
+        Ok((processed_bytes, plan.fallback))
     }
 
     #[cfg(test)]
@@ -3681,7 +3738,8 @@ impl Engine {
         };
         if !window.is_empty() {
             let _stage = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ROTATION_INSTALL_WINDOW);
-            append_rotation_suffix(&self.blocks, &window, self.state.checkpoint_hash, &mut outcome)?;
+            append_rotation_suffix(&self.blocks, &window, self.state.checkpoint_hash,
+                &history_manifest_segments, &mut outcome)?;
         }
         let RotationSegmentOutcome { new_references, payload_index_root_id,
             payload_routing, indexed_payload_ids } = outcome;
@@ -4271,10 +4329,13 @@ impl Engine {
             authority_state_update,
         };
         if carried_bytes > MAX_CARRIED_PAYLOAD_BYTES {
-            // Oversized references spill: fsync the pending loose blocks now
+            // Oversized references spill: make the pending blocks durable now
             // and log identifier-only references instead of growing an
-            // unbounded WAL record.
-            self.flush_deferred_blocks(block_ids, authority_state_update.flatten())?;
+            // unbounded WAL record. A large copy-on-write write set (search
+            // posting updates touch thousands of leaves) is packed into
+            // catalogued segments, so the spill costs a few file syncs
+            // instead of one create/rename/fsync per page.
+            self.spill_referenced_blocks(block_ids, authority_state_update.flatten())?;
             self.commit_envelope(envelope, Vec::new(), None)
         } else {
             self.commit_envelope(envelope, carried, authority_state_carried)
@@ -4510,7 +4571,10 @@ pub(crate) fn encode_rotation_segments(
         crate::history_payload::RoutingRoot::decode(&snapshot.blocks.get_materialized_shared(id)?)
     }).transpose()?;
     let payload_routing = if previous.is_some() || !locations.is_empty() {
-        Some(previous.unwrap_or_default().append(&snapshot.blocks, &locations)?)
+        // Exactly the segments of the manifest every install publishes.
+        let retained: BTreeSet<BlockId> = snapshot.history_manifest_segments.iter().chain(&new_references)
+            .map(|reference| reference.block_id).collect();
+        Some(previous.unwrap_or_default().append(&snapshot.blocks, &locations, &retained)?)
     } else { None };
     let payload_index_root_id = payload_routing.as_ref().map(|root| snapshot.blocks.put_loose(&root.encode()?)).transpose()?;
     Ok(RotationSegmentOutcome { new_references, payload_index_root_id, payload_routing, indexed_payload_ids })
@@ -4520,6 +4584,7 @@ fn append_rotation_suffix(
     blocks: &BlockStore,
     window: &[CommittedTransaction],
     parent_fallback: [u8; 32],
+    retained_history: &[HistorySegmentReference],
     outcome: &mut RotationSegmentOutcome,
 ) -> io::Result<()> {
     let _window = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ROTATION_WINDOW_ENCODE);
@@ -4544,7 +4609,9 @@ fn append_rotation_suffix(
         Ok(())
     })?;
     if !locations.is_empty() {
-        let root = outcome.payload_routing.take().unwrap_or_default().append(blocks, &locations)?;
+        let retained: BTreeSet<BlockId> = retained_history.iter().chain(&outcome.new_references)
+            .map(|reference| reference.block_id).collect();
+        let root = outcome.payload_routing.take().unwrap_or_default().append(blocks, &locations, &retained)?;
         outcome.payload_index_root_id = Some(blocks.put_loose(&root.encode()?)?);
         outcome.payload_routing = Some(root);
     }

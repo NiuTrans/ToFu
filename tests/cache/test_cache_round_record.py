@@ -128,6 +128,43 @@ def test_round_record_emitted_every_round():
             assert k in r, f'record missing field {k}: {r}'
 
 
+def test_round_record_names_the_whole_conversation():
+    """Siblings share long ID prefixes (``worker-<hex>``, ``coordinator-<hex>``):
+    an 8-character ``conv`` merged up to ten conversations into one
+    read-source chain in the 2026-11-07 logs."""
+    from lib.tasks_pkg.cache_tracking.replay import replay_rounds
+
+    conv_id = 'worker-d45e757de0646c3e3b3b6e86'
+    b = _body(system_ttl='1h')
+    with _RecordCapture() as cap:
+        replay_rounds([
+            {'body': b, 'cache_read': 90000, 'cache_write': 50000},
+        ], user_id=7, conv_id=conv_id)
+    assert [r['conv'] for r in cap.records] == [conv_id]
+
+
+@pytest.mark.parametrize('identity', [
+    {'semantic_request_id': 'a' * 64, 'provider_prefix_id': 'b' * 64},
+    {'semantic_request_id': 'invalid', 'provider_prefix_id': 'b' * 64},
+])
+def test_round_record_carries_only_complete_request_identity(identity):
+    from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
+    from lib.tasks_pkg.cache_tracking.replay import build_round_usage
+    body = _body(system_ttl='1h')
+    usage = build_round_usage(body, cache_read=90000, cache_write=1000)
+    usage.update(_request_identity=identity, trace_id='transport-occurrence')
+    with _RecordCapture() as cap:
+        detect_cache_break('lineage-record-' + identity['semantic_request_id'],
+                           body['messages'], body['tools'], body['model'],
+                           usage, user_id=7, durable=False)
+    record, = cap.records
+    if len(identity['semantic_request_id']) == 64:
+        assert record['request_identity'] == identity
+        assert record['trace_id'] == 'transport-occurrence'
+    else:
+        assert 'request_identity' not in record and 'trace_id' not in record
+
+
 def test_round_record_labels_namespace_switch():
     """A body-identical key flip is labelled bucket=cache_namespace_switch with
     routing_diff naming the key, in the structured record."""

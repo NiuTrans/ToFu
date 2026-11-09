@@ -62,11 +62,11 @@ def _convert_hunk(path: str, hunk: list[str],
     if not old_block:
         return _fail(
             f'a hunk for `{path}` only adds lines without context lines '
-            'to anchor on; re-issue with edit_file using operation '
-            '"insert_after"/"insert_before" and an exact anchor line.')
+            'to anchor on; re-issue with edit_file: put an existing line '
+            'next to the addition in `anchor`, and that line plus the new '
+            'lines in `content`.')
     return {
         'path': path,
-        'operation': 'replace',
         'anchor': old_block,
         'content': new_block,
     }, ''
@@ -110,7 +110,7 @@ def parse_codex_patch(text: str) -> tuple[dict[str, Any] | None, str]:
             return _fail(
                 'apply_patch Delete File is not supported here; to empty '
                 f'`{stripped[len(_DELETE):].strip()}`, use edit_file with '
-                'operation "replace" and empty content.')
+                'the text as `anchor` and empty `content`.')
         if stripped.startswith(_UPDATE):
             path = stripped[len(_UPDATE):].strip()
             if not path:

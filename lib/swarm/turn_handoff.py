@@ -110,7 +110,7 @@ def own_detached_swarm(context, *, resume: bool) -> None:
     """Keep the spawning attempt's claim for its detached work, then release it.
 
     Called by the conversation worker after the attempt's outcome is known and
-    outside its dispatch stripe. ``resume`` is the takeover case: the session
+    outside its dispatch lock. ``resume`` is the takeover case: the session
     retained by a previous owner restarts under this claim first. Neither step
     may change the attempt's already settled outcome; a failure leaves the
     retained checkpoints inspectable and releases the claim.

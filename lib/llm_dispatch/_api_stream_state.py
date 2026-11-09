@@ -225,13 +225,13 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
 
 def _settle_stream_result(slot, usage, *, latency, ttft, state,
                           cache_conv_id, tag, dispatcher=None,
-                          stream_result=None, route_snapshot=None):
+                          stream_result=None, route_trace=None):
     """Settle one provider stream result exactly once for both dispatch loops.
 
     The sync ``dispatch_stream`` and async ``async_dispatch_stream`` loops
-    differ in transport scheduling, while both carry the same cgroup-headroom
-    and warm-key pre-send gates, so the LOOPS are intentionally NOT unified.
-    Once a slot answers, its typed
+    differ in transport scheduling. Both call this after leaving the transport
+    retry boundary: receipt/cache failures must propagate without another
+    settlement or provider attempt. Once a slot answers, its typed
     result selects exactly one mutually exclusive health action: verified
     completion records success, client abort releases neutrally, and every
     invalid stream records one provider/slot error. Both loops then stamp the
@@ -245,7 +245,7 @@ def _settle_stream_result(slot, usage, *, latency, ttft, state,
                        or usage.get('output_tokens') or 0)
         try:
             _out_tokens = int(_out_tokens)
-        except (ValueError, TypeError) as _e_audit:
+        except (ValueError, TypeError, OverflowError) as _e_audit:
             logger.debug('[api] _settle_stream_result caught %s: %s',
                          type(_e_audit).__name__, _e_audit)
             _out_tokens = 0
@@ -297,7 +297,7 @@ def _settle_stream_result(slot, usage, *, latency, ttft, state,
             'key_hint': secret_hint(slot.api_key or '')[:64],
             'provider_id': (getattr(slot, 'routing_provider_id', '')
                             or slot.provider_id),
-            'route_snapshot': (route_snapshot if route_snapshot is not None
+            'route_snapshot': (route_trace.snapshot() if route_trace is not None
                                else dict(getattr(slot, 'route_snapshot', {}) or {})),
             'protocol': slot.protocol or 'openai',
             'responses_profile': getattr(

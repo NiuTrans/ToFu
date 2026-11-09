@@ -145,11 +145,11 @@ def _prepare_payload(date_str, report_data):
 
 def _invalidate_calendar(date_str, *, owner_user_id):
     # Local import avoids a circular import at module-load time.
-    from .cost import _calendar_cache
+    from .calendar_overview import invalidate
 
     parsed = _parse_report_date(date_str)
     owner_id = _owner_id(owner_user_id, context='daily report calendar')
-    _calendar_cache.invalidate((owner_id, parsed.year, parsed.month))
+    invalidate(owner_id, parsed.year, parsed.month)
 
 
 def _log_saved(date_str, payload, *, owner_user_id):

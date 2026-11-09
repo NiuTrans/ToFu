@@ -143,7 +143,8 @@ def admit_compaction_sources(
     _projected_summary_cost = ports.projected_summary_usage(
         sources.summary_input, current_query, task,
         anchor_text=anchor_text,
-        source_messages=messages)
+        source_messages=messages,
+        **({'continuity_fold': sources.continuity_fold} if sources.continuity_fold else {}))
     # Managed snapshots are restored later. Do not sell their removal as
     # permanent savings, even during optimistic preflight.
     retained = _retained_projection(

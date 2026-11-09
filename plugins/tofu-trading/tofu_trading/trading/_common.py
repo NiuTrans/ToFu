@@ -14,11 +14,9 @@ For testing, instantiate ``TradingClient(proxy_url=None)`` directly — no monke
 of module globals required.
 """
 
-import os
 import threading
 import time
 
-import requests
 
 from lib.log import get_logger
 
@@ -154,25 +152,17 @@ class TradingClient:
         self.headers = dict(headers or self.DEFAULT_HEADERS)
 
         # ── Proxy ──
-        if proxy_url is None:
-            # Auto-detect from environment
-            proxy_url = (
-                os.environ.get('HTTPS_PROXY')
-                or os.environ.get('HTTP_PROXY')
-                or os.environ.get('https_proxy')
-                or os.environ.get('http_proxy')
-                or ''
-            )
-        self.proxy_url = proxy_url
+        self.proxy_url = proxy_url or ''
 
-        # ── Session ──
-        self.session = requests.Session()
+        # Automatic policy belongs to the host; only an explicit override pins
+        # a proxy. Empty string retains the caller's force-direct contract.
+        from lib.http_transport import managed_session
+        self.session = managed_session()
         self.session.headers.update(self.headers)
-        if self.proxy_url:
-            self.session.proxies.update({
-                'http': self.proxy_url,
-                'https': self.proxy_url,
-            })
+        if proxy_url is not None:
+            self.session.proxies.update(
+                {'http': proxy_url, 'https': proxy_url} if proxy_url else
+                {'no_proxy': '*'})
 
         # ── Network state ──
         self._probe_interval = probe_interval

@@ -437,76 +437,7 @@ def _build_user_message(msg: dict, *, model: str = '',
         }]
 
     if has_images or has_videos or attachments:
-        content_blocks = []
-        for img in images:
-            img_url = ''
-            if img.get('base64'):
-                media_type = img.get('mediaType', 'image/png')
-                # Source guard: the stored ``mediaType`` is a DB value written
-                # by the upload path and is NOT trusted — a PNG saved with
-                # mediaType='image/jpeg' (or vice-versa) is where the mislabeled
-                # data URI is BORN. Sniff the real format from the base64 prefix
-                # and correct it here so the DB never even emits a mismatched
-                # URL. The Anthropic Messages API HARD-REJECTS a media-type/bytes
-                # mismatch (HTTP 400 "messages.N.content.0.image.source.base64:
-                # The image was specified using the image/jpeg media type, but the
-                # image does not appear to be in that format."). Best-effort: on
-                # any decode failure keep the stored type; payload is untouched.
-                try:
-                    import base64 as _b64
-
-                    from lib.llm.body import sniff_image_mime
-                    _sniffed = sniff_image_mime(_b64.b64decode(img['base64'][:1364]))
-                    if _sniffed and _sniffed != media_type:
-                        logger.warning(
-                            '[MsgBuilder] Corrected mislabeled stored image '
-                            'mediaType %r → %r (bytes sniffed as %s) before '
-                            'building data URI', media_type, _sniffed, _sniffed)
-                        media_type = _sniffed
-                except Exception as _mte:
-                    logger.debug('[MsgBuilder] image mediaType sniff skipped: %s', _mte)
-                img_url = f'data:{media_type};base64,{img["base64"]}'
-            elif img.get('url'):
-                # Pass through — backend _validate_image_blocks resolves
-                # local /api/images/ URLs from disk
-                img_url = img['url']
-
-            if img_url:
-                content_blocks.append({
-                    'type': 'image_url',
-                    'image_url': {'url': img_url},
-                })
-                # Stable re-access ref: prefer the disk-backed /api/images/ URL
-                # (survives compaction stripping the inline block); the model
-                # passes this to inspect_image to zoom the ORIGINAL. Emitted as
-                # a backend FACT so the model never fabricates a path.
-                # canonical_image_ref tolerates a reverse-proxy prefix
-                # (``/proxy/<port>/api/images/<f>``) and strips it to the
-                # canonical ``/api/images/...`` tail — WITHOUT it the guard
-                # missed every proxied upload, so no ref hint was emitted and
-                # the model fabricated a bogus path from the tool docstring.
-                try:
-                    from lib.attachments import canonical_image_ref
-                    _img_ref = canonical_image_ref(img.get('url') or '')
-                except Exception as _cre:
-                    logger.debug('[Context] canonical_image_ref failed: %s', _cre)
-                    _img_ref = ''
-                if _img_ref:
-                    content_blocks.append({
-                        'type': 'text',
-                        'text': f'[image ref: {_img_ref} — call inspect_image with '
-                                f'path="{_img_ref}" to zoom/crop the original]',
-                    })
-                if img.get('caption'):
-                    content_blocks.append({
-                        'type': 'text',
-                        'text': f'[PDF p{img.get("pdfPage", "?")}: {img["caption"]}]',
-                    })
-                elif img.get('pdfPage'):
-                    content_blocks.append({
-                        'type': 'text',
-                        'text': f'[PDF page {img["pdfPage"]}/{img.get("pdfTotal", "?")}]',
-                    })
+        content_blocks = image_content_blocks(images)
 
         # 7b. Video attachments: durable frames + transcript, expanded AFTER
         # the user's own images and BEFORE the text (stable cache prefix).
@@ -563,6 +494,88 @@ def _build_user_message(msg: dict, *, model: str = '',
         return result
 
 
+def image_content_blocks(images: list) -> list[dict]:
+    """Model content blocks for a user message's ``images``.
+
+    Each image with an inline ``base64`` payload or a ``url`` becomes an
+    ``image_url`` block followed by its re-access reference and caption text.
+    A human steer's images (``lib/agent_inbox/_steer_preview.py``) render
+    through this same function, so they reach the model exactly like images
+    sent with a new turn.
+    """
+    content_blocks = []
+    for img in images:
+        img_url = ''
+        if img.get('base64'):
+            media_type = img.get('mediaType', 'image/png')
+            # Source guard: the stored ``mediaType`` is a DB value written
+            # by the upload path and is NOT trusted — a PNG saved with
+            # mediaType='image/jpeg' (or vice-versa) is where the mislabeled
+            # data URI is BORN. Sniff the real format from the base64 prefix
+            # and correct it here so the DB never even emits a mismatched
+            # URL. The Anthropic Messages API HARD-REJECTS a media-type/bytes
+            # mismatch (HTTP 400 "messages.N.content.0.image.source.base64:
+            # The image was specified using the image/jpeg media type, but the
+            # image does not appear to be in that format."). Best-effort: on
+            # any decode failure keep the stored type; payload is untouched.
+            try:
+                import base64 as _b64
+
+                from lib.llm.body import sniff_image_mime
+                _sniffed = sniff_image_mime(_b64.b64decode(img['base64'][:1364]))
+                if _sniffed and _sniffed != media_type:
+                    logger.warning(
+                        '[MsgBuilder] Corrected mislabeled stored image '
+                        'mediaType %r → %r (bytes sniffed as %s) before '
+                        'building data URI', media_type, _sniffed, _sniffed)
+                    media_type = _sniffed
+            except Exception as _mte:
+                logger.debug('[MsgBuilder] image mediaType sniff skipped: %s', _mte)
+            img_url = f'data:{media_type};base64,{img["base64"]}'
+        elif img.get('url'):
+            # Pass through — backend _validate_image_blocks resolves
+            # local /api/images/ URLs from disk
+            img_url = img['url']
+
+        if img_url:
+            content_blocks.append({
+                'type': 'image_url',
+                'image_url': {'url': img_url},
+            })
+            # Stable re-access ref: prefer the disk-backed /api/images/ URL
+            # (survives compaction stripping the inline block); the model
+            # passes this to inspect_image to zoom the ORIGINAL. Emitted as
+            # a backend FACT so the model never fabricates a path.
+            # canonical_image_ref tolerates a reverse-proxy prefix
+            # (``/proxy/<port>/api/images/<f>``) and strips it to the
+            # canonical ``/api/images/...`` tail — WITHOUT it the guard
+            # missed every proxied upload, so no ref hint was emitted and
+            # the model fabricated a bogus path from the tool docstring.
+            try:
+                from lib.attachments import canonical_image_ref
+                _img_ref = canonical_image_ref(img.get('url') or '')
+            except Exception as _cre:
+                logger.debug('[Context] canonical_image_ref failed: %s', _cre)
+                _img_ref = ''
+            if _img_ref:
+                content_blocks.append({
+                    'type': 'text',
+                    'text': f'[image ref: {_img_ref} — call inspect_image with '
+                            f'path="{_img_ref}" to zoom/crop the original]',
+                })
+            if img.get('caption'):
+                content_blocks.append({
+                    'type': 'text',
+                    'text': f'[PDF p{img.get("pdfPage", "?")}: {img["caption"]}]',
+                })
+            elif img.get('pdfPage'):
+                content_blocks.append({
+                    'type': 'text',
+                    'text': f'[PDF page {img["pdfPage"]}/{img.get("pdfTotal", "?")}]',
+                })
+    return content_blocks
+
+
 def _replays_reasoning(model: str, memo: dict | None) -> bool:
     from lib.model_info import model_requires_reasoning_content_replay
     if memo is None:
@@ -570,6 +583,15 @@ def _replays_reasoning(model: str, memo: dict | None) -> bool:
     if model not in memo:
         memo[model] = model_requires_reasoning_content_replay(model)
     return memo[model]
+
+
+def _reviewed_silence_note(segments) -> dict | None:
+    if not isinstance(segments, (list, tuple)):
+        return None
+    return next((segment for segment in segments if isinstance(segment, dict)
+                 and segment.get('type') == 'system_note'
+                 and segment.get('noteKind') == 'deliberate-silence'
+                 and isinstance(segment.get('text'), str) and segment['text'].strip()), None)
 
 
 def _build_assistant_messages(msg: dict, *, model: str = '',
@@ -605,6 +627,12 @@ def _build_assistant_messages(msg: dict, *, model: str = '',
     rounds = raw_rounds if isinstance(raw_rounds, (list, tuple)) else []
     raw_content = msg.get('content')
     final_content = raw_content if isinstance(raw_content, str) else ''
+    silence_note = _reviewed_silence_note(msg.get('segments'))
+    if not final_content and silence_note is not None:
+        from lib.tasks_pkg.stream_handler._intent_stall import SILENT_TURN_MARKER
+        # The public answer stays empty; model replay needs the provider's
+        # explicit reviewed-notice outcome rather than an empty assistant row.
+        final_content = SILENT_TURN_MARKER
     raw_thinking = msg.get('thinking')
     final_thinking = raw_thinking if isinstance(raw_thinking, str) else ''
     final_reasoning = {}

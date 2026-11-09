@@ -29,6 +29,7 @@ def _spine(monkeypatch, fail, *, early=False, flow=False, complete=True):
     for name in ['snapshot_turn_input', 'bind_provider_and_affinity',
                  '_emit_startup_phase', 'setup_project_context',
                  'maybe_run_memory_prefetch', 'inject_context_and_emit_chips',
+                 'restore_resume_view', 'resume_view_holds_turn_block',
                  'apply_resume_state', 'stop_prefetches', 'finalize_task_lane']:
         monkeypatch.setattr(run, name, lambda *a, **kw: None)
     monkeypatch.setattr(run, 'make_vu_phase', lambda *a: None)

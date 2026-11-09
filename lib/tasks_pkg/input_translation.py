@@ -51,7 +51,7 @@ def apply_deferred_input_translation(task: dict[str, Any]) -> SettledInput | Non
     future = task.pop('_deferredInputTranslation', None)
     if future is None:
         return None
-    task_label = str(task.get('id') or '?')[:8]
+    task_label = str(task.get('id') or '?')
     try:
         outcome, revision = _join(task, future, task_label)
         if outcome is None:

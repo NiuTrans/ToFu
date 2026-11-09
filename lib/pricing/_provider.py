@@ -7,11 +7,16 @@ TokenHub). The flat ``MODEL_PRICING`` table can only carry one price per
 model_id, which would silently mis-bill any second provider hosting the
 same model.
 
-Provider templates may declare a per-row ``pricing`` field (same shape as a
-``MODEL_PRICING`` value). Loading code calls :func:`set_provider_pricing` to
-register it; cost paths use :func:`lookup_pricing` (model_id, provider_id)
-which prefers the provider-scoped entry over the global table, falling back
-to ``MODEL_PRICING`` when the provider is unknown or has no override.
+Provider-scoped rows come from :func:`lib.model_registration.register_model`
+(a provider model's ``pricing`` field, same shape as a ``MODEL_PRICING``
+value) and from a provider's documented billing rule over the creator's base
+price (FRIDAY's Claude cache multipliers, installed at import below). Cost
+paths use :func:`lookup_pricing` (model_id, provider_id) which prefers the
+provider-scoped entry over the global table, falling back to
+``MODEL_PRICING`` when the provider is unknown or has no override.
+Model-routing v2 Offering prices (``actual_pricing``) are not installed
+here; native settlement and summary routes pass them explicitly through
+:func:`declared_pricing`.
 
 ``PROVIDER_PRICING`` and ``_provider_pricing_lock`` are the shared mutable
 state; they must live together in this one module so all mutators
@@ -28,7 +33,13 @@ from lib.log import get_logger
 
 from lib.pricing._peak import peak_multiplier
 from lib.pricing._revision import RevisionedTable
-from lib.pricing._tables import MODEL_PRICING, QWEN_PRICING_CNY, pricing_for_model
+from lib.pricing._tables import (
+    FRIDAY_CLAUDE_CACHE_MULTIPLIERS,
+    FRIDAY_PROVIDER_IDS,
+    MODEL_PRICING,
+    QWEN_PRICING_CNY,
+    pricing_for_model,
+)
 
 logger = get_logger(__name__)
 
@@ -38,9 +49,30 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════
 
 # Per-provider pricing overrides: PROVIDER_PRICING[provider_id][model_id] = {input, output, ...}
-# Populated at server-config load time from each provider template's per-model `pricing` field.
 PROVIDER_PRICING = RevisionedTable()
 _provider_pricing_lock = threading.Lock()
+
+
+def _friday_claude_rows():
+    """Every Claude row with FRIDAY's cache multipliers; base prices unchanged."""
+    from lib.model_info._family import is_claude
+
+    tier_multipliers = {key: FRIDAY_CLAUDE_CACHE_MULTIPLIERS[key]
+                        for key in ('cacheWriteMul', 'cacheReadMul')}
+    rows = {}
+    for model_id, row in MODEL_PRICING.items():
+        if not is_claude(model_id):
+            continue
+        friday = {**row, **FRIDAY_CLAUDE_CACHE_MULTIPLIERS}
+        if row.get('contextTiers'):
+            friday['contextTiers'] = [{**tier, **tier_multipliers}
+                                      for tier in row['contextTiers']]
+        rows[model_id] = friday
+    return rows
+
+
+PROVIDER_PRICING.update({provider_id: _friday_claude_rows()
+                         for provider_id in FRIDAY_PROVIDER_IDS})
 
 
 def declared_pricing(info):

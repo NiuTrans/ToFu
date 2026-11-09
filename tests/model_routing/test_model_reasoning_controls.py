@@ -269,3 +269,22 @@ def test_reasoning_controls_preserve_every_configured_offering_beyond_old_tail_l
     visible = {row['offering_id'] for row in controls if row['offering_id']}
     assert visible == {f'visible-{i:05}' for i in range(8193)}
     assert all(row['availability'] == 'no_route' for row in controls)
+
+
+def test_glm53_flash_maintained_profile_defaults_to_its_documented_max_rung():
+    from lib.llm.reasoning import capture_intent, resolve_reasoning_control
+    from lib.model_routing.model_defaults import apply_model_defaults
+
+    model = {'creator_id': 'zhipu', 'model_id': 'glm-5.3-flash',
+             'capabilities': ['text'], 'context_window': 262144, 'quality_rank': 1}
+    assert apply_model_defaults(model)
+    profile = model['inference_profile']['reasoning']
+    assert profile['default_effort'] == 'max'
+    enabled = resolve_reasoning_control(profile, 'enabled')
+    assert enabled == ('thinking_type', True, 'max', 'enabled')
+    max_intent = capture_intent(thinking_depth='max')
+    assert resolve_reasoning_control(
+        profile, max_intent['mode'], max_intent['value']) == ('thinking_type', True, 'max', 'preset')
+    medium = capture_intent(thinking_depth='medium')
+    assert resolve_reasoning_control(
+        profile, medium['mode'], medium['value']) == ('thinking_type', True, 'high', 'preset')

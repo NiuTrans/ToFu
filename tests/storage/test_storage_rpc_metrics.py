@@ -83,6 +83,50 @@ def test_metric_label_controls_whitespace_and_prefix_bound(value, limit, expecte
     assert observability._bounded(value, limit=limit) == expected
 
 
+def test_metrics_export_the_execution_hosts_histogram_beside_the_api_family(monkeypatch):
+    """The resident execution host has no listener; /metrics reads it per scrape."""
+    import asyncio
+    from quart import Quart
+    import routes.metrics as metrics
+    from lib.tasks_pkg import command_control_runtime
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
+
+    row = {'labels': {'kind': 'query', 'operation': 'turn.get', 'outcome': 'success'},
+           'buckets': [0.001, 0.01], 'counts': [1, 3], 'sum': 0.02, 'count': 4}
+    answers = [{'histograms': [row]}, CommandControlUnavailable('not confirmed'), None]
+    owners = []
+
+    def remote(app, *, user_id):
+        owners.append(user_id)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(command_control_runtime, 'execution_storage_rpc_metrics', remote)
+    monkeypatch.setattr('routes.api_v1.auth.request_user_id', lambda: 7)
+    app = Quart(__name__)
+
+    async def scrape():
+        async with app.test_request_context('/metrics'):
+            out = []
+            metrics._collect_execution_storage_metrics(out)
+            return '\n'.join(out)
+    text = asyncio.run(scrape())
+    series = 'kind="query",operation="turn.get",outcome="success"'
+    assert '# TYPE tofu_execution_storage_rpc_seconds histogram' in text
+    assert f'tofu_execution_storage_rpc_seconds_bucket{{{series},le="0.001"}} 1' in text
+    assert f'tofu_execution_storage_rpc_seconds_bucket{{{series},le="+Inf"}} 4' in text
+    assert f'tofu_execution_storage_rpc_seconds_sum{{{series}}} 0.02' in text
+    assert f'tofu_execution_storage_rpc_seconds_count{{{series}}} 4' in text
+    assert 'tofu_execution_metrics_available 1' in text
+    # An unconfirmed read is unavailable, never an empty histogram.
+    unavailable = asyncio.run(scrape())
+    assert 'tofu_execution_metrics_available 0' in unavailable and '_bucket' not in unavailable
+    # Without a separate execution host nothing is added.
+    assert asyncio.run(scrape()) == ''
+    assert owners == [7, 7, 7]
+
+
 def test_histogram_preserves_first_buckets_and_inclusive_exact_counts():
     store = observability._Store()
     for value, buckets in [(0.5, (0.5, 1.0)), (1.0, (0.5, 1.0)),

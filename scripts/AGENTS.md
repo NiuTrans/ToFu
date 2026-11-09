@@ -27,11 +27,11 @@ an undocumented second source of product policy.
   boundary, atomic replacement, and postcondition verification.
 - Resolve repository/runtime roots safely; never use broad deletion targets,
   unresolved globs, or implicit current-directory authority.
-- `git_land.py` preserves committed and uncommitted source ownership separately;
-  generator families and input/output scopes live in
-  `lib/project_mod/generated_integration.py`. Merged-result verification lives
-  in `lib/project_mod/landing_verification.py` (impact records: only the test
-  files the merge can affect run) and landing notices in
+- `git_land.py` preserves committed and uncommitted source ownership separately
+  and runs no tests (owner decision 2026-11-08); generator families and
+  input/output scopes live in `lib/project_mod/generated_integration.py`. Its
+  private merge checkout lives in `lib/project_mod/landing_verification.py`
+  (also the CI merged-result check) and landing notices in
   `lib/project_mod/integration_radar.py`. `lane.py` creates one branch plus a
   recycled local checkout per unit of work (`lib/project_mod/lanes.py`). Verify
   both `test_git_land_*.py` suites, `test_landing_verification.py`,
@@ -42,6 +42,10 @@ an undocumented second source of product policy.
   Cannot merge` with no visible diff is stale index stat data (tool-run git
   uses `--no-optional-locks`): run `git update-index -q --refresh` and retry;
   never reset.
+- `test_select.py` owns static dependency and guard selection;
+  `test_execution.py` owns pytest execution arguments. Makefile is a dependency
+  of its consumers, not a global input to direct pytest. Verify selection and
+  execution-owner migration in `tests/meta/test_verification_policy.py`.
 - `frontend_vendor_assets.mjs` derives standalone KaTeX files, CSS font closure
   and `lib/http_transport/generated_frontend_vendor.py` from the installed lockfile version.
   Author the iframe adapter under `frontend/src/artifacts/`; verify generation

@@ -89,3 +89,24 @@ def test_operator_records_accept_only_operator_provenance(approvals):
     with pytest.raises(ValueError):
         approvals.record_operator_pass('reboot', {'kind': 'interactive-terminal'})
     assert approvals.list_records() == []
+
+
+@pytest.mark.parametrize('action', ['restart', 'shutdown'])
+def test_noninteractive_gate_reuses_request_and_directs_to_ui_execution(
+        approvals, monkeypatch, capsys, action):
+    """The UI executes its approval; the CLI must direct follow-up to status."""
+    import serverctl
+    monkeypatch.setattr(sys.stdin, 'isatty', lambda: False)
+    args = SimpleNamespace(yes=True, source='serverctl')
+    for _ in range(2):
+        assert serverctl._approve_lifecycle_if_needed(
+            args, action=action, prompt='unused') is False
+    [request] = approvals.list_records()
+    assert request['action'] == action and request['status'] == 'pending'
+    assert request['origin']['source'] == 'serverctl'
+    error = capsys.readouterr().err
+    assert 'requires human approval' in error
+    assert request['id'][:8] in error
+    assert 'Approve and execute' in error
+    assert 'serverctl.py status' in error
+    assert 'then re-run this command' not in error

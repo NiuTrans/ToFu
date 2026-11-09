@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 
 from lib.human_gate_contract import MAX_HUMAN_GATE_RESPONSE_LENGTH
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.human_gate_registry import GATE_STDIN, human_gate_registry
 
 
@@ -41,7 +41,7 @@ def request_stdin(
     logger.info('[StdinHandler] Request %s blocking '
                 '(abort_poll=%.1fs, timeout=%.0fs, task=%s)',
                 stdin_id, _ABORT_POLL_INTERVAL, _STDIN_TIMEOUT,
-                task.get('id', '?')[:8] if task else 'none')
+                task_log_tag(task.get('id', '?')) if task else 'none')
     entry = human_gate_registry.register(
         GATE_STDIN,
         stdin_id,

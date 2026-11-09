@@ -111,6 +111,18 @@ data class Profile(
     @Embedded(prefix = "ssh_") val ssh: SshEndpoint? = null,
 )
 
+/**
+ * Saved connection authority, not transport state. Recency, cookie stamps,
+ * derived instance metadata and a first-trust pin are not reviewed config.
+ * For URL/LOCAL rows, SSH columns belong to another owner and are ignored.
+ * Compare source rows here; a runtime-bound LOCAL/SSH copy must first have
+ * its transient URL removed, never persisted.
+ */
+internal fun Profile.sameConnectionConfiguration(other: Profile): Boolean =
+    id == other.id && kind == other.kind && alias == other.alias &&
+        baseUrl == other.baseUrl && authType == other.authType && projectPath == other.projectPath &&
+        (kind != KernelKind.SSH || ssh?.copy(hostKeySha256 = null) == other.ssh?.copy(hostKeySha256 = null))
+
 @Dao
 interface ProfileDao {
     @Query("SELECT * FROM profiles ORDER BY last_used_at DESC")
@@ -133,6 +145,19 @@ interface ProfileDao {
     suspend fun update(profile: Profile): Int
 
     /**
+     * Save only reviewed connection fields, conditional on the row the editor
+     * read. Recency, unrelated owner columns and a same-connection session stamp
+     * survive concurrent writes. URL/auth changes invalidate only the marker.
+     * No whole-row rollback or schema migration is needed.
+     */
+    @Query("UPDATE profiles SET alias = :alias, base_url = :baseUrl, auth_type = :authType, instance_uuid = :instanceUuid, project_path = :projectPath, cookie_host = CASE WHEN base_url = :baseUrl AND auth_type = :authType THEN cookie_host ELSE NULL END WHERE id = :id AND kind = 'REMOTE_URL' AND base_url = :expectedUrl AND alias = :expectedAlias AND auth_type = :expectedAuthType AND project_path IS :expectedProjectPath")
+    suspend fun saveConnectionIfCurrent(
+        id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType,
+        expectedProjectPath: String?, alias: String, baseUrl: String, authType: AuthType,
+        instanceUuid: String?, projectPath: String?,
+    ): Int
+
+    /**
      * Stamp ONLY the session-cookie host, leaving every other column untouched.
      *
      * Deliberately NOT `@Update`: that overwrites the whole row from whatever
@@ -148,7 +173,7 @@ interface ProfileDao {
     suspend fun setCookieHost(id: Long, host: String?): Int
 
     /** Guard late network completions against an edited/deleted profile. */
-    @Query("UPDATE profiles SET cookie_host = :host WHERE id = :id AND base_url = :expectedUrl AND alias = :expectedAlias AND auth_type = :expectedAuthType")
+    @Query("UPDATE profiles SET cookie_host = :host WHERE id = :id AND kind = 'REMOTE_URL' AND base_url = :expectedUrl AND alias = :expectedAlias AND auth_type = :expectedAuthType")
     suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int
 
     /**
@@ -173,6 +198,28 @@ interface ProfileDao {
      */
     @Query("UPDATE profiles SET auth_type = :authType WHERE id = :id")
     suspend fun setAuthType(id: Long, authType: AuthType): Int
+
+    /**
+     * Save only reviewed SSH fields against the endpoint-free source row.
+     * A trust pin acquired after the editor's read belongs to the same host
+     * and port: preserve the database's pin, never the snapshot's. A reviewed
+     * host/port change clears it. Recency and unrelated owner columns survive.
+     */
+    @Query(
+        "UPDATE profiles SET alias = :alias, ssh_host = :host, ssh_port = :port, " +
+            "ssh_user = :user, ssh_remote_port = :remotePort, " +
+            "ssh_host_key_sha256 = CASE WHEN ssh_host = :host AND ssh_port = :port " +
+            "THEN ssh_host_key_sha256 ELSE NULL END " +
+            "WHERE id = :id AND kind = 'SSH' AND base_url = '' AND base_url = :expectedUrl " +
+            "AND alias = :expectedAlias AND auth_type = :expectedAuthType " +
+            "AND project_path IS :expectedProjectPath AND ssh_host = :expectedHost " +
+            "AND ssh_port = :expectedPort AND ssh_user = :expectedUser AND ssh_remote_port = :expectedRemotePort",
+    )
+    suspend fun saveSshConnectionIfCurrent(
+        id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType,
+        expectedProjectPath: String?, expectedHost: String, expectedPort: Int, expectedUser: String,
+        expectedRemotePort: Int, alias: String, host: String, port: Int, user: String, remotePort: Int,
+    ): Int
 
     /**
      * Pin an SSH kernel's host key on FIRST trust. Targeted for the same reason

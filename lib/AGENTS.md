@@ -25,8 +25,9 @@ ports; backend libraries never import routes or browser owners.
 | Durable data | `storage/` (client facade), `storage_authority_sql/` (SQL authority) | `docs/modules/data_tier.md` |
 | Papers and media | `paper/`, `pdf_parser/`, `translate/`, `motion_video/`, `knowledge/`, `doc_parser/`, `video_analysis/`, `transcription/`, `text_lang/` | `docs/modules/ingest_media.md` |
 | Deliverable production and owner acceptance | `acceptance/`, `production/`, `longform/`, `slides/`, `design_sys/`, `artifacts/`, `image_gen/` | `docs/modules/production.md` |
-| Scheduling and operations | `scheduler/`, `daily_report/`, `optimizer/` | `docs/modules/scheduling_ops.md` |
-| External channel integrations | `channels/` (大象, GitHub, `docs/CHANNELS.md`), `feishu/` | `docs/modules/integrations_api.md` |
+| Scheduling and operations | `scheduler/`, `daily_report/`, `myday/`, `optimizer/` | `docs/modules/scheduling_ops.md` |
+| External channel integrations | `channels/` (大象, GitHub, 企业微信, QQ, 微信; `docs/CHANNELS.md`), `feishu/` | `docs/modules/integrations_api.md` |
+| Mobile setup and publication | `mobile_distribution/` | `android/README.md`, `docs/contracts/API_CONTRACT.md` |
 | Remote execution | `desktop/`, `desktop_agent/`, `desktop_dist/`, `desktop_wire/` | `docs/modules/remote_execution.md` |
 | Skills and experiments | `skills/`, `experiments/`, `cost_experiments/` (was `cost_experiment*`) | `docs/modules/skills.md`, `docs/modules/experiments.md` |
 | Proof bundles | `proof/` | `docs/modules/proof.md` |

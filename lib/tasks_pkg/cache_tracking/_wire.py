@@ -39,6 +39,9 @@ class _WireEvidence:
     routing: Any = None
     tool_count: int | None = None
     tool_name_bytes: int | None = None
+    # The selected route's tool-name budget (lib.llm.tool_wire); None when the
+    # route has none.
+    tool_name_budget_bytes: int | None = None
 
 
 def _non_negative_int(value: Any) -> int | None:
@@ -64,6 +67,7 @@ def _wire_evidence_from_usage(usage: dict | None) -> _WireEvidence:
         routing=usage.get('_wire_routing'),
         tool_count=_non_negative_int(surface.get('count')),
         tool_name_bytes=_non_negative_int(surface.get('name_bytes')),
+        tool_name_budget_bytes=_non_negative_int(surface.get('name_budget_bytes')),
     )
 
 
@@ -96,7 +100,7 @@ def _detect_namespace_switch(
                 '[CacheTrack] conv=%s call=%d API key changed under cache '
                 'affinity carrier %s; that hop picks the cache domain, so '
                 'the key is not a cache namespace switch.',
-                conv_id[:8], previous_state.call_count + 1, affinity)
+                conv_id, previous_state.call_count + 1, affinity)
     if namespace_switch:
         # Failover rotation changes the key on purpose, and the other key's
         # namespace is often still warm. The cache outcome below warns only
@@ -105,7 +109,7 @@ def _detect_namespace_switch(
             '[CacheTrack] conv=%s call=%d cache namespace switch: the request '
             'routing changed between turns; the cache outcome is classified '
             'below. changed=[%s] prev=%s cur=%s',
-            conv_id[:8], previous_state.call_count + 1,
+            conv_id, previous_state.call_count + 1,
             ', '.join(namespace_switch), previous_state.wire_routing,
             current_routing,
         )
@@ -130,7 +134,7 @@ def _report_wire_prefix_change(conv_id, prev, wire_culprits, *,
             'by an advertised compaction (api-form change at %d '
             '>= advertised index %d). changed=[%s] '
             'first_changed_idx=%d prior_prefix_boundary=%d',
-            conv_id[:8], prev.call_count + 1, api_first_changed,
+            conv_id, prev.call_count + 1, api_first_changed,
             expected_rewrite_index,
             ', '.join(wire_culprits[:8]) or '?',
             first_changed_idx, prior_prefix_boundary)
@@ -142,7 +146,7 @@ def _report_wire_prefix_change(conv_id, prev, wire_culprits, *,
             'prior_prefix_boundary=%d prev_wire_msg_count=%d '
             'prev_msg_count=%d cur_msg_count=%d '
             'inside_prior_cached_prefix=%s',
-            conv_id[:8], prev.call_count + 1,
+            conv_id, prev.call_count + 1,
             ', '.join(wire_culprits[:8]) or '?',
             first_changed_idx, prior_prefix_boundary, prev_wire_count,
             prev.message_count, msg_count, inside_prior_prefix)
@@ -292,7 +296,7 @@ def compare_wire_evidence(
                     'canonical-invisible change (reasoning_details rebuild '
                     '/ same-role merge / field reorder / protocol switch) '
                     'altered the real sent bytes. changed=[%s] field=[%s]',
-                    conv_id[:8], prev.call_count + 1,
+                    conv_id, prev.call_count + 1,
                     ', '.join(_byte_culprits[:8]) or '?',
                     ', '.join(_field_culprits[:8]) or '?')
         # ── TRUE-byte divergence in the HOISTED system/tools region ──
@@ -328,7 +332,7 @@ def compare_wire_evidence(
                         'differ from last round and the read (%d) fell '
                         'short of the cached prefix (%d); these controls '
                         'invalidate cached message blocks.',
-                        conv_id[:8], prev.call_count + 1, cache_read,
+                        conv_id, prev.call_count + 1, cache_read,
                         _cached_prefix)
             if _region_culprits:
                 _wire_culprits.extend(_region_culprits)
@@ -341,7 +345,7 @@ def compare_wire_evidence(
                         'CHANGED in both canonical and raw fingerprints — '
                         'the provider-bound system/tools cache-key bytes '
                         'changed. changed=[%s]',
-                        conv_id[:8], prev.call_count + 1,
+                        conv_id, prev.call_count + 1,
                         ', '.join(_wire_culprits[:8]) or '?')
                 else:
                     logger.warning(
@@ -351,7 +355,7 @@ def compare_wire_evidence(
                         '/ wrapping flip / per-turn re-serialization / '
                         'tool-param key reorder) altered the real cached-prefix '
                         'bytes. changed=[%s]',
-                        conv_id[:8], prev.call_count + 1,
+                        conv_id, prev.call_count + 1,
                         ', '.join(_region_culprits) or '?')
         # ── Mid-anchor slipped past the ~20-block lookback (LAYOUT-ONLY,
         #    byte-identity-gated) ──

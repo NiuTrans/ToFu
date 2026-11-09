@@ -119,6 +119,9 @@ _candidate_datas = [
      os.path.join('frontend', 'src', 'application-shell', 'fragments')),
     # Runtime download selection loads the single release policy by path.
     (os.path.join(ROOT, 'scripts', 'release_assets.py'), 'scripts'),
+    # Health mobile metadata resolves this local publication receipt next to
+    # lib/ at runtime; bundling Android sources is not necessary.
+    (os.path.join(ROOT, 'android', 'published-release.json'), 'android'),
     (os.path.join(ROOT, 'index.html'), '.'),
     (os.path.join(ROOT, 'trading.html'), '.'),   # optional (legacy plugin shell)
 

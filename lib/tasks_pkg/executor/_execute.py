@@ -15,6 +15,7 @@ from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.log import get_logger
 from lib.logging_pkg.log_record_values import text_value
 from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+from lib.tasks_pkg.executor._registry import tool_registry
 from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
 from lib.tasks_pkg.executor._effects import (
     begin_tool_effect, finish_tool_effect, uncertain_effect_error, tool_exception_result,
@@ -76,15 +77,35 @@ def _execute_tool_one(
     project_path: str | None,
     project_enabled: bool,
     all_tools: list[dict] | None = None,
+    *,
+    dispatch_admission: Any = None,
 ) -> tuple[str, str, bool]:
-    """Execute one tool call and update its presentation round."""
+    """Execute one tool call and update its presentation round.
 
-    from lib.project_dispatch.admission import is_dispatch_task
-    if is_dispatch_task(task):
-        # Dispatch authority decides first: the soft role policies below would
-        # turn its refusal into a model-visible result the turn continues past.
-        from lib.project_dispatch.scope import admit_tool
-        admit_tool(task, fn_name, fn_args, project_path=project_path)
+    ``dispatch_admission`` is the project-dispatch admission of the tool batch
+    that admitted this call. Every dispatch gate of the call decides from it
+    (or, without one, from the call's own live validation); the call's tool
+    intent still validates live before its effect.
+    """
+
+    from lib.project_dispatch.admission import admitted_call, is_dispatch_task
+    if not is_dispatch_task(task):
+        return _execute_admitted_tool_one(
+            task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+            project_path, project_enabled, all_tools)
+    # Dispatch authority decides first: the soft role policies below would
+    # turn its refusal into a model-visible result the turn continues past.
+    from lib.project_dispatch.scope import admit_call
+    _, admission = admit_call(task, fn_name, fn_args, project_path=project_path,
+                              admission=dispatch_admission)
+    with admitted_call(admission):
+        return _execute_admitted_tool_one(
+            task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+            project_path, project_enabled, all_tools)
+
+
+def _execute_admitted_tool_one(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+                               project_path, project_enabled, all_tools):
     from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
     coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
     if coordinator_denial:
@@ -95,7 +116,7 @@ def _execute_tool_one(
         return tc_id, delegate_denial, False
     if task.get('aborted'):
         logger.info('[Executor] Skipping tool %s (tc_id=%s) — task aborted',
-                    fn_name, tc_id[:8])
+                    fn_name, tc_id)
         return tc_id, 'Task aborted by user.', False
 
     from lib.agent_core.execution_limits import admit_tool_execution
@@ -178,8 +199,8 @@ def _dispatch_admitted_tool_one(
         round_entry['tStart'] = task_execution_time_ms(task)
 
     handler = None
-    from lib.project_dispatch.admission import is_file_dispatch_task
-    dispatch_file = is_file_dispatch_task(task)
+    from lib.project_dispatch.admission import call_admission, is_file_dispatch_task
+    dispatch_file = is_file_dispatch_task(task, admission=call_admission(task))
     if dispatch_file:
         from lib.tasks_pkg.handlers.project import _handle_project_tool
         from lib.project_dispatch.scope import assert_firstparty_file_handler
@@ -310,33 +331,40 @@ def _dispatch_admitted_tool_one(
         unregister_context(context)
 
 
+def _argument_preview(fn_name, value) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)[:300]
+    except Exception as dump_exc:
+        logger.debug('[Executor] fn_args dump failed for %s: %s',
+                     fn_name, text_value(dump_exc))
+        return text_value(value)[:300]
+
+
 def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc,
                           *, terminal_status='error'):
     """Convert one uncaught handler exception into a model-visible result."""
     error_detail = text_value(exc)
-    try:
-        arg_preview = json.dumps(fn_args, ensure_ascii=False)[:300]
-    except Exception as dump_exc:
-        logger.debug('[Executor] fn_args dump failed for %s: %s',
-                     fn_name, text_value(dump_exc))
-        arg_preview = text_value(fn_args)[:300]
+    arg_preview = _argument_preview(fn_name, fn_args)
+    # Log lines show declared content arguments by size and digest only; the model's result keeps them.
+    logged_args = tool_registry.log_arguments(fn_name, fn_args)
+    log_preview = arg_preview if logged_args is fn_args else _argument_preview(fn_name, logged_args)
 
     from lib.project_mod.config import UnknownWorkspaceRootError
     if terminal_status == 'aborted':
-        logger.info('[Tool:%s] owner cancellation acknowledged (tc_id=%s)', fn_name, tc_id[:8])
+        logger.info('[Tool:%s] owner cancellation acknowledged (tc_id=%s)', fn_name, tc_id)
     elif isinstance(exc, UnknownWorkspaceRootError):
         logger.info(
             '[Tool:%s] recoverable workspace-root error returned to LLM: %s '
-            '(tc_id=%s)', fn_name, error_detail, tc_id[:8])
+            '(tc_id=%s)', fn_name, error_detail, tc_id)
     elif isinstance(exc, ValueError):
         logger.warning(
             '[Tool:%s] recoverable ValueError (returned to LLM): %s '
-            '(tc_id=%s args=%.300s)', fn_name, error_detail, tc_id[:8], arg_preview)
+            '(tc_id=%s args=%.300s)', fn_name, error_detail, tc_id, log_preview)
     else:
         logger.error(
             '[Executor] Tool handler %s raised %s (tc_id=%s args=%.300s) — '
             'returning error with effect recovery policy',
-            fn_name, type(exc).__name__, tc_id[:8], arg_preview, exc_info=True)
+            fn_name, type(exc).__name__, tc_id, log_preview, exc_info=True)
         try:
             from lib.error_fingerprint import fingerprint
             from lib.log import audit_log

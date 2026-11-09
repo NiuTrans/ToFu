@@ -3,7 +3,11 @@
 This owner derives continuation grants and completion receipts from the
 original accepted request. Requests have no spend ceiling or deadline: worker
 results, a due human decision and backoff retries after stalled turns resume
-the Coordinator until it finishes. Turn/Attempt owns execution state;
+the Coordinator until it finishes. A wake a server restart interrupted
+continues in place from its checkpoint (``ProjectDispatchService`` restart
+continuation), and so does a restart-interrupted human request Turn (the
+ordinary resume of ``lib.conversations.restart_resume``); a request Turn
+continued in place owns follow-through until its current Attempt settles. Turn/Attempt owns execution state;
 ExecutionBudget owns every physical occurrence. Timed wakes are process-local
 reminders of durable due times, re-derived by startup and settlement recovery.
 Entry points: recover_coordinator, finish_request, request_decision,
@@ -18,6 +22,60 @@ import threading
 import time
 
 from .repository import CONTRACT, ProjectDispatchError, _validate_schema
+
+
+def _commitments(repository, source, rows, *, now):
+    """The Coordinator's open board commitments: (due now, next due time in seconds).
+
+    The board head is the ledger (docs/PROJECT_COORDINATION.md "Commitments on
+    the task board"). A commitment named by an earlier coordinator wake of this
+    request already woke it, so its due time never wakes twice.
+    """
+    from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+    from lib.conversations.coordinator_commitments import due_commitments, next_commitments
+    try:
+        row = CoordinatorTaskProgress(repository.owner, repository.project,
+                                      client=repository.client, clock=repository.clock)._head()
+    except Exception as error:
+        from lib.log import get_logger
+        get_logger(__name__).debug('[Commitments] progress head read failed: %s', error)
+        return [], None
+    if row is None:
+        return [], None
+    head = row['value']
+    scope = head['scope']
+    if (scope['coordinatorId'] != source['request']['coordinatorId']
+            or scope['bindingRevision'] != source['grant']['bindingRevision']):
+        return [], None
+    board, receipts = head['board'], head.get('commitments')
+    woken = {(item['title'], item['dueAt'])
+             for prior in rows if prior['request'].get('profile', {}).get('mode') == 'coordinator'
+             for item in (prior['request'].get('coordinatorWake') or {}).get('commitments', ())}
+    due = [item for item in due_commitments(board, receipts, now=now)
+           if (item['title'], item['dueAt']) not in woken]
+    following = next_commitments(board, receipts, now=now)
+    return due, following
+
+
+def _receipt_commitments(repository, source, request, *, disposition):
+    """Receipt a continuation's commitments in the board head it woke for."""
+    from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+    items = (request.get('coordinatorWake') or {}).get('commitments') or []
+    if not items:
+        return
+    scope = {'owner': repository.owner, 'projectPath': repository.project,
+             'coordinatorId': source['request']['coordinatorId'],
+             'bindingRevision': source['grant']['bindingRevision']}
+    try:
+        CoordinatorTaskProgress(repository.owner, repository.project,
+                                client=repository.client, clock=repository.clock).mark_commitments_woken(
+            scope, items, via='continuation', command_id=request['delegation']['attemptId'],
+            disposition=disposition)
+    except Exception:
+        # The wake record already names them, so no second wake is derived; the
+        # receipt only feeds the owner's overdue view.
+        from lib.log import get_logger
+        get_logger(__name__).warning('[Commitments] continuation wake receipt not written', exc_info=True)
 
 TERMINAL = frozenset({'completed', 'failed', 'interrupted', 'truncated', 'superseded'})
 
@@ -150,13 +208,29 @@ def _proposal(repository, value, source_attempt):
         attempt = _attempt(repository, previous)
         if attempt is not None and attempt.get('status') == 'superseded':
             return None  # A newer human input owns the lane and request steering.
-        if attempt is None:
+        if attempt is None or repository.restart_paused(previous):
+            # A wake a restart interrupted continues in place from its checkpoint.
             return {'existing': previous}
         if attempt.get('status') not in TERMINAL:
             return None
     else:
-        attempt = original_attempt
+        source_turn = repository.turn_get(source['request']['coordinatorId'], origin['turnId'],
+                                          user_id=repository.owner, include_projection=False) or {}
+        current = source_turn.get('currentAttemptId')
+        if current and current != source_attempt:
+            # Continued in place (a restart resume or the owner's Continue): its
+            # current Attempt owns follow-through until it settles.
+            attempt = repository.get_attempt(current)
+            if not attempt or attempt.get('status') not in TERMINAL:
+                return None
+        elif (source_turn.get('status') == 'interrupted'
+                and (source_turn.get('settlement') or {}).get('cause') == 'server_restart'):
+            # A restart interrupted the human request Turn itself: it continues in place.
+            return {'resume_source': source['request']['coordinatorId']}
+        else:
+            attempt = original_attempt
     summaries = worker_summaries(repository, rows)
+    due_commitments, next_due = _commitments(repository, source, rows, now=repository.clock())
     terminal = [row for row in summaries if row['status'] in TERMINAL | {'cancelled'}]
     frontier = _digest([{key: row[key] for key in ('assignment_id', 'attempt_id', 'status', 'delivery')}
                         for row in terminal])
@@ -168,16 +242,26 @@ def _proposal(repository, value, source_attempt):
     if decision is not None and _human_replied(repository, source['request']['coordinatorId'], decision['reportTurnId']):
         return None  # The human answered; their new request owns the next step.
     if waiting:
-        # Active Workers will wake this request. A due decision is the only
-        # other reason to resume while they run.
-        if decision is None:
+        # Active Workers will wake this request. A due decision or a due
+        # commitment is the only other reason to resume while they run.
+        if due_commitments:
+            reason = 'commitment_due'
+        elif decision is None:
             return None
-        if repository.clock() < decision['dueAt']:
-            return {'wait_until': decision['dueAt']}
-        reason = 'decision_default'
+        elif repository.clock() < decision['dueAt']:
+            later = [decision['dueAt']] + ([next_due] if next_due else [])
+            return {'wait_until': min(later)}
+        else:
+            reason = 'decision_default'
+    elif due_commitments:
+        reason = 'commitment_due'
     elif decision is not None and repository.clock() >= decision['dueAt']:
         reason = 'decision_default'
     stalled = 0
+    if reason == 'results' and next_due is not None:
+        # Waiting for a time the Coordinator promised the owner is not stalling:
+        # it has no new Worker evidence until that time, by design.
+        return {'wait_until': next_due}
     if reason == 'results':
         for prior in reversed(coordinators):
             if prior['request']['coordinatorWake']['progress'] != progress:
@@ -193,9 +277,22 @@ def _proposal(repository, value, source_attempt):
             if stalled < controls.get('maxStalledTurns', CONTRACT['delegationDefaults']['maxStalledTurns']) \
                     and repository.clock() < retry_at:
                 return {'wait_until': retry_at}
-    wake = {'previousAttemptId': attempt['attemptId'], 'frontier': frontier, 'progress': progress, 'reason': reason}
+    wake = {'previousAttemptId': attempt['attemptId'], 'frontier': frontier, 'progress': progress,
+            'reason': reason}
+    if reason == 'commitment_due':
+        wake['commitments'] = [{'title': item['title'], 'dueAt': item['dueAt']}
+                               for item in due_commitments]
     profile = {'mode': 'coordinator', 'tools': controls['tools'], 'readPaths': [], 'writePaths': []}
-    if reason == 'decision_default':
+    if reason == 'commitment_due':
+        from lib.conversations.coordinator_commitments import iso_ms
+        brief = ('Continue the original project request. These promises you made to the owner on your '
+                 'task board are due:\n'
+                 + '\n'.join('- "' + item['title'] + '" — due ' + iso_ms(item['dueAt'])
+                             for item in due_commitments)
+                 + '\nDo what you promised now: finish it, or report where it stands with evidence. '
+                   'Re-date a task that needs more time (update_task_progress, new due with a reason), '
+                   'or cancel it and tell the owner. The same due time never wakes you again. ')
+    elif reason == 'decision_default':
         brief = ('Continue the original project request. The human did not answer your decision report '
                  '(Turn ' + decision['reportTurnId'] + ') within the reply window. Proceed with your stated recommendation:\n'
                  + decision['recommendation'] + '\nState in your next report that you applied this default. ')
@@ -325,6 +422,12 @@ def recover_coordinator(repository, *, service=None, reports=None, schedule=None
             if 'wait_until' in proposal:
                 schedule(proposal['wait_until'])
                 continue
+            if 'resume_source' in proposal:
+                # The ordinary resume command, idempotent with the restart resume pass.
+                from lib.conversations.restart_resume import resume_conversation
+                resumed = resume_conversation(repository.owner, proposal['resume_source'])
+                outcomes.append('resumed' if resumed['outcome'] == 'resumed' else 'not_resumed')
+                continue
             if 'existing' in proposal:
                 row = proposal['existing']
             else:
@@ -342,7 +445,12 @@ def recover_coordinator(repository, *, service=None, reports=None, schedule=None
                         pending['pendingDecision'] = {**pending['pendingDecision'], 'resolved': 'default_applied'}
                 row = repository._authorize_request(proposal['request'], proposal['granter'],
                     repository.command_identity(proposal['command']), check=check)
+                _receipt_commitments(repository, proposal['source'], proposal['request'],
+                                     disposition='authorized')
             result = service.dispatch_authorized(repository.admission(row['id']))
+            if 'existing' in proposal and 'source' in proposal:
+                _receipt_commitments(repository, proposal['source'], row['request'],
+                                     disposition=result.get('dispatch', 'unknown'))
             outcomes.append(result.get('dispatch', 'unknown'))
         except Exception:
             from lib.log import get_logger

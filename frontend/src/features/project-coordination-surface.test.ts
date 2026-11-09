@@ -337,6 +337,40 @@ it("shows an empty or unavailable board explicitly and never a previous binding'
   await vi.waitFor(() => expect(f.canvas.querySelector('.coordinator-progress')?.getAttribute('data-state')).toBe('board'));
   f.surface.destroy();
 });
+it('re-reads the board when its Coordinator conversation shows a newer progress write, without a push or navigation', async () => {
+  const f = fixture(), sidebar = fixture('sidebar');
+  await f.surface.refresh(); await sidebar.surface.refresh();
+  const card = f.canvas.querySelector('.coordinator-progress');
+  const seen = (change: Partial<{ conversationId: string; bindingRevision: number; revision: number }>) => {
+    const progress = { projectPath: '/project', conversationId: 'leader', bindingRevision: 4, revision: 4, ...change };
+    f.surface.observeProgress(progress); sidebar.surface.observeProgress(progress);
+  };
+  // Writes already shown, older ones and another binding's never read.
+  for (const change of [{ revision: 3 }, { revision: 1 }, { conversationId: 'replaced' }, { bindingRevision: 3 }]) seen(change);
+  await Promise.resolve();
+  expect(f.ports.progress!.read).toHaveBeenCalledTimes(1);
+  expect(sidebar.ports.progress!.read).toHaveBeenCalledTimes(1);
+  for (const surface of [f, sidebar]) vi.mocked(surface.ports.progress!.read).mockResolvedValue(progressState({
+    ...BOARD, revision: 4, summary: 'Research done.', tasks: BOARD.tasks.map(task => ({ ...task, status: 'completed' as const })) }));
+  seen({});
+  await vi.waitFor(() => expect(f.canvas.querySelector('.coordinator-progress-summary')?.textContent).toBe('Research done.'));
+  expect(f.canvas.querySelector('.coordinator-progress')).toBe(card);
+  await vi.waitFor(() => expect(sidebar.sidebar.querySelector('.coordination-leader-meta')?.textContent)
+    .toBe('coordinatorProgress.sidebar.allDone'));
+  // The same write seen again (its round re-rendering) reads nothing more.
+  seen({});
+  await Promise.resolve();
+  expect(f.ports.progress!.read).toHaveBeenCalledTimes(2);
+  // A failed re-read is not retried by repeats of the write that requested it.
+  vi.mocked(f.ports.progress!.read).mockRejectedValue(new Error('offline'));
+  seen({ revision: 5 });
+  await vi.waitFor(() => expect(f.canvas.querySelector('.coordinator-progress')?.getAttribute('data-state')).toBe('unavailable'));
+  seen({ revision: 5 });
+  await Promise.resolve();
+  expect(f.ports.progress!.read).toHaveBeenCalledTimes(3);
+  f.surface.destroy(); sidebar.surface.destroy();
+});
+
 it('offers explicit setup without a mutation and never navigates an unavailable binding', async () => {
   const f = fixture();
   vi.mocked(f.ports.binding).mockResolvedValue({ projectPath: '/project', conversationId: 'removed', revision: 5, availability: 'unavailable', capabilities: { assign: false, sendMessage: false, steerSubagent: false } });

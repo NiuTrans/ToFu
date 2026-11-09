@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 def _log_id(conv_id: str) -> str:
-    return conv_id[:8] if conv_id else '?'
+    return conv_id if conv_id else '?'
 
 
 def _content_str(msg: dict) -> str | None:

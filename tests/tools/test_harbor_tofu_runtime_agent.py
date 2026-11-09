@@ -52,7 +52,8 @@ def _install_fake_harbor(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize('wire_model, creator, official_model, context, effort, wire_format', [
-    ('glm-5.3-m17', 'zhipu', 'glm-5.3', 200_000, 'high', 'thinking_type'),
+    # GLM-5.3 shares the maintained zhipu profile whose default rung is max.
+    ('glm-5.3-m17', 'zhipu', 'glm-5.3', 200_000, 'max', 'thinking_type'),
     ('kimi-k3', 'moonshot', 'kimi-k3', 262_144, 'max', 'reasoning_effort'),
 ])
 def test_benchmark_routes_pass_production_admission_with_native_model_defaults(
@@ -239,7 +240,7 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="prompt_lean_kimi",
         runtime_config=runtime_config,
@@ -428,7 +429,7 @@ def test_adapter_persists_partial_runtime_evidence_on_timeout_or_cancel(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="prompt_lean_kimi",
         runtime_config=runtime_config,
@@ -732,7 +733,7 @@ def test_production_surface_run_wires_catalog_and_guest_exec(
         model_name="kimi-k3",
         upstream_base_url_env="KIMI_CHAT_BASE_URL",
         upstream_api_key_env="KIMI_API_KEY",
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="slot-a",
         experiment_arm="production_surface",
         runtime_config=runtime_config,
@@ -835,7 +836,7 @@ def test_agent_init_rejects_unknown_tool_surface(tmp_path, monkeypatch):
             model_name="kimi-k3",
             upstream_base_url_env="KIMI_CHAT_BASE_URL",
             upstream_api_key_env="KIMI_API_KEY",
-            provider_face="meituan-chat",
+            provider_face="yourprovider-chat",
             provider_slot_id="slot-a",
             experiment_arm="arm",
             runtime_config=runtime_config,

@@ -35,8 +35,8 @@ android {
         applicationId = "com.tofu.client"
         minSdk = 26          // API 26: EncryptedSharedPreferences + modern WebView
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.1.18"
+        versionCode = 20
+        versionName = "0.1.19"
 
         // Pin a pasted report to retained native sources, including same-version
         // local test APKs. No device-side hashing or Git checkout is required.
@@ -55,24 +55,56 @@ android {
     }
 
     signingConfigs {
-        // A FIXED, committed debug keystore (Android's standard
-        // android/androiddebugkey convention) so every build — local AND CI —
-        // is signed with the SAME key. Without this, GitHub runners generate a
-        // fresh throwaway debug key per build, changing the signature, and
-        // Android then refuses to install the update over an existing install
-        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE / "App not installed") — forcing
-        // an uninstall each time. A debug keystore is NOT a secret; committing
-        // it is standard practice for a team-shared test build.
+        // Public team debug key is for the distinct .debug app only.
         getByName("debug") {
             storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        create("release") {
+            val keyPath = providers.environmentVariable("TOFU_ANDROID_KEYSTORE_PATH").orNull
+            if (!keyPath.isNullOrBlank()) storeFile = file(keyPath)
+            storePassword = providers.environmentVariable("TOFU_ANDROID_KEYSTORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("TOFU_ANDROID_KEY_ALIAS").orNull
+            keyPassword = providers.environmentVariable("TOFU_ANDROID_KEY_PASSWORD").orNull
+        }
+    }
+    // Debug/test configuration stays usable without release credentials. No
+    // release task may silently emit an unsigned APK or use the public key.
+    val requirePrivateReleaseSigning = tasks.register("requirePrivateReleaseSigning") {
+        doLast {
+            val names = listOf("TOFU_ANDROID_KEYSTORE_PATH", "TOFU_ANDROID_KEYSTORE_PASSWORD",
+                "TOFU_ANDROID_KEY_ALIAS", "TOFU_ANDROID_KEY_PASSWORD", "TOFU_ANDROID_SIGNER_SHA256")
+            val missing = names.filter { providers.environmentVariable(it).orNull.isNullOrBlank() }
+            check(missing.isEmpty()) { "Private release signing requires: ${missing.joinToString()}" }
+            val key = file(providers.environmentVariable("TOFU_ANDROID_KEYSTORE_PATH").get())
+            check(key.isFile && key.canonicalFile != file("debug.keystore").canonicalFile) {
+                "A release requires a private keystore, never app/debug.keystore"
+            }
+            check(!providers.environmentVariable("TOFU_ANDROID_KEY_ALIAS").get().equals("androiddebugkey", ignoreCase = true)) {
+                "The public debug key cannot sign a release"
+            }
+            // JDK source launch validates actual certificate/private-key
+            // identity even if the public keystore was copied and renamed.
+            val java = File(System.getProperty("java.home"), "bin/java").absolutePath
+            val guard = rootProject.file("ValidateKeystore.java").absolutePath
+            // The same canonical file is validated and used by AGP, even
+            // when the configured path was relative to android/app.
+            val process = ProcessBuilder(java, guard, key.canonicalPath).inheritIO().start()
+            check(process.waitFor() == 0) { "Private release certificate verification failed" }
+        }
+    }
+    tasks.configureEach {
+        if (name == "preReleaseBuild" || name == "validateSigningRelease") {
+            dependsOn(requirePrivateReleaseSigning)
+        }
     }
 
     buildTypes {
         debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
@@ -82,17 +114,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Sideloaded GitHub-Release distribution (no Play Store), so we
-            // sign the release with the SAME fixed, committed debug keystore
-            // used for debug builds. This makes `assembleRelease` produce a
-            // SIGNED, installable APK with no repo-secret setup, and — because
-            // the key never changes — release updates install over each other
-            // (and over existing debug installs) without
-            // INSTALL_FAILED_UPDATE_INCOMPATIBLE. Signing with the debug KEY
-            // does NOT make the build debuggable; that stays false on release.
-            // Switch to a secret-backed signingConfigs.release before any
-            // Play Store submission (see README "Release & signing").
-            signingConfig = signingConfigs.getByName("debug")
+            // Private release key injected per build. Legacy public-key APKs
+            // need an explicit migration; never reuse that key to preserve
+            // in-place-update compatibility at the expense of authenticity.
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

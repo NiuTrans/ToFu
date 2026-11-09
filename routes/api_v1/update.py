@@ -37,7 +37,7 @@ from lib.api_response import (
     api_conflict, api_error, api_forbidden, api_internal_error, api_not_found,
     api_ok, api_typed_error,
 )
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.openapi import api_meta
 from lib.agent_core.push import push_event
 from lib.request_parser import parse_body
@@ -305,16 +305,16 @@ def update_apply():
         )
         _ACTIVE_APPLIES.pop(task_id, None)
 
-    t = threading.Thread(target=_worker, name=f'tofu-update-{task_id[:8]}',
+    t = threading.Thread(target=_worker, name=f'tofu-update-{task_log_tag(task_id)}',
                          daemon=True)
     _ACTIVE_APPLIES[task_id] = t
     t.start()
-    logger.info('[Update] apply started in background (task=%s)', task_id[:8])
+    logger.info('[Update] apply started in background (task=%s)', task_log_tag(task_id))
     return api_ok({'taskId': task_id, 'started': True})
 
 
 def _deferred_reexec(delay: float = 0.3, *, frontend_prevalidated: bool = False,
-                     requested_at: float | None = None):
+                     requested_at: float | None = None, approval_id: str | None = None):
     """Request lifecycle-owned replacement after the HTTP response can flush.
 
     Managed workers hand the replacement to the independent Supervisor;
@@ -322,13 +322,25 @@ def _deferred_reexec(delay: float = 0.3, *, frontend_prevalidated: bool = False,
     the production shutdown stack releases child authorities and sockets.
     The delay only covers flushing this small ack response onto the wire;
     every extra millisecond here is dead time in the user-visible restart.
+    When every bridge refuses, the server keeps serving and the restart's
+    notice tells the owner's Global Router at once.
     """
     time.sleep(delay)
-    server_reexec.perform_server_reexec(
+    handed_over = server_reexec.perform_server_reexec(
         'update',
         frontend_prevalidated=frontend_prevalidated,
         requested_at=requested_at,
     )
+    if handed_over or not approval_id:
+        return
+    from lib.server.restart_notice import deliver_restart_notice
+    try:
+        _lca.note_restart_notice(approval_id, failure={
+            'code': 'restart_bridge_refused',
+            'detail': 'Every restart bridge refused; the server keeps running'})
+    except Exception as e:
+        logger.warning('[Update] restart refusal was not recorded on its notice: %s', e)
+    deliver_restart_notice(approval_id)
 
 
 def _lifecycle_origin(own_conv, force, running_count):
@@ -486,7 +498,7 @@ def update_restart():
         logger.warning(
             '[Update] Restart REFUSED — %d running task(s) would be killed: %s '
             '(pass force=true to override)',
-            len(running), [r['taskId'][:8] for r in running])
+            len(running), [r['taskId'] for r in running])
         audit_log('self_update_restart_refused', pid=os.getpid(),
                   running_tasks=len(running))
         return api_conflict(
@@ -501,7 +513,10 @@ def update_restart():
     # turn a repairable artifact error into an outage.
     from serverctl_pkg.native_engine import observe_preparation
     preparation_started = time.monotonic()
+    phases = []
     def record_preparation(progress):
+        if progress.get('phase') not in phases:
+            phases.append(progress.get('phase'))
         _lca.record_restart_preparation(approval_id, {
             **progress, 'elapsedSeconds': round(time.monotonic() - preparation_started),
         })
@@ -532,7 +547,15 @@ def update_restart():
     # cooldown. A refusal above deliberately left the token usable for the
     # force retry; once here, two concurrently approved requests must not both
     # pass a stale cooldown read and schedule two re-execs.
-    c_ok, c_why, c_remaining = _lca.consume_restart(approval_id)
+    # The owner's Global Router receives this restart's outcome as a notice:
+    # a Settings restart has no requesting conversation (docs/ROUTER.md R9).
+    from lib.boot_identity import code_fingerprint
+    c_ok, c_why, c_remaining = _lca.consume_restart(approval_id, notice={
+        'owner': request_user_id(),
+        'interrupted': sorted({item['convId'] for item in running if item.get('convId')}),
+        'oldCode': code_fingerprint(),
+        'preparation': {'ok': True, 'phases': phases,
+                        'seconds': round(time.monotonic() - preparation_started, 1)}})
     if not c_ok:
         if c_why == 'cooldown':
             logger.warning('[Update] Restart approval %s lost acceptance race '
@@ -554,7 +577,8 @@ def update_restart():
     threading.Thread(
         target=_deferred_reexec,
         kwargs={'frontend_prevalidated': True,
-                'requested_at': restart_requested_at},
+                'requested_at': restart_requested_at,
+                'approval_id': approval_id},
         name='tofu-restart',
         daemon=True).start()
     return api_ok({'restarting': True, 'forced': force,

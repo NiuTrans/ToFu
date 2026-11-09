@@ -4,6 +4,30 @@ Owner: `lib/tasks_pkg/context_composer/`. Domain map: [context engineering](modu
 
 ## Unified interface
 
+### Composition stages and investigation boundary
+
+`context_composer._render.render_context` is the ordered snapshot pipeline:
+prepare candidates (policy, deduplication, permissions and block ceilings),
+reconcile visible history (absence, reuse and supersession), admit the global
+budget, place policy/tail carriers, then publish the manifest. The phase helpers
+live in the same module so a reader can follow the pipeline without another
+dispatcher or registry. Acquisition remains in `_providers`; chronological
+events remain in `injections.append_injection` because their identity is an
+occurrence, not content equality. Both use the existing registry and manifest.
+
+**Problem:** one long renderer interleaved selection, absence handling, budget
+decisions, history mutation and receipts, obscuring where a cached prefix could
+change. **Decision:** give these stages explicit entry points and keep the
+existing ordering, token counters, fault seams, request bytes and public APIs.
+History reconciliation may withdraw an authoritative system carrier; tail
+changes append a superseding version or tombstone. Carrier placement alone
+rebuilds the managed policy prefix and appends the tail. Manifest publication
+describes those decisions; it is not evidence of provider consumption.
+**Alternatives considered:** a new plugin pipeline would duplicate the closed
+registry and hide execution order; a replacement message store would duplicate
+transcript authority; moving every helper into its own file would worsen local
+investigation. Provider serialization and cache verdicts keep their own owners.
+
 Every engine-authored conversational context addition uses the public `lib.tasks_pkg.context_composer` interface. Register its `InjectionSpec` first: stable ID, source, necessity, actual trigger, required/optional status, authority, lifecycle, lane, priority and content-token ceiling. Unknown production IDs fail closed. Providers acquire owner-authorized evidence; they cannot invent placement, priority or budget policy. Registration never grants tool/filesystem permissions.
 
 | Lane | Interface and invariant |
@@ -102,6 +126,127 @@ Rows expose `registryId`, `source`, `necessity`, `trigger`, `required`, `lane`, 
 
 Receipts describe append/decision history, **not** a sum of current provider input or proof of consumption. Original append receipts are immutable; one latest non-appended decision per ID exposes provider failure/recovery without per-round accumulation. History is task/child-scoped and capped at **128 rows and 128 KiB**; `_contextManifestDropped` counts oldest-row eviction. Receipts contain no prompt/result bodies or vault values; source-defined bounded provenance can contain paths/names.
 
+### Source attribution from exported requests
+
+**Transformation provenance — Problem:** sanitization merged event text and
+discarded occurrence identity; marker observations alone could not connect a
+source to the provider-bound request. **Decision:** the existing request builders
+carry a content-free, request-local source map through their transformations.
+Source occurrences retain original positions and hashes; structural owners
+explicitly map merges and protocol emission. An unsupported transformation
+records the first stage that loses the witness instead of matching substrings.
+The sealed request binds the final map to its existing request identity,
+exact payload digest and canonical JSON content digest. No provenance enters provider JSON. **Alternatives
+rejected:** fuzzy text reconstruction (identical events are ambiguous), a second
+cache classifier (the current detector remains authoritative), and another
+trace store (existing Inspector/transport evidence owns retention).
+
+For a conversation ID, start with `debug/inspect_conversation.py <id>`.
+For already-exported requests, use the read-only JSON investigation entry point:
+
+```sh
+.venv/bin/python3 scripts/inspect_context.py round-1.json
+.venv/bin/python3 scripts/inspect_context.py round-1.json round-2.json
+.venv/bin/python3 scripts/inspect_context.py wire-1.json wire-2.json --wire
+```
+
+Inputs are complete, unfolded Request Inspector snapshots (`messages` and
+optional `contextManifest`), working message exports, or parsed final provider
+bodies with `--wire` (Chat/Anthropic `messages` + `system`, Responses `input` +
+`instructions`). It does not fetch conversations, replay a model, change a
+request, or persist another trace. Output contains source IDs, registry/writer
+locations, hashes, positions and selected receipt fields, never prompt bodies.
+The inspector reads only the supplied artifacts. Runtime maps use the existing
+snapshot/wire-projection diagnostics and their retention owner; there is no new
+trace store. The shape is defined in
+`contracts/context_lineage_v1.schema.json`.
+
+`context_composer.inspection` joins observations to the existing registry. The
+same `llm_sanitize.context_sections` / `block_content_hash` identity serves render
+reuse, policy migration and inspection, including amalgamated siblings. A local
+managed carrier is labelled `managed_carrier`; its actual hash is compared with
+its receipt (`matchesReceipt`). A chronological carrier retains `event_receipt`
+identity when its private receipt is present. Current Python builders attach
+`contextLineage` separately from model-visible messages. Sanitization, role
+merging and actual Chat/Anthropic/Responses emitters carry explicit source
+ranges; `changedAt` names the first known content rewrite, and `lostAt` the
+first stage that cannot preserve a witness. The inspector verifies the schema
+and each actual range hash before reporting `transformation_lineage`.
+Identical events retain their distinct event IDs and positions after merging.
+The text-only image projection maps retained part indexes when multiple image
+blocks collapse into one notice; equal neighboring text cannot substitute for
+the original occurrence.
+
+Legacy exports without these maps still work: matching event text and manifest hashes yield
+`receipt_hash_match` **candidates**, preserving every matching occurrence rather
+than inventing one. Events merged with neighboring text have no exact carrier
+hash witness and remain explicit `unlocatedEventReceipts`; no substring guess
+or paragraph splitting manufactures provenance. Proving those historical
+positions requires source ranges those historical exports did not capture.
+Native Rust final transport is also outside the current Python mapping
+coverage: its snapshots do not establish final provider positions.
+Marker spans alone are
+`marker_only`, including user quotes and hoisted provider policy. Registry
+authority is a source declaration, never
+proof that a quoted marker had that authority in a request. Missing or evicted
+receipts stay unknown; stale hashes cannot suppress observed drift.
+
+To join a raw archive with its exported evidence, pass this JSON bundle to
+`inspect_context.py --wire` (the same shape works for both comparison inputs):
+
+```json
+{
+  "request": {"model": "...", "messages": []},
+  "evidence": {"wireProjections": [{"contextLineage": {}}]},
+  "traceId": "exact-transport-occurrence",
+  "cacheRecords": []
+}
+```
+
+Replace `request` with the complete parsed provider body, `evidence` with the
+complete unfolded Inspector export (or the transport's usage evidence), and
+`cacheRecords` with existing `CacheRoundRecord` JSON records. The empty map
+above is a shape illustration, not valid evidence. The optional `traceId`
+selects one transport occurrence when identical bodies were retried. Multiple
+matches remain `ambiguous`; no last-retry guess is allowed.
+`requestContentHash` binds the complete sorted JSON content, including controls
+outside source spans, so a key-sorted archive remains verifiable.
+`wireBodyHash` separately names the exact sealed bytes; parsed JSON cannot
+recover their original key order. Cache evidence joins only when both request
+identities and the transport trace ID match one record. `cacheObservation`
+then exposes that existing detector's verdict and usage; it does not infer a
+new verdict from changed text. Missing, malformed, stale and pruned evidence
+remain explicit statuses.
+
+Stage owners are directly discoverable:
+
+| Stages | Owner |
+|---|---|
+| Field projection through canonical messages | `llm/body/_build.py`, `tasks_pkg/wire_messages.py`; range operations in `llm_sanitize/lineage.py` |
+| Chat / Anthropic / Responses projection | The corresponding `llm/*outbound*` emitter |
+| Immutable request binding | `llm/request.py::seal_request` |
+| Snapshot content reduction | `tasks_pkg/round_evidence.py` (`snapshot_projection` losses do not alter provider evidence) |
+| Export validation and cache-record join | `context_composer/_lineage_inspection.py` |
+| Storage-only source-prefix encoding and replay | `tasks_pkg/snapshot_delta.py` |
+
+Comparison reuses `wire_fingerprint` for semantic, message-field and region
+evidence. It reports the common message prefix, first changed message/fields
+and changed source hashes, with separate system/tools/controls/model and cache
+marker changes. Pure tail append, history shortening and prefix rewriting are
+distinct outcomes. Unchanged sibling blocks are not blamed when a carrier is
+inserted or withdrawn; pure movement is labelled `carrier_layout`. A wrapper or
+unmanaged-content change has `outside_observed_sections` attribution. Positions
+are in the **input artifact's** message space, never silently mapped across
+provider envelopes. Section `part` indexes text parts; `start`/`end` are character
+offsets within that part, not UTF-8 byte positions.
+
+`cacheVerdict=not_evaluated` is deliberate: this finds request drift, not its
+billing consequence. Inspector messages may omit media bytes and transport
+transforms; parsed request JSON cannot prove original serialization, credentials,
+cache namespace, TTL elapsed time or provider usage. Compare final archives and
+the existing `cache_tracking` / `CacheRoundRecord` evidence before declaring a
+cache miss or an upstream fault. The tool does not create another classifier.
+
 The toolbar measures last prompt usage / **full** model window, falling back to post-compaction estimates when necessary. Budget diagnostics measure current working-message estimates / **usable** input after reserves. Their numerator, denominator and observation time differ: a screenshot cannot establish simultaneous measurements. Neither is a task deadline. Automatic compaction and final-wire admission enforce capacity without model-facing countdowns.
 
 ## Per-injection necessity and admission inventory
@@ -110,6 +255,7 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 
 | Registry ID | Necessity decision and admission | Content-cost policy |
 |---|---|---|
+| `paper_output_repair` | One checkpoint JSON repair after an actual parse failure; shared event writer preserves the existing retry prompt and gives the occurrence provenance | Required; the Paper owner retains its existing one-retry policy |
 | `platform_static` | Keep platform operating contract as dedicated system prefix; absent in explicit replace-system mode | Required; no advisory clipping; not lossy history |
 | `role_directive` | Keep only for an explicitly specialized role | Required; 5,000 tokens |
 | `goal_objective` | Chat Goal worker's durable objective restated verbatim (inline bound 4,000 chars; byte-stable per run so prefix caching holds and compaction cannot drift scope) | Required; 8,000 tokens |
@@ -221,6 +367,19 @@ docs/RENDER_CONTRACT.md §System interventions → Context-note grouping.
 `tests/context/test_context_composer_notes.py` enforces the emission,
 reuse-suppression, disabled-block, and fire-once semantics above.
 
+**Continue keeps the Turn's context record.** A resumed attempt restores its
+Turn's checkpointed working view before composing context
+([CONTEXT_COMPACTION.md](CONTEXT_COMPACTION.md#continuation-checkpoints),
+"Interrupted Turns resume their exact working view"), so content addressing
+reuses everything the interrupted request carried and notes only blocks that
+really changed, at the resume point where they are appended. Turn-stability
+evidence (`relevant_memories`) is not re-selected for the same request
+(`turn_selection_retained`). Earlier attempts' notes travel in the resume
+config (`checkpointInjectedNotes`) and keep their own attempt scope, so the
+original record stays beside that attempt's retained rounds; an attempt without
+a retained round carries none, because its note could only render after the new
+reply. Spec: `tests/tasks_pkg/test_resume_view_context.py`.
+
 ### Runtime input visibility ownership
 
 **Problem:** sharing the `inbox_delivery` carrier did not imply sharing its
@@ -237,6 +396,9 @@ inbox/peer drain owners opt out explicitly with a validated `display_owner`;
 `displaySurface`, `displayOwner`, `displayReason`, and the generic note's `blockId`.
 These are bounded diagnostic receipts, not a second mailbox or durable ACK store.
 A sidecar declaration is the producer's contract, not proof of provider consumption.
+A human steer's images ride the same carrier as `media` blocks ahead of its text,
+the layout of a user message with images. The manifest row adds an `images` count
+beside the text cost (`docs/modules/task_engine.md`, steer images).
 
 Carrier, generic note and append manifest form one synchronous transaction: any
 recorder failure restores all three, including evicted manifest history/counters.

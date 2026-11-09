@@ -23,7 +23,7 @@ from datetime import datetime
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.conversation_sync.settled_rows import json_array_text
 from lib.error_envelope import to_json as _error_to_json
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager._events import snapshot_task_text
 from lib.tasks_pkg.manager._persist import (
     _merge_tool_rounds,
@@ -63,7 +63,7 @@ def _update_proactive_execution_status(task: dict) -> None:
     except Exception:
         logger.warning(
             "[Scheduler] Failed to settle execution task=%s",
-            task_id[:8],
+            task_log_tag(task_id),
             exc_info=True,
         )
 
@@ -114,7 +114,7 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
     except Exception:
         logger.warning(
             "[Checkpoint %s] Segment assembly failed",
-            task_id[:8],
+            task_log_tag(task_id),
             exc_info=True,
         )
 
@@ -176,7 +176,7 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
                     # Partial checkpoints have always been best-effort. The
                     # ordered Turn/event commit remains the durable authority.
                     logger.warning('[Checkpoint %s] Background recovery checkpoint failed',
-                                   task_id[:8], exc_info=True)
+                                   task_log_tag(task_id), exc_info=True)
             with lane.producer_lock:
                 coordinator().submit(lane, -1,
                     retained_snapshot_bytes(checkpoint_payload), save_checkpoint, lambda: None)
@@ -184,7 +184,7 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
             checkpoint_owned = _upsert_task_row(task, conversation_id, **checkpoint_payload)
         logger.debug(
             "[Checkpoint %s] %s executor state: content=%d thinking=%d",
-            task_id[:8],
+            task_log_tag(task_id),
             "Queued" if lane is not None and not (force and wait_for_durability) else "Saved",
             len(content),
             len(thinking),
@@ -192,25 +192,25 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
     except Exception:
         logger.warning(
             "[Checkpoint %s] Failed to persist executor state",
-            task_id[:8],
+            task_log_tag(task_id),
             exc_info=True,
         )
         if task.get("finishReason"):
             logger.warning(
                 "[Checkpoint %s] Terminal metadata was not persisted: %s",
-                task_id[:8],
+                task_log_tag(task_id),
                 terminal_state_log_summary(task, persisted=False),
             )
 
     if checkpoint_owned is False:
         logger.warning(
             "[Checkpoint %s] Rejected by the recovery/terminal ownership fence",
-            task_id[:8],
+            task_log_tag(task_id),
         )
         return False
 
     concurrent_tasks = [
-        (str(other.get("id") or "")[:8], str(other.get("convId") or "")[:8])
+        (task_log_tag(other.get("id")), str(other.get("convId") or ""))
         for other in chat_task_runtime.snapshot()
         if other.get("status") in ("pending", "running")
         and other.get("id") != task_id
@@ -219,7 +219,7 @@ def checkpoint_task_partial(task: dict, force: bool = False, *, wait_for_durabil
         logger.debug(
             "[Checkpoint %s] %d other executor(s) are live "
             "(pending/running): %s",
-            task_id[:8],
+            task_log_tag(task_id),
             len(concurrent_tasks),
             concurrent_tasks,
         )

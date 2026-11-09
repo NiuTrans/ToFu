@@ -56,6 +56,7 @@ from .knowledge import api_v1_knowledge_bp
 from .media import api_v1_media_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
+from .myday import api_v1_myday_bp
 from .oauth import api_v1_oauth_bp
 from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
@@ -128,6 +129,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_media_bp,
     api_v1_mcp_bp,
     api_v1_daily_report_bp,
+    api_v1_myday_bp,
     api_v1_oauth_bp,
     api_v1_adapter_bp,
     api_v1_project_bp,

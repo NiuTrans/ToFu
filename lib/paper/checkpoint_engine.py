@@ -206,10 +206,11 @@ def run_report_checkpoints(report_md, ui_lang='en', *, phash='', model=None,
             logger.info('[Paper:Checkpoints] unparseable reply — one-shot repair re-ask')
             repair = list(messages)
             repair.append({'role': 'assistant', 'content': (content or '')[:6000]})
-            repair.append({'role': 'user', 'content':
+            from lib.tasks_pkg.context_composer import append_injection
+            append_injection(repair, 'paper_output_repair',
                            'Your previous reply could not be parsed as JSON. Reply with ONLY '
                            'the single JSON object described earlier — starting with { and '
-                           'ending with } and nothing else.'})
+                           'ending with } and nothing else.')
             content = _dispatch(repair, temperature=0.0,
                                 max_tokens=_REPAIR_MAX_TOKENS,
                                 prefix='[Paper:Checkpoints:Repair]')

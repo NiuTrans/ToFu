@@ -30,7 +30,6 @@ def test_real_http_complete_file_reception(monkeypatch, declared):
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever)
     monkeypatch.setenv('TOFU_TEST_FETCH_ALLOW', 'localhost')
-    monkeypatch.setattr('lib.safe_fetch.proxies_for', lambda url: {})
     for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
         monkeypatch.delenv(key, raising=False)
     thread.start()

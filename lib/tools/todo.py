@@ -3,6 +3,8 @@
 The schema and pure replacement/validation live here; the task handler persists
 one accepted snapshot for UI and compaction. Progress is not completion authority.
 Historical v2 stacks are read-only migration inputs, never a live state machine.
+A board-keeping Coordinator's plan is its task board: the checklist publishes
+through it (``publish``) and adopts the board's plan (``adopt_todo_projection``).
 """
 
 from __future__ import annotations
@@ -305,6 +307,9 @@ def _result_text(outcome: dict) -> str:
     else:
         done = sum(t['status'] == 'completed' for t in todos)
         prefix = f'Checklist updated: {done}/{len(todos)} completed.'
+        note = (outcome.get('publication') or {}).get('note')
+        if note:
+            prefix += ' ' + note
     return prefix + '\n' + render_todo_snapshot(outcome['state'])
 
 
@@ -313,17 +318,54 @@ def apply_todo_write(fn_args: dict) -> tuple[list[dict], str]:
     return outcome['todos'], _result_text(outcome)
 
 
-def apply_todo_write_to_task(task: dict, fn_args: dict | None) -> tuple[list[dict], str, dict]:
-    """Validate before atomically replacing accepted progress and its mirror."""
+def todo_lock(task: dict):
+    """The task's progress lock: accepted plans, and the owner they publish to, change in order."""
     lock = task.get('_todo_lock')
     if lock is None:
         lock = task.setdefault('_todo_lock', threading.RLock())
-    with lock:
+    return lock
+
+
+def apply_todo_write_to_task(task: dict, fn_args: dict | None, *,
+                             publish=None) -> tuple[list[dict], str, dict]:
+    """Validate before atomically replacing accepted progress and its mirror.
+
+    ``publish`` is the plan's durable owner when the task has one (a
+    Coordinator's task board). It receives each accepted change before the task
+    adopts it and returns the publication, whose ``note`` joins the receipt; a
+    ValueError it raises rejects the write and leaves both unchanged.
+    """
+    with todo_lock(task):
         outcome = apply_todo_operation(todo_state_from_task(task), fn_args)
+        if publish is not None and not outcome['rejected'] and not outcome['no_op']:
+            try:
+                outcome['publication'] = publish(copy.deepcopy(outcome['state']))
+            except ValueError as exc:
+                outcome = _outcome(todo_state_from_task(task), reason=str(exc))
         if not outcome['rejected']:
             task['_todoState'] = copy.deepcopy(outcome['state'])
             task['_todos'] = copy.deepcopy(outcome['todos'])
     return outcome['todos'], _result_text(outcome), outcome
+
+
+def adopt_todo_projection(task: dict, todos, explanation: str) -> dict:
+    """Adopt a plan another owner accepted (a Coordinator's task board) as this task's progress.
+
+    Rows are validated like a todo_write; an unchanged plan keeps its update count.
+    """
+    rows = _normalize_todos(todos)
+    if not isinstance(explanation, str) or len(explanation) > TODO_MAX_EXPLANATION_CHARS:
+        raise ValueError(f'explanation must be text of at most {TODO_MAX_EXPLANATION_CHARS} characters')
+    explanation = explanation.strip()
+    with todo_lock(task):
+        state = todo_state_from_task(task)
+        if not (state['update_count'] > 0 and rows == state['todos']
+                and explanation == state['explanation']):
+            state = {'version': TODO_STATE_VERSION, 'todos': rows,
+                     'explanation': explanation, 'update_count': state['update_count'] + 1}
+        task['_todoState'] = copy.deepcopy(state)
+        task['_todos'] = copy.deepcopy(rows)
+    return state
 
 
 def compact_todo_rounds_for_replay(rounds: list[dict] | None) -> list[dict]:

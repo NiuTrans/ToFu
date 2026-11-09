@@ -231,7 +231,7 @@ def settle_scheduled_compaction(task: dict) -> bool:
     if cleared:
         task['_scheduledWorkingViewCompaction'] = None
         logger.info('[Pipeline] conv=%s scheduled compaction %s adopted',
-                    str(task.get('convId') or '')[:8], marker['requestId'][:8])
+                    str(task.get('convId') or ''), marker['requestId'][:8])
     return cleared
 
 
@@ -311,7 +311,7 @@ def settle_compaction_request_size(messages: list, task: dict, *,
     reduction = (1 - tokens_after / max(1, tokens_before)) * 100
     conv_id = compaction_owner_key(task)
     logger.info('[PostCompact] conv=%s archive=%s request tokens: %d → %d '
-                '(%.0f%% reduction, via %s)', conv_id[:8] if conv_id else '?',
+                '(%.0f%% reduction, via %s)', conv_id if conv_id else '?',
                 str(pending['archiveId'])[:12], tokens_before, tokens_after,
                 reduction, method)
     try:
@@ -374,7 +374,7 @@ def run_compaction_pipeline(
     conv_id = compaction_owner_key(task)
 
     logger.debug('[Pipeline] round=%d  conv=%s  messages=%d',
-                 current_round, conv_id[:8] if conv_id else '?',
+                 current_round, conv_id if conv_id else '?',
                  len(messages))
 
     # ── PreCompact hooks ──
@@ -425,7 +425,7 @@ def run_compaction_pipeline(
             if _l1_kwargs or _disable_l1 or _disable_force:
                 logger.info('[Pipeline] conv=%s  compaction override: %s '
                             'disableL1=%s disableForce=%s',
-                            conv_id[:8] if conv_id else '?',
+                            conv_id if conv_id else '?',
                             sorted(_l1_kwargs), _disable_l1, _disable_force)
     # L1 runs unless explicitly disabled. When an arm supplies its own
     # ``steps`` we still go through micro_compact (it routes those steps);

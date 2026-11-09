@@ -17,13 +17,36 @@ head tracks exact encoded projection bytes, appended revisions, and the two
 page cursors. UTF-8-safe text pages occupy the same owner-qualified projection
 head namespace, at most 16 KiB of raw text each. An append reads and updates
 only each affected final page plus new pages and the ordinary transaction
-headers. Initial conversion materializes the old projection once. Reads,
-structural updates, terminal settlement and interrupted recovery hydrate and
-validate the frozen prefix and pages; folds and settlement retire the complete
-head in their existing atomic transaction. Snapshot readers retain their old
-pages. No independent cache, background writer or relaxed acknowledgement is
-introduced. Admission retains the existing settleable snapshot/recovery reserve;
-larger suffixes and near-limit projections use the ordinary patch path.
+headers. Opening a tail reuses the committed live-head projection when one is
+resident ([residency](TOFUDB_JSON_MATERIALIZATION.md#committed-live-head-residency))
+and otherwise materializes the old projection once. Reads, terminal settlement
+and interrupted recovery hydrate and validate the frozen prefix and pages;
+folds and settlement retire the complete head in their existing atomic
+transaction. Snapshot readers retain their old pages. No background writer or
+relaxed acknowledgement is introduced. Admission retains the existing
+settleable snapshot/recovery reserve; larger suffixes and near-limit
+projections use the ordinary patch path.
+
+Structural revisions after text. Problem: a structural event behind an open
+tail folded the whole head into a new full checkpoint, because readers apply
+the chain before the pages. Agent rounds alternate text and tool events, so
+production rewrote a multi-MiB checkpoint about once per structural event
+(674 KB of WAL each for a 3.75 MB projection; consecutive checkpoints share no
+1 MiB blob chunk). Decision: `text_tail::close_into_chain` first turns the tail
+into chain patches at its own revisions, one per tail revision: the first
+carries every appended byte (pages keep no per-revision split), the others are
+empty. It deletes the pages and the structural patch follows, so chain
+positions equal projection revisions again and older engines, the per-revision
+conversation diagnostic and the frame-witness fast path read the head
+unchanged. Only a chain without room for the tail revisions plus the
+structural patch (64 patches or 1 MiB) still folds into a new checkpoint.
+Alternatives considered: keeping the tail open behind renumbered chain patches
+also avoids the checkpoint, but leaves tails open for the whole live Turn,
+where the native diagnostic answers stale and the witness cannot apply; a
+multi-revision fold patch changes the head format older readers validate.
+Measured with `turn::event_load_tests` (180 streaming events, same sequence):
+checkpoint writes 36 to 2, WAL 141 to 16 KB per event, byte-identical reopened
+public state.
 
 Alternatives considered: extending the patch-count ceiling postpones the same
 growing replay and fold cost; an independent append log requires another

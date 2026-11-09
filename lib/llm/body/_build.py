@@ -86,6 +86,8 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
 
     clean_messages = _strip_non_api_fields(
         messages, carry_same_role_seam_hints=True)
+    from lib.llm_sanitize.lineage import BODY_FIELD, MessageLineage
+    lineage = MessageLineage(messages, clean_messages)
     # Protocol-private assistant state is not an OpenAI API field, but native
     # protocol converters need it after the generic body builder has run.
     # Restore it onto the canonical in-process body here; the final OpenAI
@@ -111,11 +113,13 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     # re-exposure on blocked-term conversations).
     if _pid.startswith('example-corp') or (not _pid and 'example-corp' in _lib.LLM_BASE_URL):
         _sanitize_messages(clean_messages)
+    lineage.observe('gateway_sanitize', clean_messages)
 
     # Strip phantom empty text blocks BEFORE the whole-content healers so a
     # list left empty by the strip is claimed by them (Kimi 400 "text content
     # is empty" — see _strip_empty_text_blocks).
     _strip_empty_text_blocks(clean_messages)
+    lineage.observe('text_normalization', clean_messages)
     # Heal tool_call wire shape for ANY model BEFORE the orphan/adjacency
     # fixer (which pairs BY id): empty/missing function.name → placeholder,
     # missing type/id, non-string arguments, unpairable tool_call_id.
@@ -124,7 +128,9 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     clean_messages = _fix_tool_call_wire_shape(clean_messages)
     clean_messages = _fix_orphaned_tool_calls(clean_messages)
     clean_messages = _drop_empty_assistant_messages(clean_messages)
+    lineage.observe('protocol_repair', clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)
+    lineage.observe('same_role_merge', clean_messages)
 
     if model_supports_vision(knowledge_model):
         clean_messages = _validate_image_blocks(
@@ -151,10 +157,12 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
                 _projected_image_count, model,
                 vision_fallback_from or 'none')
 
+    lineage.observe('image_projection', clean_messages)
     _fix_empty_user_messages(clean_messages)
     clean_messages = _inject_gemini_thought_signatures(
         clean_messages, knowledge_model)
     _inject_claude_reasoning_details(clean_messages, knowledge_model)
+    lineage.observe('model_adaptation', clean_messages)
 
     body = {
         'model': model,
@@ -210,6 +218,9 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     # only the byte layout the gateway prompt-cache matches on. See
     # _canonical_wire.py.
     canonicalize_messages_inplace(body['messages'])
+    context_lineage = lineage.finish(body['messages'])
+    if context_lineage['sources']:
+        body[BODY_FIELD] = context_lineage
 
     # One-line observability for the dialect choice. Debug level so
     # production logs stay clean; flip a logger to DEBUG when triaging

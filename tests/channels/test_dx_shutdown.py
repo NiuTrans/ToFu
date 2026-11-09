@@ -17,7 +17,7 @@ class Bridge:
     def __init__(self):
         self.events = queue.Queue()
         self.returncode = None
-        self.refusal = ''
+        self.refusal = None
 
     def alive(self):
         return self.returncode is None
@@ -35,24 +35,30 @@ MESSAGE = {'type': 'message', 'source': 'im', 'message': {
     'message': {'text': 'pending message'}}}
 
 
-def test_storage_failure_diagnostics_cannot_skip_bridge_termination(store, monkeypatch):
+def test_a_storage_outage_never_terminates_the_bridge_even_without_diagnostics(store, monkeypatch):
+    # 11/08 02:48:50: live ingest met "Storage sidecar is unavailable"; the connection itself was fine.
     bridge = Bridge()
     adapter = DxAdapter(OWNER, store=store)
     adapter._bridge = bridge
-    calls = []
+    reads, writes = [], []
 
-    def unavailable(*args, **kwargs):
-        calls.append(args)
-        raise StorageError('database_unavailable', 'Storage sidecar is unavailable')
+    def unavailable(calls):
+        def refuse(*args, **kwargs):
+            calls.append(args)
+            raise StorageError('database_unavailable', 'Storage sidecar is unavailable')
+        return refuse
 
-    monkeypatch.setattr(store, 'account', unavailable)
-    monkeypatch.setattr(store, 'set_status', unavailable)
-    bridge.events.put(MESSAGE)
-    bridge.events.put(None)
+    monkeypatch.setattr(store, 'account', unavailable(reads))
+    monkeypatch.setattr(store, 'set_status', unavailable(writes))
+    for item in ({'type': 'status', 'status': 'connected', 'selfUid': '1001'}, MESSAGE, MESSAGE, None):
+        bridge.events.put(item)
     adapter._process()
-    assert len(calls) == 2
-    assert bridge.returncode == -15
-    assert adapter.outcome() == ('error', 'ingest failed: database_unavailable')
+    # The catch-up and both events were attempted; each failure is owed to the next catch-up.
+    assert len(reads) == 3 and writes
+    assert bridge.returncode is None
+    # A later exit reports the exit itself, not a stale ingest failure.
+    bridge.returncode = 4
+    assert adapter.outcome() == ('disconnected', 'bridge exited (4)')
 
 
 @pytest.mark.parametrize('item', [MESSAGE, {'type': 'status', 'status': 'connected'}])

@@ -490,17 +490,17 @@ def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False,
                                            'registry and no usable primary; '
                                            'resolving %s without registering a '
                                            'root (no global pollution)',
-                                           conv_id[:12], abs_path)
+                                           conv_id, abs_path)
                             _enforce_not_readonly(abs_path, conv_id=conv_id)
                             return abs_path
                         logger.info('[WriteTools] seeded conv-scoped registry from '
                                     'primary %s and auto-registered root %s '
                                     '(conv=%s) for absolute-path write to %s',
-                                    _base_abs, anchor, conv_id[:12], abs_path)
+                                    _base_abs, anchor, conv_id, abs_path)
                     else:
                         logger.info('[WriteTools] Auto-registered conv-scoped workspace '
                                     'root %s (conv=%s) for absolute-path write to %s',
-                                    anchor, conv_id[:12], abs_path)
+                                    anchor, conv_id, abs_path)
                     if not _existing:
                         _signal_root_added(_rname or os.path.basename(anchor), anchor)
                 else:
@@ -552,7 +552,7 @@ def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False,
                         except Exception as e:
                             logger.debug('[WriteTools] add_conv_root failed conv=%s '
                                          'anchor=%s (non-fatal): %s',
-                                         conv_id[:12] if conv_id else '?', anchor, e)
+                                         conv_id if conv_id else '?', anchor, e)
                     _signal_root_added(_new_name or os.path.basename(anchor), anchor)
                 _enforce_not_readonly(abs_path, conv_id=conv_id)
                 return abs_path

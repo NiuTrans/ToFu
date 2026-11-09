@@ -70,7 +70,7 @@ _GATEWAY_BLOCKED_TERMS = {
 }
 
 
-def _sanitize_gateway_content(text: str) -> str:
+def _sanitize_gateway_content(text: str, *, spans=(), part=0) -> str:
     """Replace gateway-blocked keywords with safe equivalents.
 
     Applied to message content before sending to the LLM API to prevent
@@ -91,6 +91,9 @@ def _sanitize_gateway_content(text: str) -> str:
             # the debug log (the original placeholder-era bug).
             continue
         if blocked in text:
+            if spans:
+                from lib.llm_sanitize.lineage import replace_spans
+                replace_spans(spans, part, text, blocked, safe)
             text = text.replace(blocked, safe)
             replaced.append(f'{blocked}→{safe}')
     if replaced:
@@ -108,10 +111,12 @@ def _sanitize_messages(messages: list) -> list:
     """
     for msg in messages:
         content = msg.get('content')
+        spans = msg.get('_contextLineageSpans', ())
         if isinstance(content, str):
-            msg['content'] = _sanitize_gateway_content(content)
+            msg['content'] = _sanitize_gateway_content(content, spans=spans)
         elif isinstance(content, list):
-            for block in content:
+            for part, block in enumerate(content):
                 if isinstance(block, dict) and block.get('type') == 'text':
-                    block['text'] = _sanitize_gateway_content(block.get('text', ''))
+                    block['text'] = _sanitize_gateway_content(
+                        block.get('text', ''), spans=spans, part=part)
     return messages

@@ -41,8 +41,8 @@ STALE_SETTINGS = {
 
 CREATING_TURN_CONFIG = {
     'model': 'claude-opus-5.5', 'preset': 'claude-opus-5.5', 'modelRef': OPUS_REF,
-    'preferredProviderId': 'sankuai',
-    'routing': {'preferred_provider_id': 'sankuai'},
+    'preferredProviderId': 'example-corp',
+    'routing': {'preferred_provider_id': 'example-corp'},
     'thinkingDepth': 'max', 'thinkingEnabled': True,
     'maxTokens': 64000, 'temperature': 0.2,
     'systemPrompt': 'Answer in Chinese.', 'systemPromptMode': 'append',

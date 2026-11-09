@@ -89,6 +89,15 @@ SQLite file to bypass a native error. `--db` is a verified offline SQLite overri
 `--api-url` selects an application, with `--api-token-env NAME` for authorization.
 Tokens must not be passed on the command line or printed.
 
+`--request-evidence` follows the latest request owned by each selected task and
+reports archive identity, trace and availability without printing provider bodies.
+Problem: a parent's request catalog also contains newer swarm-child rows, whose
+`sourceTaskId` names a different owner. Decision: select the latest row belonging
+to the task being inspected; if only child rows remain, report the missing
+task-owned evidence. Alternative rejected: fetching a child's round through the
+parent path produces a misleading 404 and hides the parent's active request.
+Archive ownership validation and the existing shared read budget remain in force.
+
 The API reader bounds individual responses at 8 MiB, total input at 32 MiB by
 default, and wall time at 30 seconds. Request allowance derives from the total
 byte allowance and 64 KiB chunk size rather than retaining the old 128-page cap.
@@ -258,22 +267,51 @@ fences or the API reader's coverage/budgets.
 
 ## Inspector logs, context injections and JSON output
 
-**Log matching.** Many call sites log `conversation_id[:8]`
-(`[ModelReplay] conv=mt18xr3w restore=history_changed`,
-`[Translate] committed field=content conv=mt18xr3w turn=…`). A log line belongs
-to the conversation when it contains the full ID, or the 8-character prefix as a
-standalone token: not preceded by an ASCII letter or digit, and followed by one
-only when the full ID continues there. A different conversation sharing the
-prefix (`conv=mt18xr3wzzzzzz`) therefore never matches; an ID of at most 8
-characters must itself be a standalone token. A substring check on the prefix
-runs before the pattern, in rotated files and the live 4 MiB tail alike.
-Matching the bare prefix as a substring was rejected because it attributes
-sibling conversations' lines; full-ID-only matching drops the model-replay and
-translation evidence.
+**Log matching.** Log text names conversations, tasks and attempts by their
+whole ids ([LOGGING.md](../LOGGING.md), "Adding a diagnostic"). A line belongs
+to the conversation when it contains the whole ID as a standalone token: not
+preceded or followed by an ASCII letter or digit, so `conv=mt18xr3wfs0rbqz`
+never matches `mt18xr3wfs0rbq`.
+
+Lines written before whole-id logging (2026-11-09) may name the conversation by
+its first 8 characters only, which other conversations share by construction:
+every Worker id starts with `worker-`, so `conv=worker-1` names about one Worker
+in sixteen. Such a standalone-prefix line is kept only when one of its run
+tokens is one of the conversation's runs, whole or as the legacy 8-character
+tag; otherwise it is omitted and counted in the file header
+(`; N legacy short-ID line(s) omitted`). Run tokens are the `[rid:…]` prefix (a
+task seeds it with its attempt id; HTTP request ids are 8 hex or `<page>-<n>`),
+`[Task …]`, a bracketed attempt tag, `task=`/`attempt=`/`task_id=`/`attempt_id=`
+values and `conversation-attempt:<uuid>`; the namespace is ignored. A kept
+line whose run tokens name another run's whole attempt id and none of the
+conversation's (another conversation's task acting on this one, such as its
+Coordinator) is prefixed `⚑ other run | ` and counted (`; N ⚑ other run`).
+
+The conversation's runs are the `_attemptId`/`_taskId` of the read transcript's
+messages and the attempt/task ids of their tool rounds (and `inspectorRef`),
+segments and activity-timeline entries, including a swarm child's own task id
+from `<parent>#agent:<child>`, plus, offline, every
+`storage_generation_attempts` row. An `attribution:` line under `== Logs ==`
+states how many were found and from how much of the transcript. Marks need the
+whole set: when turns went unread (the default API head/tail view, a turn range,
+or a budget stop), a run none of the read turns names may be an unread turn's,
+so nothing is marked and the line says so; `--full` and `--json` read every
+turn. Legacy lines need a known run either way, so a partial read omits more of
+them; it never attributes another conversation's. An attempt that left no
+transcript record (one that failed before producing content) is unknown to an
+API read and its whole-ID lines can be marked; offline attempt rows include it.
+An ID of at most 8 characters is its own prefix and has no legacy path. A substring check on the
+prefix runs before the patterns, in rotated files and the live 4 MiB tail
+alike. Rejected: matching the bare prefix (LONGCTX-ATTRIB 48a9650c blamed 42
+cache misses on another Worker's checkpoint rebuilds), dropping every legacy
+line (it discards the conversation's own evidence that its run ids attribute
+exactly) and joining by time windows (concurrent Workers interleave).
 
 `--log-match REGEX` keeps only the conversation's lines that also satisfy Python
-`re.search`. It applies before the per-file `--logs N` cap, so N keeps the last N
-filtered lines; every scanned file still prints its `--- name: N line(s)` header.
+`re.search` on the line as logged (without the other-run mark). It applies
+before the per-file `--logs N` cap and before omitted lines are counted, so N
+keeps the last N filtered lines; every scanned file still prints its
+`--- name: N line(s)` header.
 An invalid pattern or `--no-logs` is a usage error (exit 2). A model-replay and
 translation timeline: `--log-match 'ModelReplay|Translate\] committed'`.
 
@@ -296,8 +334,9 @@ or 3 for partial evidence) yields `conversationId`, `found: true`, `exitCode`,
 `document` (every loaded document key except `messages`, including metadata and
 the `diagnostic_*` coverage fields), the read transcript as `messages`,
 `anomalies` (omitted with `--no-anomalies`), `compactionArchives`, `logs` (matched
-lines without file headers, only when logs were scanned) and `contextInjections`
-(with `--context`). Values JSON cannot encode are written with `str()`. Absence
+lines without file headers, only when logs were scanned), `logFiles` (each
+scanned file's header with its marked/omitted counts, likewise) and
+`contextInjections` (with `--context`). Values JSON cannot encode are written with `str()`. Absence
 yields `{"conversationId": …, "found": false, "exitCode": 2}`. A database, API or
 IO failure (exit 1) and a usage error leave stdout empty; an unreadable log file
 is reported on stderr instead of in the discarded report. `--json` excludes
@@ -310,8 +349,11 @@ subset; run the script directly for these flags.
   result failures under `done`, child status/provenance and occurrence-safe
   deduplication, JSON size/node/depth bounds, malformed carriers, typed background
   completion, foreground producer decimal exit codes and typed terminal flags,
-  and unknown/unfinished/prose/data false-positive guards; short-ID log tokens
-  versus shared prefixes in rotated and live logs, `--log-match` before the cap,
+  and unknown/unfinished/prose/data false-positive guards; whole-ID log
+  matching, the attribution rule table, two Workers sharing `worker-1` never
+  mixed (`--json` logs and `logFiles`), legacy short-ID lines kept only with an
+  own run in rotated and live logs, no marks from an incomplete run set,
+  transcript run records, `--log-match` before the cap,
   new-flag usage errors, the `--json` document/absence/exit-1 contract, and
   context-injection sources and repeats.
 - `tests/diagnostics/test_inspect_conversation_api.py`: native failed Turn

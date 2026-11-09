@@ -15,7 +15,9 @@ stdlib-only `codex_local_login.py` / `codex_command_login.py`; source/refresh/op
 
 - Keep account identity, repository owner identity, credential identity, and
   provider subject distinct and explicit.
-- `outbound.py` is the OAuth network boundary. Validate destinations through the
+- HTTP exchanges use `http.py`, which applies subscription scope through the
+  shared network layer even for newly added provider hosts.
+- `outbound.py` is the OAuth authorization boundary. Validate destinations through the
   canonical egress guard and never follow a redirect into a newly unauthorized
   destination.
 - Store refresh/access tokens only through the credential vault/Sidecar identity

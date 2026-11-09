@@ -28,6 +28,8 @@ fn adjacent_event_records_materialize_a_checkpoint_once() {
     let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
     let revision = seed_adjacent(&mut database);
     let command = |count| nested_events(revision, count);
+    // Measure in-transaction adjacency alone, from the durable head.
+    database.resident_projections().forget_all();
     let before = crate::fsync_stats::counters().projection_checkpoint_bytes;
     let single = prepare_transaction_ir_with_deadline(
         &mut database, &command(1), Duration::from_secs(30)).unwrap();

@@ -26,6 +26,16 @@ def _assembly_logger(monkeypatch):
     monkeypatch.setattr(assembly, '_server_log', logging.getLogger('test'))
 
 
+@pytest.fixture(autouse=True)
+def _assembly_boot_epoch(monkeypatch):
+    # Re-executing server.py re-runs inject_runtime, which rebinds this
+    # global, and those fixtures restore only sys.modules. Bind the live
+    # server module's boot epoch before these tests own recovery ordering.
+    import server
+    import lib.server.server_assembly as assembly
+    monkeypatch.setattr(assembly, '_BOOT_STARTED_AT', server._BOOT_T0)
+
+
 def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     import server
     import lib.orchestration.startup_recovery as orchestration_recovery
@@ -85,6 +95,17 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     monkeypatch.setattr(
         message_queue, 'drain_idle_background_batches',
         lambda: calls.append('background-batch-wake') or [])
+    import lib.conversations.restart_resume as restart_resume
+    import lib.server.restart_notice as restart_notice
+    monkeypatch.setattr(
+        restart_resume, 'set_boot_recovered',
+        lambda result: calls.append(('boot-recovered', result)))
+    monkeypatch.setattr(
+        restart_resume, 'resume_restart_paused_turns',
+        lambda *, previous_shutdown: calls.append(('restart-resume', previous_shutdown)) or [])
+    monkeypatch.setattr(
+        restart_notice, 'deliver_restart_notices',
+        lambda: calls.append('restart-notices') or [])
 
     server._init_database()
 
@@ -96,6 +117,7 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
         'brain-cutover',
         'shutdown-marker',
         ('task-recovery', previous_shutdown, int(server._BOOT_T0 * 1000)),
+        ('boot-recovered', None),
         'brain-recovery',
         ('orchestration-recovery', 'worker_lost'),
         'log-aggregate-flusher',
@@ -105,11 +127,16 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
     assembly._run_post_ready_deferred()
     # A collective background wake starts a model turn: it waits for
     # readiness instead of holding the readiness-critical recovery phase.
-    assert calls[-5:] == [
+    # Turns a restart interrupted resume after the owners that resume their
+    # own work, then the restart's requester hears the outcome
+    # (docs/RUN_CONTINUITY.md, restart-paused conversations).
+    assert calls[-7:] == [
         ('warmup', True),
         'attempt-cleanup',
         'background-batch-wake',
         'swarm-rehydrate',
+        ('restart-resume', previous_shutdown),
+        'restart-notices',
         'swarm-output-cleanup',
     ]
 

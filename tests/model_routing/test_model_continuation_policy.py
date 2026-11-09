@@ -439,6 +439,41 @@ def test_publication_pins_input_policy_before_runtime_config_normalization(monke
     assert replay_store.get(user_id=1, conversation_id='c', lane_id='main')['policy'] == original_policy
 
 
+def _validated(config, terminal_turn):
+    from lib.tasks_pkg import model_replay as replay
+    proof = {'version': 2, 'count': 2, 'digest': 'd' * 64}
+    prefix = [{'role': 'user', 'content': 'earlier'},
+              {'role': 'assistant', 'content': 'earlier answer'}]
+    continuation = {'historyProof': proof, 'turns': [[terminal_turn, 'w' * 64]],
+                    'messages': copy.deepcopy(prefix), 'policy': replay.policy_witness(config)}
+    return prefix, {'historyProof': proof, 'proofEligible': True,
+                    'continuation': continuation}
+
+
+@pytest.mark.parametrize('resume_config', [
+    {'checkpointToolRounds': [{'toolName': 'read_files'}]}, {'_resumeSource': 'checkpoint'}])
+def test_validated_continue_restores_the_completed_prefix_before_its_turn(resume_config):
+    """A Continue rebuilds the same history the interrupted request had."""
+    from lib.tasks_pkg import model_replay as replay
+    config = {'model': 'kimi-k3', **resume_config}
+    rows = [_turn('u2', 'human', 'work', 3), _turn('a2', 'assistant', '', 4)]
+    rows[-1]['projection'] = {'toolRounds': [{'toolName': 'read_files'}]}
+    prefix, validated = _validated(config, 'a1')
+    assert replay.restore_prefix(rows, config, conversation_id='c', user_id=1,
+                                 validated_context=validated) == (prefix, 0)
+    assert config['_modelReplayStatus'] == 'restored'
+
+
+def test_continue_never_restores_its_own_turn_publication():
+    from lib.tasks_pkg import model_replay as replay
+    config = {'model': 'kimi-k3', 'checkpointToolRounds': [{'toolName': 'read_files'}]}
+    rows = [_turn('u2', 'human', 'work', 3), _turn('a2', 'assistant', '', 4)]
+    _, validated = _validated(config, 'a2')
+    assert replay.restore_prefix(rows, config, conversation_id='c', user_id=1,
+                                 validated_context=validated) == ([], 0)
+    assert config['_modelReplayStatus'] == 'checkpoint_not_before_target'
+
+
 @pytest.mark.parametrize('model', ['kimi-k3', 'claude-opus-5'])
 @pytest.mark.parametrize('resume_config,target_projection,initial_status', [
     ({'contentPrefix': 'partial'}, {}, 'unsupported_mode'),

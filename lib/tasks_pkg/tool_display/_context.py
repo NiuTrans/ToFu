@@ -66,7 +66,7 @@ def _conversation_title(owner_user_id: str, conv_id: str) -> str:
             title = str(snap.get('title') or '').strip()
     except Exception as e:
         logger.debug('[ToolDisplay] conversation title lookup failed for '
-                     '%.32s: %s', conv_id, e)
+                     '%s: %s', conv_id, e)
     with _conv_title_lock:
         if len(_conv_title_cache) >= _CONV_TITLE_CAP:
             _conv_title_cache.clear()

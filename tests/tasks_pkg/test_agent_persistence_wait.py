@@ -43,6 +43,52 @@ def test_pressure_outlives_old_retry_ceiling_without_agent_failure(parent, code)
     assert not carrier.get('aborted') and not carrier.get('error')
 
 
+def test_in_call_storage_wait_is_presented_and_ended_by_its_owner():
+    """A supervised client waits inside the call while its authority lives.
+
+    The owner still presents that wait, ends it on Stop, and hands shutdown
+    debt back with the original failure, exactly as for a raised failure.
+    """
+    from lib.llm.llm_errors import AbortedError
+    from lib.storage.retry import observe_storage_wait
+    failure = StorageError('database_timeout', 'deadline_elapsed', retryable=False)
+    carrier = task()
+    previous = carrier['phase'] = {'phase': 'working'}
+    shown = []
+
+    def slow_write():
+        observe_storage_wait(failure)
+        shown.append(dict(carrier['phase']))
+        return 'acknowledged'
+
+    assert wait_for_persistence(carrier, slow_write, label='exact checkpoint') == 'acknowledged'
+    assert shown[0]['phase'] == 'retrying' and shown[0]['detail'] == 'Waiting for storage'
+    assert carrier['phase'] is previous and not carrier['_storageWaits']
+
+    dispatched = []
+
+    def stopped_write():
+        dispatched.append(1)
+        carrier['abort_event'].set()
+        observe_storage_wait(failure)
+        pytest.fail('Stop must end the in-call wait')
+
+    with pytest.raises(AbortedError):
+        wait_for_persistence(carrier, stopped_write, label='intent')
+    assert dispatched == [1] and not carrier['_storageWaits']
+
+    debt = task()
+    debt['_abort_reason'] = 'server_shutdown'
+
+    def shutdown_write():
+        observe_storage_wait(failure)
+        pytest.fail('shutdown must end the in-call wait')
+
+    with pytest.raises(StorageError) as raised:
+        wait_for_persistence(debt, shutdown_write, label='terminal', cancellable=False)
+    assert raised.value is failure and not debt['_storageWaits']
+
+
 @pytest.mark.parametrize('parent', [False, True])
 def test_stop_during_backpressure_prevents_another_dispatch(parent):
     from lib.llm.llm_errors import AbortedError

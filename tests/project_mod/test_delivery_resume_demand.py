@@ -207,7 +207,7 @@ def test_worker_error_requests_a_recovery_pass_and_idle_ticks_skip_the_scan(
     from lib.storage import StorageError
     passes = []
     monkeypatch.setattr(delivery, 'resume_pending_workspace_deliveries',
-                        lambda *, retained=False: passes.append(retained) or False)
+                        lambda *, retained=False, lanes=False: passes.append(retained) or False)
     claims = iter([False, StorageError('database_unavailable', 'transient', retryable=True)])
     def process_ready_once():
         outcome = next(claims, False)

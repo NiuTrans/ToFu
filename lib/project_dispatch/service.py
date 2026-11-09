@@ -19,7 +19,7 @@ from lib.identity import PrincipalContext
 from lib.log import get_logger
 from lib.turn_initiation import INITIATOR_BRAIN, stamp_initiator
 from .admission import TrustedDispatch
-from .repository import CONTRACT
+from .repository import CONTRACT, ProjectDispatchError
 
 logger = get_logger(__name__)
 
@@ -29,6 +29,12 @@ HISTORY_REQUEST_FIELDS = tuple(CONTRACT['$defs']['historyRequest']['properties']
 
 class HistoryBuildCancelled(RuntimeError):
     """The page's requester is gone; the build stopped before reading another row."""
+
+
+class FollowUpRefused(ProjectDispatchError):
+    """The Worker session cannot take this follow-up now; nothing was written or started."""
+    code = 'follow_up_refused'
+    execution_started = False
 
 
 class HistoryPreviews:
@@ -117,6 +123,74 @@ class ProjectDispatchService:
             trusted_dispatch=trusted)
         return {**self._view(self.repository.read(assignment['id'])),
                 'dispatch': 'aborted' if outcome.value.get('aborted') else 'accepted'}
+
+    def continues_in_place(self, assignment):
+        """Whether a follow-up continues ``assignment`` itself rather than a new one.
+
+        A review is immutable, and a delivered receipt is final for its work id
+        (its checkout may already be reclaimed): either ends the assignment's Turns.
+        """
+        execution = assignment['execution']
+        if assignment['review'] is not None:
+            return False
+        if execution is None:
+            return True
+        from .publication import delivery_final
+        attempt = self.attempt_get(execution['attemptId'], user_id=assignment['grant']['owner'])
+        return not delivery_final(assignment, attempt, self.workspace_get or self.repository.get_workspace)
+
+    def follow_up(self, assignment_id, *, turn_id, attempt_id, expected_revision, instruction, command_id):
+        """Continue an ended Worker session with a Coordinator instruction as its next Turn.
+
+        ``turn_id``, ``attempt_id`` and ``expected_revision`` pin the settled result
+        the Coordinator read. The new Turn follows exactly that Turn and continues
+        the same assignment, grant, checkout and account from its association. The
+        instruction is Coordinator context, never a human message. Replaying
+        ``command_id`` reports its accepted Turn and starts nothing new.
+        """
+        binding = self.repository.admission(assignment_id)
+        assignment = self.repository.validate(binding)
+        owner, request = assignment['grant']['owner'], assignment['request']
+        execution = assignment['execution'] or {}
+        follows = None
+        if execution.get('turnId') != turn_id or execution.get('attemptId') != attempt_id:
+            current = self.attempt_get(execution['attemptId'], user_id=owner) if execution else None
+            if not isinstance(current, Mapping) or current.get('commandId') != command_id:
+                raise FollowUpRefused(
+                    'This Worker session moved on since you read it: its assignment now continues '
+                    f"from Turn {execution.get('turnId')}. Read get_conversation_status and pin its "
+                    'latest settled Turn.')
+            if current.get('status') != 'pending' or current.get('taskId'):
+                # This follow-up was accepted and launched; report it, start nothing.
+                return {'turn': self.turn_get(request['recipientId'], execution['turnId'],
+                                              user_id=owner, include_projection=False),
+                        'attempt': current, 'idempotentReplay': True}
+        else:
+            previous = self.attempt_get(attempt_id, user_id=owner)
+            if not isinstance(previous, Mapping) or previous.get('status') in ('pending', 'running'):
+                raise FollowUpRefused(
+                    'The Worker is still running this assignment. follow_up continues a settled '
+                    'session; send_project_message reaches a running Worker at its next step.')
+            turn = self.turn_get(request['recipientId'], turn_id, user_id=owner, include_projection=False)
+            if not isinstance(turn, Mapping) or turn.get('projectionRevision') != expected_revision:
+                raise FollowUpRefused('The Worker result changed since you read it; read '
+                                      'get_conversation_status and pin its current projectionRevision.')
+            follows = {'execution': deepcopy(execution), 'source': {
+                'attemptId': attempt_id, 'turnId': turn_id, 'taskId': str(previous.get('taskId') or ''),
+                'status': previous['status']}}
+        trusted = TrustedDispatch(binding, follows=follows)
+        from .delegation import follow_up_input
+        projection = stamp_initiator({
+            'role': 'user', 'content': follow_up_input(instruction),
+            '_projectAssignmentId': assignment_id,
+            '_projectAuthorizationSource': deepcopy(request['authorizationSource']),
+        }, INITIATOR_BRAIN)
+        outcome = self.commands.create_turn(request['recipientId'], owner, {
+            'commandId': command_id, 'inputActor': 'virtual_user', 'inputKind': 'input',
+            'inputTurn': projection, 'config': {},
+            'parentTurnId': turn_id, 'requireParentIsLaneTail': True,
+        }, request_started_at=time.time(), principal=trusted.principal, trusted_dispatch=trusted)
+        return outcome.value
 
     def _check_rework(self, request, principal):
         if request.get('reworkOf') is not None:
@@ -277,7 +351,7 @@ class ProjectDispatchService:
         """Coordinator judgment is distinct from human review and actual delivery."""
         from .delegation import review_worker
         with self._publication_lock():
-            self.view_for_coordinator(arguments['assignment_id'], scope=scope)
+            self.view_for_coordinator(arguments['assignment_id'], scope=scope, settlement_only=True)
             assignment = review_worker(self.repository, task, arguments)
             if arguments.get('checkpoint_sha'):
                 work_id = self.repository.workspace_task_id(assignment)
@@ -288,7 +362,9 @@ class ProjectDispatchService:
                     from lib.integration_control import _start_or_wake_worker
                     wake = _start_or_wake_worker
                 wake()
-        return self.view_for_coordinator(assignment['id'], scope=scope)
+        # A receipt needs the decision, revisions and delivery, never the
+        # Worker projection (MBs for a tool-heavy Turn).
+        return self.view_for_coordinator(assignment['id'], scope=scope, settlement_only=True)
 
     def _release_publication_hold(self, task_id):
         """Retire the receipt's pre-pin hold under this publication lock.
@@ -440,7 +516,7 @@ class ProjectDispatchService:
                 f"Revoked by Coordinator conversation {task.get('convId') or '?'} "
                 f"(task {task.get('id') or '?'}) calling cancel_project_work "
                 f"on assignment {assignment['id']}."))
-        return self.view_for_coordinator(assignment['id'], scope=scope)
+        return self.view_for_coordinator(assignment['id'], scope=scope, settlement_only=True)
 
     def _cancel_worker(self, assignment, execution, provenance):
         """Stop the bound attempt and every other live attempt in its Worker conversation.
@@ -494,6 +570,12 @@ class ProjectDispatchService:
             if (view['delivery'] is None or not expected_checkpoint_sha
                     or view['delivery']['checkpointSha'] != expected_checkpoint_sha):
                 raise ValueError('Publication checkpoint differs from the exact reviewed workspace')
+            from pathlib import Path
+            from .publication import require_publishable
+            workspace = self.repository.get_workspace(
+                str(Path(self.repository.project).expanduser().resolve()),
+                view['delivery']['taskId'], user_id=self.repository.owner)
+            require_publishable(workspace or {}, execution['taskId'])
             self.repository.request_publication(assignment_id, principal=principal,
                 expected_revision=expected_revision, result_revision=result_revision,
                 expected_checkpoint_sha=expected_checkpoint_sha)

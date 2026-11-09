@@ -165,7 +165,14 @@ write, detach, kill the owned SQL child and reconnect while the same storage hos
 retains the authority and rotates its transport token.
 
 Headless execution uses the same resident owner and the common application
-BootRunner/shutdown. Its generation covers Python application sources, the
+BootRunner/shutdown. A failed boot carries the common runner's phase and error
+into the existing execution-service failure record, while shutdown still joins
+application cleanup. Problem: reporting only `failed` hid the cause of an
+executor outage behind a live API. Decision: reuse the runner's diagnostic
+snapshot; a second boot-error state or log-parsing recovery path is unnecessary.
+Without a recorded phase error the original status remains the diagnostic.
+Verify `tests/server/test_execution_lifespan.py`.
+Its generation covers Python application sources, the
 planned interpreter's installed packages and launch policy; it excludes frontend
 artifacts and reveals no secret values. Preparation
 and application construction reject source changes. Lazy imports reuse
@@ -203,9 +210,16 @@ and full stop joins execution before storage. No configured backend is substitut
 
 Problem: a healthy API can hide a dead executor. Decision: execution host exits
 consume the manager's existing windowed failure budget once per service identity.
-Recovery replaces only that host and only with the same prepared source/configuration
-generation. API liveness remains visible while readiness reports the execution
-outage. Code changes or an exhausted budget require the existing explicit restart.
+`ExecutionService` owns both that host's reconciliation and its readiness
+projection. The manager supplies its existing clock, failure-accounting and
+observation ports and retains the single `executionRecovery` record. Problem:
+keeping these policies in the API manager split the execution lifetime across
+owners. Moving them to the existing execution service keeps dependency-order
+replacement in the manager without introducing another lifecycle state machine.
+Recovery replaces only that host. After application startup has entered, it
+requires the same prepared source/configuration generation. API liveness remains
+visible while readiness reports the execution outage. An exhausted budget or a
+changed launch policy still requires the existing explicit restart.
 A killed host's command line disappears before its descriptors close, so its
 lease can still be held at the first retry. `ServiceOwnerDraining` keeps that same
 departure pending for `NATIVE_SERVICE_STOP_SECONDS`, without another failure
@@ -213,6 +227,27 @@ charge; only a lease still held after that budget requires the explicit restart.
 Alternative rejected: giving each replacement a fresh budget permits an endless
 crash loop; retiring the API on execution failure needlessly interrupts clients.
 The bounded recovery record replaces one current value, not a history of tasks.
+
+Problem: exclusive-storage validation first ran during boot, after the serving
+generation had drained; a concurrent source change during construction then left
+an executor that had never entered startup waiting for another manual restart.
+Decision: execution preparation runs the existing static storage boundary before
+any service drains. Boot retains that guard against later edits. Plan comparison
+distinguishes checkout source from interpreter, installed dependencies and launch
+policy without exposing values. Only construction can record
+`source_changed_before_boot`; the catch ends before the common application
+startup can admit tasks. A departed host with that witness may refresh source
+under the existing failure budget after dependency preparation confirms the
+resident storage generation still matches. Physical exit and the released lease
+remain mandatory; the API and storage are preserved. Unknown/incomplete plans,
+policy changes, changed storage or failures after startup cannot use this path.
+Alternatives rejected: ignoring generation checks can replay work with another
+policy; automatically restarting the entire service interrupts unrelated tasks;
+a new retry loop would duplicate the manager's existing budget. This adds one
+optional failure classification to the replaced private record, no retained
+history, timer, setting or task registry. Verify plan, composition and lifespan
+specifications plus the real-process recovery in `test_execution_service.py`.
+
 An explicit restart retires an execution host whose close failed after it
 exited. Problem (2026-11-06): an approved Settings restart stopped the API,
 then replaced the execution host; its drain recorded `TimeoutError` and
@@ -223,17 +258,54 @@ host gone and only retired its record. Decision: the explicit replacement
 `retire_failed_close`, so physical exit plus the released lease retire the
 record and the recorded failure is logged. It still refuses while the host
 lives or after the record changed identity; automatic recovery and full stop
-keep raising. Native storage keeps its strict failed-close latch
-(`test_stop_preserves_native_shutdown_failure`): an unclean storage close may
-hold unflushed authority state, while the execution record proves only
-process lifetime. Alternatives rejected: retrying the start stage adds a retry
+keep raising. Alternatives rejected: retrying the start stage adds a retry
 budget and still needs this retirement; recording `stopped` for a failed
 drain hides the failure. Verify
 `test_failed_close_is_preserved_unless_an_explicit_replacement_retires_it`
 (real hosts) and `test_only_an_explicit_replacement_may_retire_a_failed_executor_close`.
+
+An explicit replacement retires an unconfirmed native storage close the same
+way (owner request 2026-11-06, "a refused restart must never leave Tofu
+down"). Problem: the 22:34 restart stopped the API, then the storage host's
+drain outlived its daemon budget, the host died without a terminal record,
+and `native storage shutdown failed: clean close was not confirmed` latched
+`crashloop` for 69 minutes. The strict latch protected nothing: the operator's
+later restart only retired the same record, and its engine open replayed the
+WAL exactly as after any crash. Decision: the explicit replacement passes
+`retire_failed_close` to storage too; its successor opens the authority
+through the engine's crash recovery, and the authority lease (with the
+storage-blocker deferral above) still fences a daemon that outlived its host.
+A host still alive after `NATIVE_SERVICE_STOP_SECONDS` during an explicit
+replacement is killed and retired like any unconfirmed close (one more budget
+for the kill and the lease release), as a worker past its shutdown budget is.
+Full stop, automatic recovery and a host failure under a live manager keep
+the strict latch (`test_stop_preserves_native_shutdown_failure`).
+Alternatives rejected: keeping the latch for storage (an unconfirmed close is
+a crash the engine already recovers; waiting for an operator only adds the
+outage); raising the drain budget (uninterruptible network-volume I/O
+exceeds any finite deadline); recording `stopped` for a failed close (hides
+the failure the restart outcome now reports). Verify
+`test_unconfirmed_storage_close_still_ends_with_a_serving_server`,
+`test_storage_host_past_its_stop_budget_is_killed_and_replaced`
+(`tests/server/test_restart_always_serves.py`, real hosts) and
+`test_only_an_explicit_replacement_may_retire_a_failed_storage_close`. The
+manager side of the contract is in
+[infra runtime](modules/infra_runtime.md#assembly-and-lifecycle).
 Verify `test_execution_composition.py` and `test_execution_application.py`;
 the latter boots the common application against a real SQL authority while the
 HTTP port is occupied, joins execution, and proves storage remains alive.
+
+Problem: at the 2026-11-06 14:10 restart the execution host's background-service
+join outlived its 10 s budget. The bare `TimeoutError` had an empty message, so
+the host recorded `failed` with "TimeoutError: ". The manager then refused the
+whole restart ("execution shutdown failed: TimeoutError: ", 14:11:13), and no
+API host started until a manual restart at 14:52:37. Decision: the shutdown stack
+names the owner still stopping in the timeout it raises
+(`server_shutdown._stop_process_background_services`), so the recorded failure
+says which drain was slow. Replacing a host whose close failed is the explicit
+replacement's `retire_failed_close` above. Alternative rejected:
+a longer drain budget still ends in the same refusal on a slower volume.
+Verify `tests/server/test_execution_shutdown_failure.py`.
 Restart activity protection now reads durable root jobs as well as local
 carriers. Storage errors do not certify idle or consume an ordinary restart
 approval; explicit force retains the existing approval boundary.

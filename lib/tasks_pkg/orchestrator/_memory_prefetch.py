@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.memory_listing import EARLY_MEMORY_LISTING_KEY
 
@@ -59,7 +59,8 @@ def maybe_run_memory_prefetch(*, task: dict[str, Any], cfg: dict[str, Any],
                               project_enabled: bool,
                               memory_enabled: bool,
                               has_real_tools: bool,
-                              injected_tool_calls: int) -> None:
+                              injected_tool_calls: int,
+                              turn_selection_retained: bool = False) -> None:
     del tool_list  # the gate already records whether real tools are available
     # My Context is independent from relevance-retrieved experience memory.
     # Interactive turns learn explicit durable facts even when memory search is
@@ -80,6 +81,13 @@ def maybe_run_memory_prefetch(*, task: dict[str, Any], cfg: dict[str, Any],
                            else 'gate_disabled'),
             }
             return
+        if turn_selection_retained:
+            # A Continue restored this request's selection with its working
+            # view. Not a fresh empty result: the composer keeps that block.
+            task['_prefetchedMemories'] = []
+            task['_memoryPrefetch'] = {'phase': 'skipped',
+                                       'reason': 'turn_selection_retained'}
+            return
         try:
             from lib.memory.prefetch import run_memory_prefetch
             primary, extras = memory_prefetch_corpus_roots(
@@ -93,7 +101,7 @@ def maybe_run_memory_prefetch(*, task: dict[str, Any], cfg: dict[str, Any],
             task['_prefetchedMemories'] = []
             task['_memoryPrefetch'] = {'phase': 'failed', 'reason': 'selection_failed'}
             logger.warning('[Task %s] local memory prefetch failed: %s',
-                           str(task.get('id', '?'))[:8], exc, exc_info=True)
+                           task_log_tag(task.get('id', '?')), exc, exc_info=True)
     finally:
         if early_listing is not None:
             early_listing.release()

@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import pytest
 import tofu_mtsso_auth as auth
@@ -234,7 +235,7 @@ def test_node_candidates_are_deduplicated_and_probes_bounded(monkeypatch, tmp_pa
     monkeypatch.setattr(auth.shutil, 'which', lambda name, path=None: '/same/node')
     calls = []
     def probe(argv, **kwargs):
-        assert 0 < kwargs['timeout'] <= 2
+        assert 0 < kwargs['timeout'] <= auth._NODE_PROBE_BUDGET
         calls.append(argv)
         raise auth.OfficialAuthError('SSO_TIMEOUT', 'probe expired')
     monkeypatch.setattr(auth, '_run', probe)
@@ -242,3 +243,46 @@ def test_node_candidates_are_deduplicated_and_probes_bounded(monkeypatch, tmp_pa
         auth._node_command(str(script))
     assert caught.value.code == 'SSO_NODE_UNAVAILABLE'
     assert len(calls) == 1
+
+
+def _node(directory, version, *, seconds=0):
+    """A real executable answering ``--version`` like Node, after ``seconds``."""
+    directory.mkdir()
+    node = directory / 'node'
+    node.write_text(f'#!{sys.executable}\nimport time\ntime.sleep({seconds})\nprint({version!r})\n')
+    node.chmod(0o755)
+    return str(node)
+
+
+@pytest.mark.parametrize('explicit', [False, True], ids=['path_order', 'explicit_override'])
+def test_slow_compatible_node_is_selected_over_an_old_one(monkeypatch, tmp_path, explicit):
+    # Recorded on the 大象 launcher PATH: Node 24 on a loaded network filesystem
+    # needed more than 2 s to answer --version, and a Node 12 came later on PATH.
+    # Node 12 cannot load the ESM bridge (exit 1, no output: SSO_EXCHANGE_FAILED).
+    script = tmp_path / 'official'
+    script.write_text('#!/usr/bin/env node\n')
+    slow = _node(tmp_path / 'conda', 'v24.14.1', seconds=2.5)
+    old = _node(tmp_path / 'system', 'v12.4.0')
+    if explicit:
+        monkeypatch.setenv('MTSSO_NODE_EXECUTABLE', slow)
+        monkeypatch.setenv('PATH', os.path.dirname(old))
+    else:
+        monkeypatch.delenv('MTSSO_NODE_EXECUTABLE', raising=False)
+        monkeypatch.setenv('PATH', os.pathsep.join([os.path.dirname(slow), os.path.dirname(old)]))
+    assert auth._node_command(str(script)) == [slow, str(script)]
+
+
+@pytest.mark.parametrize('version', ['v12.4.0', 'v18.20.8'])
+def test_node_below_the_official_engine_floor_is_never_selected(monkeypatch, tmp_path, version):
+    # @mtfe/mtsso-auth-official declares engines.node >=20.
+    script = tmp_path / 'official'
+    script.write_text('#!/usr/bin/env node\n')
+    old = _node(tmp_path / 'system', version)
+    monkeypatch.delenv('MTSSO_NODE_EXECUTABLE', raising=False)
+    monkeypatch.setenv('PATH', os.path.dirname(old))
+    with pytest.raises(auth.OfficialAuthError) as caught:
+        auth._node_command(str(script))
+    assert caught.value.code == 'SSO_NODE_RUNTIME_INCOMPATIBLE'
+    envelope = caught.value.envelope()
+    assert envelope['auth_state'] == 'blocked' and envelope['user_action_required'] is False
+    assert '无需重复登录' in caught.value.message

@@ -481,14 +481,22 @@ def test_review_tool_acts_only_on_the_owners_own_message(world, monkeypatch):
 
 
 def test_signal_wake_starts_an_idle_watchdog_turn_through_the_turn_command(world, monkeypatch):
+    """The wake is admitted to the durable worker; its claim runs the real task start."""
     from lib.turn_lifecycle import list_turns
     from lib.turn_initiation import resolve_turn_initiator
-    spawned = []
-    monkeypatch.setattr('lib.tasks_pkg.spawn.spawn_task', lambda task, **kwargs: spawned.append(task))
+    from tests.support.conversation_workers import observe_admissions, run_admitted_attempt
+    # Workspace registrations read by the task start bind the storage factory at import.
+    monkeypatch.setattr('lib.integration_state_repository.get_storage_client', world.client)
+    admitted = observe_admissions(monkeypatch)
     signal = _fail(world, world.worker, '1', dispatch=None)
-    [task] = spawned
-    assert task['convId'] == world.watchdog['conversationId']
-    assert task.get('_coordinatorRequestBudget') is None  # nonhuman input opens no request account
+    [admission] = admitted
+    assert admission['conversationId'] == world.watchdog['conversationId']
+    turn, [(conversation_id, budget)] = run_admitted_attempt(
+        world.owner, admission['taskId'].removeprefix('conversation-attempt:'), monkeypatch,
+        lambda task: (task['convId'], task.get('_coordinatorRequestBudget')))
+    assert turn['status'] == 'completed'
+    assert conversation_id == world.watchdog['conversationId']
+    assert budget is None  # nonhuman input opens no request account
     turns = list_turns(world.watchdog['conversationId'], user_id=world.owner)['turns']
     inputs = [turn for turn in turns if turn['actor'] == 'human']
     assert [resolve_turn_initiator(turn) for turn in inputs] == ['peer']

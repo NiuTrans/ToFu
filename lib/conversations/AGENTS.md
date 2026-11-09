@@ -30,8 +30,10 @@ in `lib/integration_control.py`. Read
 ## Coordination message owners
 
 `session_control.py` adapts Coordinator session status and Continue/Stop to the
-ordinary conversation command/query owners. Preserve target accepted config,
-exact Attempt identity, dispatch grants and uncertain-ACK replay. Verify the
+ordinary conversation command/query owners; its `follow_up` gives an ended Worker
+session its next instruction through `ProjectDispatchService.follow_up`, or a
+successor assignment in that conversation once the result is final. Preserve
+target accepted config, exact Attempt identity, dispatch grants and uncertain-ACK replay. Verify the
 session-control suites in `tests/project_mod/` and `tests/conversation/`; policy
 and scope live in `docs/PROJECT_COORDINATION.md#session-execution-control`.
 
@@ -67,7 +69,12 @@ The source/policy authority is `lib/project_dispatch/delegation.py`; verify
 (`progress*` in `project_coordination_v1.schema.json`): one CAS head per
 owner/project for the current binding, full replacement, no authority. It is
 the human's whole progress view; questions never live there (they are
-`ask_human` cards). While the Coordinator auto-translates, the head also
+`ask_human` cards). It is also the Coordinator's only checklist: both
+`update_task_progress` and `todo_write` write the head under the task's
+progress lock, the task's todo state is its plan projection, and each write's
+round carries `progress_view` for the live board and rail ("One progress
+source" in `docs/PROJECT_COORDINATION.md`); never add a second progress store
+or a push-only refresh. While the Coordinator auto-translates, the head also
 carries a reconstructible display translation of the board's own texts;
 `coordinator_progress_translation.py` derives it with one optional job on the
 shared translation lane through `lib/translate/display_texts.py`. Verify

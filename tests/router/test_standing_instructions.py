@@ -130,13 +130,16 @@ def test_applying_forwards_frozen_text_with_separate_evidence_and_records_it(r):
     r.source = PermissionError('the current input is a channel event, not the owner')
     applied = r.call('route_to_project', project_path=r.project, instruction_id=instruction['instructionId'],
                      event_id='dx:msg:9001', note='Alice: the parser crashes on empty input')
-    human, evidence = r.calls
-    assert human['message']['content'] == INSTRUCTION
+    [human] = r.calls
+    assert human['message']['originalContent'] == INSTRUCTION
     assert human['message']['origin']['forwardedFrom'] == {
         'conversationId': 'router', 'turnId': 'owner-turn', 'instructionId': instruction['instructionId']}
-    assert 'Alice' not in json.dumps(human['message'])
-    assert evidence['message']['_initiator'] == 'peer'
-    assert 'dx:msg:9001' in evidence['message']['content'] and 'Alice' in evidence['message']['content']
+    # The event and the note are nonhuman evidence inside the same authorized
+    # request; the owner's frozen text stays the authority that is compared.
+    assert '_initiator' not in human['message']
+    assert 'nonhuman' in human['message']['content']
+    assert 'dx:msg:9001' in human['message']['content'] and 'Alice' in human['message']['content']
+    assert human['message']['content'].startswith(INSTRUCTION)
     replay = r.call('route_to_project', project_path=r.project, instruction_id=instruction['instructionId'],
                     event_id='dx:msg:9001', note='Alice: the parser crashes on empty input')
     assert replay['instruction_application_id'] == applied['instruction_application_id']
@@ -212,7 +215,7 @@ def test_an_instruction_without_a_project_never_creates_a_project_router(r, tmp_
     assert not r.calls
     applied = r.call('route_to_project', project_path=r.project, instruction_id=instruction['instructionId'],
                      event_id='dx:msg:2')
-    assert applied['project_router_created'] is False and len(r.calls) == 2
+    assert applied['project_router_created'] is False and len(r.calls) == 1
 
 
 def test_owner_pause_stops_applications_until_resume_and_lists_stay_truthful(r):
@@ -237,7 +240,7 @@ def test_owner_pause_stops_applications_until_resume_and_lists_stay_truthful(r):
     assert {key: resumed[key] for key in ('text', 'sourceTurnId', 'label', 'projectPath', 'thread')} == {
         key: instruction[key] for key in ('text', 'sourceTurnId', 'label', 'projectPath', 'thread')}
     applied = r.call('route_to_project', **arguments)
-    assert applied['instruction_application_id'] and r.calls[0]['message']['content'] == INSTRUCTION
+    assert applied['instruction_application_id'] and r.calls[0]['message']['originalContent'] == INSTRUCTION
 
 
 def test_cancellation_is_final_even_for_a_paused_instruction(r):

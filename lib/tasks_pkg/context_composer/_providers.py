@@ -422,13 +422,15 @@ def _programmatic_input_block(request: ComposeRequest) -> ContextBlock:
 
 def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
     del query
+    # Project Brain pages and Coordinator bindings are application storage.
+    storage_free = bool(((request.task or {}).get('config') or {}).get('_storageFreeRuntime'))
     if 'project_context' in request.disabled_blocks:
         context = ""
         reason = "disabled"
     elif not (request.project_enabled and request.project_path):
         context = ""
         reason = "project_disabled"
-    elif ((request.task or {}).get('config') or {}).get('_storageFreeRuntime'):
+    elif storage_free:
         context = ""
         reason = "project_disabled"
     else:
@@ -461,7 +463,9 @@ def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
             role_reason = 'provider_unavailable'
     presence = ''
     presence_reason = 'empty'
-    if (request.project_enabled and request.project_path
+    if storage_free:
+        presence_reason = 'project_disabled'
+    elif (request.project_enabled and request.project_path
             and 'project_presence' not in request.disabled_blocks):
         try:
             presence = _project_presence_block(request)

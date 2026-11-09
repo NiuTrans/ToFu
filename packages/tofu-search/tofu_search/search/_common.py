@@ -23,12 +23,13 @@ from html import unescape
 
 import requests
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
 from tofu_search.config import get_config
 from tofu_search.log import get_logger
+from tofu_search.network_transport import NetworkAdapter as HTTPAdapter
+from tofu_search.network_transport import NetworkSession
 from tofu_search.search.proxy_mode import proxy_mode_manager
 
 logger = get_logger(__name__)
@@ -99,7 +100,7 @@ _retry = Retry(
     allowed_methods=['GET'],
     raise_on_status=False,
 )
-search_session = requests.Session()
+search_session = NetworkSession()
 search_session.headers.update(HEADERS)
 _adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=_retry)
 search_session.mount('https://', _adapter)
@@ -426,7 +427,8 @@ def http_search_get(
     # ── Adaptive proxy plan: one attempt when no proxy is configured (identical
     #    to the historical env-only path), else the failover chain (proxy chain
     #    → direct) in sticky-learned order. See search/proxy_mode.py. ──
-    plan = proxy_mode_manager.attempt_plan(name, cfg)
+    plan = ([('managed', None)] if cfg.requests_transport or cfg.httpx_client_factory
+            else proxy_mode_manager.attempt_plan(name, cfg))
 
     t0 = time.time()
     results: list = []

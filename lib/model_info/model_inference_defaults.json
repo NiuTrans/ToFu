@@ -194,7 +194,7 @@
             "high",
             "max"
           ],
-          "default_effort": "high",
+          "default_effort": "max",
           "effort_map": {
             "medium": "high",
             "xhigh": "max",
@@ -1085,7 +1085,7 @@
       ]
     },
     {
-      "creator_id": "meituan",
+      "creator_id": "yourprovider",
       "model_ids": [
         "LongCat-2.0"
       ],
@@ -1100,7 +1100,7 @@
       "evidence_url": "https://longcat.chat/platform/docs/api/chat.html"
     },
     {
-      "creator_id": "meituan",
+      "creator_id": "yourprovider",
       "model_ids": [
         "LongCat-2.5"
       ],

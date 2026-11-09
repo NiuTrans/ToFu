@@ -27,19 +27,23 @@ class SecretStore(context: Context) : SecretVault {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    override fun secretFor(alias: String): String? = prefs.getString(key(alias), null)
+    private val access = SerializedSecretVault(
+        FILE_LOCK,
+        read = { alias -> prefs.getString(key(alias), null) },
+        write = { alias, secret -> prefs.edit().putString(key(alias), secret).apply() },
+        remove = { alias -> prefs.edit().remove(key(alias)).apply() },
+    )
 
-    override fun putSecret(alias: String, secret: String) {
-        prefs.edit().putString(key(alias), secret).apply()
-    }
-
-    override fun removeSecret(alias: String) {
-        prefs.edit().remove(key(alias)).apply()
-    }
+    override fun secretFor(alias: String): String? = access.secretFor(alias)
+    override fun putSecret(alias: String, secret: String) = access.putSecret(alias, secret)
+    override fun removeSecret(alias: String) = access.removeSecret(alias)
+    override fun compareAndSetSecret(alias: String, expected: String?, value: String?): Boolean =
+        access.compareAndSetSecret(alias, expected, value)
 
     private fun key(alias: String) = "secret::$alias"
 
     private companion object {
         const val FILE_NAME = "tofu_secrets"
+        val FILE_LOCK = Any()
     }
 }

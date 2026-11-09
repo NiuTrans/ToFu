@@ -1,7 +1,7 @@
 """Private C-clock compilation/loading for an already-owned PostgreSQL test cluster.
 
 Only fixtures call this helper. It creates a function in the supplied private
-cluster using a library inside that fixture's directory; no installation path,
+cluster using a library inside the test run's directory; no installation path,
 existing service or production schema is touched. Optional source overrides are
 separate test-only wrappers, never runtime clock overrides.
 """
@@ -51,3 +51,13 @@ def install_worker_clock(dsn, directory: Path) -> Path:
     library = compile_clock_library(directory / 'tofu_worker_clock.so')
     install_clock_function(dsn, library)
     return library
+
+
+@pytest.fixture(scope='session')
+def postgres_worker_clock_library(tmp_path_factory):
+    """Compile the unchanged default source once per worker, keeping state in PostgreSQL."""
+    directory = tmp_path_factory.mktemp('postgres-worker-clock')
+    try:
+        yield compile_clock_library(directory / 'tofu_worker_clock.so')
+    finally:
+        shutil.rmtree(directory)

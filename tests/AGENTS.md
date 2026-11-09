@@ -26,8 +26,10 @@ suite.
 
 ## Verification ladder
 
-Run the changed test directly, then neighboring contract tests, then the domain
-gate. Use `make suite-health` for collection/quality changes and broad
+Run the changed file with `make test TESTS="tests/<owner>/test_case.py"`, then
+neighboring contract tests, then the domain gate. Direct pytest remains useful
+for case-level diagnosis and specialized markers. Use `make suite-health` for
+collection/quality changes and broad
 `make test-unit`, `make test-api`, `make test-frontend`, or `make test-all` only
 after the worktree is stable.
 

@@ -715,6 +715,11 @@
       "responsibility": "Memory dialog, cards, editing, installation and responsive layout",
       "legacyTokenSha256": "d98cd67bf1fc8aef71b327b8ccb1259305ddeb9079748a478b4e4d255a01452e",
       "featureEntry": "frontend/src/features/memory/panel.ts"
+    },
+    {
+      "path": "16-my-day-goals.css",
+      "responsibility": "My Day goal cards, item states, suggestions, Worker evidence and the day recap",
+      "featureEntry": "frontend/src/features/myday.ts"
     }
   ]
 }

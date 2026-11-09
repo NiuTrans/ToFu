@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from lib.log import get_logger
 from lib.tasks_pkg.cache_tracking._policy import (
-    DEFAULT_CACHE_TTL_S, _MIN_CACHE_MISS_TOKENS, _resolve_break_cause,
+    DEFAULT_CACHE_TTL_S, _resolve_break_cause,
 )
 
 logger = get_logger(__name__)
@@ -56,7 +56,30 @@ def _split_note(report: BreakReport) -> str:
 
 
 def report_confirmed_break(report: BreakReport) -> dict:
-    """Keep boundary, write visibility, routing and content cause precedence."""
+    """Keep budget, boundary, routing and content cause precedence."""
+    # A request over its route's tool-name budget cannot reuse the route's
+    # cache at all (docs/LLM_COST_OPTIMIZATION.md, "Gateway tool-name
+    # budget"). The round knows this at send time, so the miss is named here
+    # rather than filed as an upstream, boundary or write-visibility miss.
+    from lib.tasks_pkg.cache_tracking._wire import _wire_evidence_from_usage
+    surface = _wire_evidence_from_usage(report.usage)
+    if (surface.tool_name_budget_bytes and surface.tool_name_bytes is not None
+            and surface.tool_name_bytes > surface.tool_name_budget_bytes):
+        _budget_cause = (
+            f'this request sent {surface.tool_name_bytes} bytes of tool names, '
+            f'over the {surface.tool_name_budget_bytes}-byte tool-name budget of '
+            'its route, which does not reuse its prompt cache for such requests '
+            '(see "[ToolWire] tool-name budget ... NOT met"): a client-side '
+            'miss, not an upstream one')
+        logger.warning(
+            '[CacheTrack] conv=%s call=%d ⚠ TOOL-NAME BUDGET MISS: '
+            'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — %d tool-name '
+            'bytes sent against a %d-byte route budget.',
+            report.conv_id, report.call_count, report.cache_write,
+            report.cache_read, report.previous_read, report.elapsed,
+            surface.tool_name_bytes, surface.tool_name_budget_bytes)
+        return {'tool_name_budget': _budget_cause}
+
     if report.turn_boundary_break:
         _boundary_cause = (
             'new-turn round-1 boundary re-bill: the previous turn left '
@@ -70,7 +93,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             'cache_write=%d cache_read=%d (prev-turn read=%d, gap=%.1fs) '
             '— new-turn round-1 read collapsed; prefix not reused across '
             'the turn boundary.',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
+            report.conv_id, report.call_count, report.cache_write, report.cache_read,
             report.previous_turn_read, report.elapsed)
         # Attach STRUCTURED fields alongside the free-form cause so the
         # frontend can render a localized, parameterized sentence
@@ -109,72 +132,11 @@ def report_confirmed_break(report: BreakReport) -> dict:
         ttl_window_s=report.ttl_window_s,
     )
 
-    # CACHE WRITE-VISIBILITY RACE (Anthropic SDK #1451) — a
-    #   byte-identical, same-routing round whose read collapsed AND
-    #   which arrived within the cold-write settle window since THIS
-    #   conv's prior COLD write. A freshly-written cache entry is not
-    #   readable for ~15–20s (reproduced live: a cold prefix re-sent
-    #   every 4s missed at t=3s/t=10s, HIT at t≈16s), so a fast tool
-    #   loop that fires the next round ~8s later misses and re-writes
-    #   the whole prefix — NOT a server/gateway fault and NOT a client
-    #   byte change. Named FIRST (it is the most specific timing cause)
-    #   when the prior-round cold-write gap marker is present and inside
-    #   the window; the cache_settle gate is the fix that prevents it.
-    # The cold-write gap: prefer an explicit usage marker (test / future
-    # plumbing), else DERIVE it from internal state — the prior round
-    # was a COLD WRITE when its write dominated its read, and ``elapsed``
-    # is precisely the gap since that round ended. This keeps the
-    # detector self-contained (no dispatch plumbing) while staying
-    # overridable.
-    _cold_gap = None
-    if report.usage is not None:
-        _cold_gap = report.usage.get('_prev_cold_write_gap_s')
-    if _cold_gap is None:
-        _prev_was_cold = (report.previous_write >= _MIN_CACHE_MISS_TOKENS
-                          and report.previous_read < report.previous_write)
-        if _prev_was_cold and report.elapsed > 0:
-            _cold_gap = report.elapsed
-    _within_settle_window = False
-    if _cold_gap is not None:
-        try:
-            from lib.llm_dispatch.cache_settle import settle_cold_window_ms
-            _within_settle_window = (
-                float(_cold_gap) < (settle_cold_window_ms() / 1000.0))
-        except Exception as _cse:
-            logger.debug('[CacheTrack] cold-window lookup failed: %s', _cse)
-    if (_within_settle_window and report.wire_proven_identical
-            and not report.namespace_switch and not report.client_changes
-            and not report.prefix_mutation_break):
-        _unsettled_cause = (
-            'prefix not read back though the wire bytes were '
-            'byte-identical and the routing was identical — but this '
-            f'round arrived only {float(_cold_gap):.1f}s after the '
-            'previous round COLD-WROTE this prefix, inside the '
-            '~15–20s Anthropic cache write-visibility window (SDK '
-            '#1451): the just-written entry was not yet visible '
-            'upstream, so the prefix was re-billed uncached. A '
-            'CLIENT-side timing race (fast tool loop firing before the '
-            'write settled), NOT a server/gateway miss — the '
-            'cache-settle gate is meant to hold the next send until '
-            'the write is visible.')
-        logger.warning(
-            '[CacheTrack] conv=%s call=%d ⚠ CACHE WRITE UNSETTLED: '
-            'cache_write=%d cache_read=%d (prev read=%d, cold-write gap='
-            '%.1fs, gap=%.1fs) — prior cold write not yet visible.%s',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
-            report.previous_read, float(_cold_gap), report.elapsed,
-            _split_note(report))
-        # Structured sibling fields for the parameterized frontend
-        # rendering (see the turn_boundary_rebill note above): the
-        # string cause stays for back-compat, the numbers let the zh/en
-        # UI interpolate instead of substring-matching dynamic digits.
-        return {
-            'cache_write_unsettled': _unsettled_cause,
-            'prev_read': int(report.previous_read),
-            'read': int(report.cache_read),
-            'gap_s': round(float(report.elapsed or 0), 1),
-            'cold_gap_s': round(float(_cold_gap), 1),
-        }
+    # No write-visibility verdict: a sequential round is sent after the
+    # previous response ended, and an entry is readable once its own request
+    # has started responding. A byte-identical, same-routing collapse right
+    # after a cold write is an upstream routing miss like any other
+    # (docs/LLM_COST_OPTIMIZATION.md, "Cache-break attribution corrections").
 
     # CACHE-NAMESPACE SWITCH — a body-identical round whose ROUTING
     #   flipped (upstream key / anthropic-beta / endpoint) is a
@@ -193,7 +155,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — '
             'byte-identical prefix routed to a different cache namespace. '
             'Cause: %s',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
+            report.conv_id, report.call_count, report.cache_write, report.cache_read,
             report.previous_read, report.elapsed, cause_str)
         return {'cache_namespace_switch': cause_str}
 
@@ -216,7 +178,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             'mid stepping-stone drifted past the ~20-block lookback; '
             'tail could not extend the prior entry → whole prefix past '
             'the mid re-billed on a byte-identical body. Cause: %s',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
+            report.conv_id, report.call_count, report.cache_write, report.cache_read,
             report.previous_read, report.elapsed, cause_str)
         return {'cache_mid_out_of_window': cause_str}
 
@@ -237,7 +199,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION BREAK: '
             'cache_write=%d cache_read=%d (prev read=%d, gap=%.1fs) — '
             'cached prefix bytes changed between turns. Cause: %s',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
+            report.conv_id, report.call_count, report.cache_write, report.cache_read,
             report.previous_read, report.elapsed, cause_str,
         )
         return {'prefix_mutation': cause_str}
@@ -250,7 +212,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             '[CacheTrack] conv=%s call=%d ⚠ NO CACHE REUSE: '
             'cache_write=%d cache_read=0 (prev prefix=%d tokens, '
             'gap=%.1fs). Cause: %s%s',
-            report.conv_id[:8], report.call_count, report.cache_write,
+            report.conv_id, report.call_count, report.cache_write,
             report.previous_prefix_tokens, report.elapsed, cause_str,
             _split_note(report),
         )
@@ -267,7 +229,7 @@ def report_confirmed_break(report: BreakReport) -> dict:
             'cache_write=%d cache_read=%d of %d cached-prefix tokens '
             '(prev write=%d read=%d, gap=%.1fs) — body re-billed '
             'uncached. Cause: %s%s',
-            report.conv_id[:8], report.call_count, report.cache_write,
+            report.conv_id, report.call_count, report.cache_write,
             report.cache_read, report.previous_prefix_tokens,
             report.previous_write, report.previous_read, report.elapsed,
             cause_str, _split_note(report),
@@ -281,14 +243,14 @@ def report_confirmed_break(report: BreakReport) -> dict:
         logger.info(
             '[CacheBreak] conv=%s call=%d CONFIRMED cache break: %s. '
             'cache_read: %d → %d tokens (gap=%.1fs)',
-            report.conv_id[:8], report.call_count, cause_str,
+            report.conv_id, report.call_count, cause_str,
             report.previous_read, report.cache_read, report.elapsed,
         )
         return report.client_changes
     logger.info(
         '[CacheTrack] conv=%s call=%d cache_read dropped: %d → %d '
         '(gap=%.1fs, %s)%s',
-        report.conv_id[:8], report.call_count,
+        report.conv_id, report.call_count,
         report.previous_read, report.cache_read, report.elapsed, cause_str,
         _split_note(report),
     )

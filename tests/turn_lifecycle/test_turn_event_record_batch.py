@@ -409,7 +409,7 @@ def test_authority_without_the_batch_command_uses_the_per_event_path(
 def test_runs_beyond_the_existing_rpc_budget_commit_in_ordered_transactions(
         turn_service, storage, monkeypatch):
     from dataclasses import replace
-    from lib.storage import storage_event_policy
+    from lib.agent_core import storage_event_policy
     budget = replace(storage_event_policy.resolve_storage_event_budget(), batch_max_events=4)
     monkeypatch.setattr(storage_event_policy, 'resolve_storage_event_budget',
                         lambda *args, **kwargs: budget)

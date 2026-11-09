@@ -439,24 +439,22 @@ function _renderUnifiedToolLine(round, isSearching) {
     if (memHtml) return memHtml;
   }
 
+  /* Progress side channel: a Coordinator's task board is its checklist, so each
+   * todo_write / update_task_progress round drives both live views from its
+   * meta: the rail's checklist row and the pinned board, whose project push
+   * never reaches this page when the execution host wrote it. A rejected or
+   * no-op round carries the accepted list too, so neither view regresses. */
+  if (round.toolName === "todo_write" || round.toolName === "update_task_progress") {
+    try {
+      const todos = Array.isArray(meta.todos) ? meta.todos : (Array.isArray(round.todos) ? round.todos : null);
+      if (todos) runtimeScope.updateTurnCtxTodos?.(todos);
+      if (meta.coordinatorProgress) runtimeScope.observeCoordinatorProgress?.(meta.coordinatorProgress);
+    } catch (_e) { /* live views must never break the tool render */ }
+  }
   // todo_write — collapsible checklist progress card (state glyphs + a slim
   //   progress bar), rendered off the structured meta.todos the backend
   //   attaches. Falls through to the generic line only if the list is absent.
   if (round.toolName === "todo_write") {
-    /* Side channel for the per-turn context rail: every accepted todo_write
-     * rewrites the live checklist, so the rail's checklist row follows the
-     * plan in real time instead of waiting for the turn to settle. Read the
-     * same structured meta the card renders; a rejected/no-op round carries
-     * the authoritative list too (the backend attaches it on every outcome),
-     * so the rail never regresses to an older plan. */
-    if (typeof runtimeScope.updateTurnCtxTodos === 'function') {
-      const _liveTodos = Array.isArray(meta.todos) ? meta.todos
-        : (Array.isArray(round.todos) ? round.todos : null);
-      if (_liveTodos) {
-        try { runtimeScope.updateTurnCtxTodos(_liveTodos); }
-        catch (_e) { /* rail sync must never break the tool render */ }
-      }
-    }
     const todoHtml = (typeof _renderTodoBlock === "function")
       ? _renderTodoBlock(round, svg, q, badgeHtml) : "";
     if (todoHtml) return todoHtml;
@@ -1132,6 +1130,7 @@ const _SEG_NOTE_REASON_CHIP = {
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
   output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
   output_limit_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
+  paper_output_repair: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
   paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
   parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },

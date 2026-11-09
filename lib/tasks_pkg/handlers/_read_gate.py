@@ -52,7 +52,7 @@ import os
 import re
 import threading
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.project_mod.path_resolution import _resolve_base
 from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
@@ -497,7 +497,7 @@ def check_read_before_edit(task: dict, fn_name: str, fn_args: dict,
     msg = _format_refusal(fn_name, [raw for raw, _ in unread])
     logger.info(
         '[ReadGate] Refused %s for unread file(s) %s (task=%s)',
-        fn_name, ', '.join(raw for raw, _ in unread), task.get('id', '?')[:8],
+        fn_name, ', '.join(raw for raw, _ in unread), task_log_tag(task.get('id', '?')),
     )
     return msg
 

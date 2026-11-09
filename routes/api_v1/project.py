@@ -55,7 +55,7 @@ from lib.api_response import (
     api_ok,
     api_payload,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.openapi import api_meta
 from lib.project_contracts.browse import browse_request_schema, normalize_browse_request
 from lib.project_recent_contract import (
@@ -566,7 +566,7 @@ def project_undo():
             result = undo_task_modifications(project_path, task_id)
             logger.info(
                 "[Project.v1] undo task=%s: undone=%s failed=%s",
-                task_id[:8],
+                task_log_tag(task_id),
                 result.get("undone", 0),
                 result.get("failed", 0),
             )
@@ -576,7 +576,7 @@ def project_undo():
             result = undo_conv_modifications(project_path, conv_id)
             logger.info(
                 "[Project.v1] undo conv=%s: undone=%s failed=%s",
-                conv_id[:8],
+                conv_id,
                 result.get("undone", 0),
                 result.get("failed", 0),
             )
@@ -653,7 +653,7 @@ def project_redo():
         result = redo_task_modifications(project_path, task_id)
         logger.info(
             "[Project.v1] redo task=%s: redone=%s ok=%s",
-            task_id[:8],
+            task_log_tag(task_id),
             result.get("redone", 0),
             result.get("ok"),
         )

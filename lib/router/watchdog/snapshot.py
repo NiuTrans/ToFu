@@ -26,7 +26,9 @@ from .signals import FaultSignals, UNHEALTHY_CHANNEL_STATES, _bounded
 
 _HELD_DELIVERY = frozenset({'blocked', 'failed', 'preserved'})
 # The supervisor hosting each contract channel (channels_v1 Channel enum).
-CHANNEL_SUPERVISORS = {'dx': 'lib.channels.dx.supervisor', 'github': 'lib.channels.github.supervisor'}
+CHANNEL_SUPERVISORS = {'dx': 'lib.channels.dx.supervisor', 'github': 'lib.channels.github.supervisor',
+                       'wecom': 'lib.channels.wecom.supervisor', 'qq': 'lib.channels.qq.supervisor',
+                       'wechat': 'lib.channels.wechat.supervisor'}
 _SETTLED_OK = frozenset({'completed', 'superseded', 'cancelled'})
 
 

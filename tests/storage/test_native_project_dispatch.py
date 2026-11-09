@@ -192,6 +192,7 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
                  'readPaths': ['allowed'], 'writePaths': ['allowed'], 'maxToolCalls': 8})
     command_id = 'native-files-' + uuid.uuid4().hex
     assignment = repo.authorize(request, principal, command_id)
+    work_id = 'project-worker:' + assignment['id']
     sends, tasks, workspaces = [], [], []
     expected_bytes = 'native executor bytes: café\n'.encode('utf-8')
 
@@ -207,7 +208,8 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
         bind_worker_workspace(task)
         work = Path(task['config']['projectPath'])
         assert work != root and work.is_relative_to(tmp_path)
-        assert admission.owned_workspace(task)['task_id'] == task_id
+        # The checkout belongs to the assignment's work id, not the physical task.
+        assert admission.owned_workspace(task)['task_id'] == work_id != task_id
         tasks.append(task)
         workspaces.append(work)
         lease = model_budget_admission(task)(input_tokens=4, max_output_tokens=6)
@@ -245,9 +247,10 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
     assert charged['toolAttempts'][0]['phase'] == 'executor_returned'
     assert charged['toolAttempts'][0]['tool_call_id'] == 'native-tool-1'
 
-    delivery.settle_task_workspace(project, task_id, user_id=owner, outcome='completed')
+    delivery.settle_task_workspace(project, work_id, user_id=owner, outcome='completed')
     delivery.resume_pending_workspace_deliveries()
-    row = state.get_workspace(project, task_id, user_id=owner)
+    row = state.get_workspace(project, work_id, user_id=owner)
+    assert state.find_workspace(project, task_id, user_id=owner) is None
     held = row['origin']['delivery']
     checkpoint = row['checkpoint_sha']
     assert held['state'] == 'blocked' and held['checkpointSha'] == checkpoint
@@ -270,8 +273,9 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
     delivery.resume_pending_workspace_deliveries()
     final = service.view(assignment['id'], principal=principal)
     assert final['canonicalDelivery'] is True and final['delivery']['status'] == 'delivered'
+    assert final['delivery']['taskId'] == work_id and final['execution']['taskId'] == task_id
     assert (root / 'allowed/result.txt').read_bytes() == expected_bytes
-    delivered_row = state.get_workspace(project, task_id, user_id=owner)
+    delivered_row = state.get_workspace(project, work_id, user_id=owner)
     assert delivered_row['state'] == 'checkpointed'
     assert not delivered_row['candidate_sha'], 'Task delta delivery must not invent candidate promotion'
     assert _git(root, 'diff', '--cached', '--name-only') == ''
@@ -287,7 +291,7 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
     engine.crash_cycle()
     assert repo.read(assignment['id']) == durable
     assert binding_repo.read(project) == binding
-    assert state.get_workspace(project, task_id, user_id=owner)['origin']['delivery'] == receipt
+    assert state.get_workspace(project, work_id, user_id=owner)['origin']['delivery'] == receipt
     assert repo.authorize(request, principal, command_id) == durable
     for _ in range(2):
         replay = service.dispatch(assignment['id'], principal=principal)
@@ -298,7 +302,7 @@ def test_native_file_dispatch_checkpoint_publish_delivery_crash_replay(
         delivery.resume_pending_workspace_deliveries()
     assert sends == [task_id] and len(tasks) == len(workspaces) == 1
     assert repo.read(assignment['id']) == durable
-    assert state.get_workspace(project, task_id, user_id=owner)['origin']['delivery'] == receipt
+    assert state.get_workspace(project, work_id, user_id=owner)['origin']['delivery'] == receipt
     rows = turns.list_turns(recipient, user_id=owner)['turns']
     assert sum(row['actor'] == 'virtual_user' for row in rows) == 1
     assert sum(row['actor'] == 'assistant' for row in rows) == 1

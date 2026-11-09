@@ -105,7 +105,12 @@ changes in one file merge while preserving staged and unstaged layers.
 Unborn/detached branches need no initial commit. A successful receipt has
 `state=delivered`, `phase=workspace_adoption`, `publicationMode=working_tree`;
 its target SHA identifies recovery evidence, not a commit on the user's branch.
-No-change delivery uses `phase=no_changes` with the same publication mode.
+In a repository that opted into automatic commits, a reviewed project delivery
+lands as its own commit instead (`publicationMode=committed`, target SHA the
+commit on the branch; [project integration](modules/project_integration.md),
+"Reviewed project deliveries become commits"). No-change delivery uses
+`phase=no_changes`, `publicationMode=committed` and names HEAD as its target;
+it captures nothing.
 
 Cooperative leases cover only task-delta paths during capture and final
 publication; unrelated file writers proceed. Merge computation runs outside
@@ -143,9 +148,12 @@ Failed/cancelled/stopped tasks preserve their source and checkpoint, never publi
 Existing candidate/stable/linear checkpoint release gates remain independent.
 Confirmed working-tree delivery reaches the existing opt-in linear checkpoint
 from the commit round. If delivery finishes later, the existing recovery worker
-runs the same checkpoint owner. A Coordinator-reviewed project delivery is the
-exception: the recovery worker commits exactly its own delta onto the current
-branch, without the whole-workspace capture ([project integration](modules/project_integration.md#task-owned-canonical-delivery),
+runs the same checkpoint owner, naming the delivered paths as the task's own so
+a failed whole-workspace capture can still commit them alone
+([project integration](modules/project_integration.md#ref-topology),
+"Linear checkpoints publish in a busy checkout"). A Coordinator-reviewed project
+delivery is the exception: the recovery worker commits exactly its own delta onto
+the current branch, without the whole-workspace capture ([project integration](modules/project_integration.md#task-owned-canonical-delivery),
 "Reviewed project deliveries become commits"). No opt-in means no automatic commit; configured
 verification, staged-content preservation and coalesced-workspace attribution
 remain unchanged. Pending, failed and explicit candidate receipts cannot borrow
@@ -213,6 +221,12 @@ existing writer lease and never trusts an empty or partial checkpoint. A legacy
 that same pass, including after restart. Other capture failures remain blocked with
 their diagnostic and require the existing owner-scoped retry; an unchanged blocked
 receipt is not recaptured or published merely because it happens to name a checkpoint.
+Admission holds that refused a capture before it ran are not capture failures: running
+background commands, running child agents and a busy source (`workspace_busy`) are
+retried by each pass until the capture runs. A busy source was left blocked forever
+until 2026-11-06, which concurrent receiver lanes would have made common: two lanes
+admitting shared ancestor barriers at once can refuse one of them for that instant
+(`test_capture_refused_by_a_busy_source_is_retried_once_it_is_free`).
 Conflict/input retry evidence retains its existing separate recovery path.
 
 Problem: a successfully captured checkpoint awaiting project publication was
@@ -236,6 +250,68 @@ baseline/checkpoint and current entries of task-delta paths. Unchanged conflict
 inputs skip repeated merge computation. Committing unchanged workspace bytes or
 editing unrelated paths does not trigger a retry. Former verification failures
 can now deliver workspace bytes without waiting for a release gate.
+
+**A settled conflict is rechecked at its own paths (2026-11-06).** Problem: the
+receiver re-evaluated every settled conflict on every pass, and each evaluation
+captured the whole canonical checkout (`_canonical_tree`) only to find the same
+fingerprint. After the 14:54 restart on 2026-11-06, Tofu had 16 settled conflicts at
+about 4.5 seconds per capture; passes ran about 70 seconds apart, and the boot pass took
+about 27 minutes to reach lane 7509d68d.
+Decision: the settled conflict is the cache entry and its fingerprint is the exact
+key, so a receipt settled as `conflict_inputs_changed` is first rechecked from its
+inputs alone. `task_delta_delivery._canonical_path_entries` stages only the task-delta
+paths into a private index seeded from HEAD at those paths, by the capture's rules
+(tracked paths always, untracked ones unless ignored), and lists them exactly as
+`ls-tree` lists a capture; it writes no tree and reads no other path. An equal
+fingerprint keeps the receipt without capturing the checkout. Invalidation is explicit:
+any change of the baseline, the checkpoint or the bytes at those paths changes the
+fingerprint, and the receipt takes the whole capture and merge as before. So does a
+path that holds a directory in the checkout (`ls-tree` would name a tree this index
+never writes), a receipt that adoption recovery could still settle, and any error of
+the recheck. Changes elsewhere in the checkout cannot alter a conflict's outcome, so
+they no longer cost a capture per conflict per pass. Alternatives rejected: one
+capture per project per pass reused across its conflicts (a whole-tree walk still runs
+every pass, and nothing invalidates the reuse when another session edits the checkout
+between rows); a persistent private index as a stat cache (still a whole-tree walk per
+conflict); keying on canonical HEAD or a time window (other sessions edit the checkout
+without moving HEAD; a window is a tuning knob). Specification:
+`test_boot_pass_rechecks_settled_conflicts_without_recapturing_the_canonical_tree` in
+`tests/project_mod/test_continuous_delivery.py` (a boot pass over three settled
+conflicts captures nothing; changing one conflict's path re-merges and delivers only
+that row); the object-growth and literal-pathspec cases in the same file still pass.
+
+**A held conflict is rechecked when an input changes, not on every pass
+(2026-11-08).** Problem: that path recheck still ran on every pass, after taking the
+whole-delta claims lease (one file claim per delta path; a 1,100-path delta holds about
+3,700 lease keys and cost 7-15 s of CPU per admission, `benchmarks/workspace_claims_lease.py`),
+and each lane's lease release woke the integration worker, whose next pass requeued the
+same unchanged rows. With 29 held conflicts in two projects, the delivery lanes held
+34-48% of the execution host's GIL samples in every 2026-11-08 profile window
+(py-spy `--gil --nonblocking`, 20:54-21:58). Decision: before any lease, a held
+conflict (`conflict_inputs_changed`, workspace or commit adoption) observes its inputs
+without reading file content: HEAD; the stat identity of every delta path and of each
+`.gitignore` and `info/exclude` that decides whether an untracked delta path is staged;
+for a commit landing also the real index entries at those paths and Git's in-progress
+markers. With the receipt and row identity this is the exact key: when it equals the
+observation taken before this process's last unchanged verdict for that task
+(`task_delta_delivery._UNCHANGED_HOLDS`), the hold stands with no lease, capture or
+merge. Any difference runs the full recheck under the lease, which remembers its
+observation only when it again finds the hold unchanged. A file changed within the
+filesystem's timestamp resolution of the observation (DolphinFS records whole seconds)
+is not trusted, git's racily-clean rule; the full recheck decides. Publication holds
+and authority gates are still evaluated on every pass, before this check. A delivery
+lane's lease release no longer wakes the worker (`notify_workspace_write_released`): a
+lane that changed a receipt already woke it through that delivery-state commit.
+Alternatives rejected: HEAD alone as the key (working-tree publications and other
+sessions change bytes without moving HEAD); hashing the delta paths each pass (reads
+every byte, the cost being removed); a recheck interval (a tuning knob); a filesystem
+watch (no reliable notification on DolphinFS). Known limit: a change to the user's
+global excludes file is observed at the next change of another input. Specifications:
+`test_held_conflict_is_rechecked_when_an_input_changes_not_on_every_pass` and
+`test_a_delivery_lanes_release_does_not_wake_the_worker_that_queued_it`
+(`tests/project_mod/test_continuous_delivery.py`) and
+`test_held_landing_takes_no_claims_lease_until_an_input_changes`
+(`tests/project_mod/test_delivery_integrity.py`).
 
 Conflict names are capped at 64 and 4,096 encoded bytes, with count/truncation
 metadata. One replaceable owner/task input ref pins the immutable dossier;

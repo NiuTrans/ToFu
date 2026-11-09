@@ -252,7 +252,7 @@ def get_server_config():
         logger.debug('get server config: proxy pool view failed (%s)', _e)
         network_info['proxy_pool'] = []
     try:
-        from lib.netpath import status_summary as _np_status
+        from lib.network_routes import status_summary as _np_status
         network_info['netpath'] = _np_status()
     except Exception as _e:
         logger.debug('get server config: failed (%s)', _e)
@@ -714,15 +714,23 @@ def save_server_config():
         if 'search' in data and isinstance(data['search'], dict):
             prior_search = existing.get('search')
             prior_gateway = prior_search.get('gateway') if isinstance(prior_search, dict) else None
+            prior_fetch_skips = (prior_search.get('fetch_skip_domains')
+                                 if isinstance(prior_search, dict) else None)
             # Retired tuning keys from an older client or an imported export
             # are dropped: only these two search keys are saved settings.
             existing['search'] = {key: data['search'][key]
                                   for key in ('skip_domains', 'gateway')
                                   if key in data['search']}
+            if isinstance(existing['search'].get('skip_domains'), list):
+                from lib.search.saved_domain_lists import store_skip_domains
+                store_skip_domains(existing['search'], existing['search']['skip_domains'])
             # A payload without the gateway section (older clients, the agent
             # settings tool) must not silently disable a configured gateway.
             if 'gateway' not in existing['search'] and isinstance(prior_gateway, dict):
                 existing['search']['gateway'] = prior_gateway
+            # The Daily Optimizer owns the fetch-quality skips; Settings never edits them.
+            if isinstance(prior_fetch_skips, list):
+                existing['search']['fetch_skip_domains'] = prior_fetch_skips
             changes.append('search.*')
 
         if 'hidden_models' in data and isinstance(data['hidden_models'], list):

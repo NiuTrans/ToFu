@@ -11,6 +11,7 @@
 
 import { featureRegistry } from '../../feature-registry';
 import {activateIndependentSettingsTab} from './tab-activation';
+import {isMessagingPlatform, openMessagingPlatform} from './messaging-platforms';
 import {notifyMcpSettingsVisibility} from './mcp-settings-reads';
 import { loadModelRoutingAuthority, refreshCommittedModelRouting, persistModelRoutingNow } from './model-routing-authority';
 import type { ModelRoutingAuthorityPorts, ModelRoutingModelRow } from './model-routing-authority';
@@ -161,6 +162,12 @@ function setVal(id: string, value: unknown, prop?: string): void {
 // ══════════════════════════════════════════════════════
 
 function switchSettingsTab(tabId: string): void {
+  // Chat platforms are sections of the 消息平台 tab; their old tab ids (deep links) open it there.
+  if (isMessagingPlatform(tabId)) {
+    switchSettingsTab('messaging');
+    openMessagingPlatform(tabId);
+    return;
+  }
   const bridge = globals();
   bridge._deactivateKnowledgeSettingsTab?.(tabId);
   document.querySelectorAll('.settings-tab').forEach((tab) => {

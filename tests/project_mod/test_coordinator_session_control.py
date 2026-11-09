@@ -144,23 +144,42 @@ def test_stale_stop_never_stops_a_successor(sessions):
 def test_status_projects_authoritative_state_without_private_config(sessions, monkeypatch):
     from lib.conversations.session_control import inspect_session
     from lib.conversation_sync import service
-    snapshot = {'conversationRevision': 12, 'syncSeq': 25, 'turns': [sessions.turn],
-                'attempts': [sessions.attempts['original']], 'queueItems': [],
-                'activeAttemptPhase': {'phase': 'waiting_for_human'}}
+    from lib import message_queue, turn_lifecycle
+    from lib.turn_lifecycle import LifecycleNotFound
+    page = {'syncSeq': 25, 'totalTurns': 1, 'hasMore': False, 'nextBeforeOrdinal': None,
+            'turns': [{**sessions.turn, 'ordinal': 3}], 'attempts': [sessions.attempts['original']]}
+    pages = []
+
+    def turn_page(conv, owner, **kwargs):
+        pages.append((conv, owner, kwargs))
+        return deepcopy(page)
     monkeypatch.setattr(service, 'ConversationSyncService', lambda repository: SimpleNamespace(
-        snapshot=lambda conv, owner, **kw: deepcopy(snapshot)))
+        turn_page=turn_page))
+    queued = [{'queueId': 'q1', 'position': 0, 'kind': 'real', 'text': 'Then deploy'}]
+    monkeypatch.setattr(message_queue, 'get_queue', lambda conv, *, user_id: deepcopy(queued))
     result = inspect_session(sessions.scope, {'conversation_id': 'session'})
-    assert result['conversation_revision'] == 12
+    assert [(conv, owner, kwargs['lane_id'], kwargs['before_ordinal']) for conv, owner, kwargs in pages] == [
+        ('session', 7, 'main', None)]
     assert result['turns'][0]['status'] == 'interrupted'
     assert result['turns'][0]['settlement']['resumeOptions'][0]['operation'] == 'continue'
-    assert result['active_attempt_phase'] == snapshot['activeAttemptPhase']
+    assert result['window'] == {'lane_id': 'main', 'total_turns': 1, 'next_before_ordinal': None}
+    assert result['queue_items'] == queued
     assert 'config' not in result['attempts'][0]
     assert not sessions.calls
     focused = inspect_session(sessions.scope, {'conversation_id': 'session', 'turn_id': 'answer'})
-    assert focused['turns'] == result['turns']
-    from lib.turn_lifecycle import LifecycleNotFound
+    assert focused['turns'] == result['turns'] and focused['attempts'] == result['attempts']
+    assert 'window' not in focused and len(pages) == 1
+
+    def get_turn(conv, turn_id, **kwargs):
+        if turn_id != 'answer':
+            raise LifecycleNotFound('Turn not found')
+        return deepcopy(sessions.turn)
+    monkeypatch.setattr(turn_lifecycle, 'get_turn', get_turn)
     with pytest.raises(LifecycleNotFound):
         inspect_session(sessions.scope, {'conversation_id': 'session', 'turn_id': 'missing'})
+    for cursor in ({'before_ordinal': -1}, {'before_ordinal': True}, {'lane_id': ''}):
+        with pytest.raises(ValueError):
+            inspect_session(sessions.scope, {'conversation_id': 'session', **cursor})
 
 
 @pytest.mark.parametrize('revoked', [False, True])
@@ -201,3 +220,110 @@ def test_dispatched_session_retains_exact_grant(worker_runtime, monkeypatch, rev
         idempotency_key='resume-worker')
     assert ('error' in result) is revoked, result
     assert len(captured) == (0 if revoked else 1)
+
+
+def test_follow_up_refuses_an_ordinary_session_before_any_command(sessions):
+    from lib.project_dispatch.service import FollowUpRefused
+    s = sessions
+    with pytest.raises(ValueError, match='instruction'):
+        s.control(action='follow_up')
+    with pytest.raises(FollowUpRefused, match='Worker session a Coordinator dispatched'):
+        s.control(action='follow_up', instruction='Also summarize the result.')
+    assert not s.calls
+
+
+def test_the_owner_delegation_never_follows_up(sessions):
+    from lib.router.owner_delegation import delegated_conversation_control
+    s = sessions
+    s.global_router = True
+    with pytest.raises(ValueError, match='follow_up'):
+        delegated_conversation_control(s.task, s.scope, {
+            **s.args, 'action': 'follow_up', 'instruction': 'Also summarize the result.',
+            'owner_delegation': {'reason': 'A standing instruction', 'instruction_id': 'ri-1',
+                                 'event_id': 'event-1'}}, control=lambda *a, **kw: pytest.fail('ran'))
+    assert not s.calls
+
+
+def _ended_worker(r, monkeypatch):
+    """A delegated Worker whose bound Turn completed, read through the real repository."""
+    from lib.project_dispatch.admission import TrustedDispatch
+    from lib import turn_lifecycle
+    worker = r.call('delegate_project_work', **r.args)
+    row = r.c.repo.read(worker['assignment_id'])
+    execution = row['execution']
+    trusted = TrustedDispatch(r.c.repo.admission(row['id']))
+    r.attempts[execution['attemptId']].update(status='completed', config=trusted.capture(
+        {}, 7, trusted.principal, worker['conversation_id']))
+    r.turns[execution['turnId']].update(currentAttemptId=execution['attemptId'], projectionRevision=3,
+                                        status='completed')
+    monkeypatch.setattr(turn_lifecycle, 'get_turn', r.c.repo.turn_get)
+    monkeypatch.setattr(turn_lifecycle, 'get_attempt', r.c.repo.attempt_get)
+    monkeypatch.setattr(r.c.repo, 'workspace_get', lambda *args, **kwargs: None)
+    return worker, row
+
+
+def test_follow_up_of_an_ended_worker_creates_its_next_turn_never_an_attempt(worker_runtime, monkeypatch):
+    from lib.conversation_sync import runtime
+    from lib.project_dispatch.admission import FOLLOW_UP_KEY
+    r = worker_runtime
+    worker, row = _ended_worker(r, monkeypatch)
+    execution = row['execution']
+    created = []
+
+    class Commands:
+        def create_turn(self, conv, owner, body, **kwargs):
+            trusted = kwargs['trusted_dispatch']
+            created.append((conv, deepcopy(body), kwargs['principal'], trusted.follows,
+                            trusted.capture({}, owner, kwargs['principal'], conv)))
+            r.turns['follow-up-turn'] = {'conversationId': conv, 'turnId': 'follow-up-turn',
+                                         'actor': 'assistant', 'projectionRevision': 1}
+            r.attempts['follow-up-attempt'] = {'conversationId': conv, 'turnId': 'follow-up-turn',
+                'attemptId': 'follow-up-attempt', 'taskId': '', 'status': 'pending',
+                'commandId': body['commandId']}
+            trusted.continue_execution('follow-up-turn', 'follow-up-attempt')
+            return SimpleNamespace(value={'turn': r.turns['follow-up-turn'],
+                                          'attempt': r.attempts['follow-up-attempt']})
+
+        def create_attempt(self, *args, **kwargs):
+            pytest.fail('A follow-up never regenerates or resumes the ended Turn')
+
+    r.service.commands = Commands()
+    monkeypatch.setattr(runtime, 'conversation_turn_commands', Commands())
+    args = dict(conversation_id=worker['conversation_id'], turn_id=execution['turnId'],
+                attempt_id=execution['attemptId'], action='follow_up', expected_revision=3,
+                instruction='Also add the bot when a Router group is created.', idempotency_key='next')
+    result = r.call('control_conversation', **args)
+    assert 'error' not in result, result
+    assert result['assignment_id'] == row['id'] and result['turn']['turnId'] == 'follow-up-turn'
+    [(conv, body, principal, follows, config)] = created
+    assert conv == worker['conversation_id'] and principal.kind == 'system'
+    assert body['inputActor'] == 'virtual_user' and body['config'] == {}
+    assert body['parentTurnId'] == execution['turnId'] and body['requireParentIsLaneTail'] is True
+    assert args['instruction'] in body['inputTurn']['content']
+    assert body['inputTurn']['_projectAssignmentId'] == row['id']
+    assert follows['execution'] == execution
+    assert config[FOLLOW_UP_KEY] == {'attemptId': execution['attemptId'], 'turnId': execution['turnId'],
+                                     'taskId': r.attempts[execution['attemptId']]['taskId'],
+                                     'status': 'completed'}
+    assert r.c.repo.read(row['id'])['execution']['attemptId'] == 'follow-up-attempt'
+    # A lost ACK replays the launched follow-up; a changed instruction cannot start another.
+    r.attempts['follow-up-attempt']['taskId'] = 'conversation-attempt:follow-up-attempt'
+    replay = r.call('control_conversation', **args)
+    assert replay['idempotent_replay'] and replay['attempt']['attemptId'] == 'follow-up-attempt', replay
+    changed = r.call('control_conversation', **{**args, 'instruction': 'Do something else.'})
+    assert changed['code'] == 'follow_up_refused' and changed['execution_started'] is False, changed
+    assert len(created) == 1
+
+
+def test_follow_up_refuses_another_coordinators_worker(worker_runtime, monkeypatch):
+    r = worker_runtime
+    worker, row = _ended_worker(r, monkeypatch)
+    r.c.conversations.rows['other-coordinator'] = {'user_id': 7, 'title': 'other',
+                                                   'settings': {'projectPath': '/project'}}
+    monkeypatch.setattr(r.c.repo, 'read', lambda assignment_id: {
+        **row, 'request': {**row['request'], 'coordinatorId': 'other-coordinator'}})
+    refused = r.call('control_conversation', conversation_id=worker['conversation_id'],
+                     turn_id=row['execution']['turnId'], attempt_id=row['execution']['attemptId'],
+                     action='follow_up', expected_revision=3, instruction='Also do this.',
+                     idempotency_key='foreign')
+    assert 'another Coordinator' in refused['error'], refused

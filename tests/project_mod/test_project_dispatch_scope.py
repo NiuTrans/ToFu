@@ -186,6 +186,33 @@ def test_profile_rejects_unfenced_tools_and_expanded_preimage_reads(granted):
         scope.validate_profile({'profile': invalid})
 
 
+def test_profile_content_walks_its_schema_once_and_invalid_content_never_passes(monkeypatch):
+    """Every tool admission and ledger write re-derives the profile (2026-11-08:
+    the repeated walk was ~5% of the execution host's GIL samples)."""
+    from lib.project_dispatch import repository
+    monkeypatch.setattr(scope, '_VALID_PROFILE_DIGESTS', set())
+    walks = []
+    original = repository._validate_schema
+    monkeypatch.setattr(repository, '_validate_schema',
+                        lambda value, definition: walks.append(definition) or original(value, definition))
+    profile = {'mode': 'files', 'tools': ['read_files', 'write_file'],
+               'readPaths': ['src'], 'writePaths': ['src'], 'maxToolCalls': 40}
+    first = scope.validate_profile({'profile': profile})
+    first['tools'].append('edit_file')  # each caller owns a fresh copy
+    for _ in range(3):
+        assert scope.validate_profile({'profile': deepcopy(profile)}) == profile
+    assert walks == ['profile']
+    # Different content is walked; content that fails is refused every time.
+    for invalid in (dict(profile, tools=['run_command']), dict(profile, maxToolCalls=True)):
+        for _ in range(2):
+            with pytest.raises((ValueError, repository.ProjectDispatchError)):
+                scope.validate_profile({'profile': invalid})
+    assert walks == ['profile'] * 5
+    # A tuple encodes like the validated list but is not a JSON array.
+    with pytest.raises(repository.ProjectDispatchError):
+        scope.validate_profile({'profile': dict(profile, tools=tuple(profile['tools']))})
+
+
 def test_revocation_and_workspace_owner_rechecked_at_descriptor_io(granted):
     accepted = scope.admit_tool(granted.task, 'read_files', {'path': 'src/a.txt'}, str(granted.root))
     granted.live['revoked'] = True
@@ -247,10 +274,10 @@ def test_real_read_write_append_edit_and_exact_durable_undo(granted):
     granted.call('write_file', {'path': 'src/new/deep.txt', 'content': 'two\n', 'append': True})
     assert (granted.root / 'src/new/deep.txt').read_bytes() == b'one\ntwo\n'
     result = granted.call('edit_file', {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'gamma'},
-        {'path': 'src/a.txt', 'operation': 'insert_after', 'anchor': 'gamma\n', 'content': 'inserted\n'}]})
+        {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'gamma'},
+        {'path': 'src/a.txt', 'anchor': 'gamma\n', 'content': 'gamma\ninserted\n'}]})
     assert 'Applied 2/2' in result
-    assert (granted.root / 'src/a.txt').read_text() == 'gamma\n\ninserted\nbeta\n'
+    assert (granted.root / 'src/a.txt').read_text() == 'gamma\ninserted\nbeta\n'
     rows = modifications.get_modifications(str(granted.root))
     assert len(rows) == 3
     import base64
@@ -266,11 +293,10 @@ def test_scoped_batch_path_edit_stays_inside_the_grant(granted):
     result = granted.call('edit_file', {
         'path': 'src/a.txt',
         'edits': [
-            {'operation': 'replace', 'anchor': 'alpha', 'content': 'gamma'},
-            {'operation': 'insert_after', 'anchor': 'gamma\n',
-             'content': 'inserted\n'}]})
+            {'anchor': 'alpha', 'content': 'gamma'},
+            {'anchor': 'gamma\n', 'content': 'gamma\ninserted\n'}]})
     assert 'Applied 2/2' in result
-    assert (granted.root / 'src/a.txt').read_text() == 'gamma\n\ninserted\nbeta\n'
+    assert (granted.root / 'src/a.txt').read_text() == 'gamma\ninserted\nbeta\n'
 
 
 def test_scoped_batch_path_cannot_escape_the_granted_prefix(granted):
@@ -278,7 +304,7 @@ def test_scoped_batch_path_cannot_escape_the_granted_prefix(granted):
     with pytest.raises(ValueError):
         granted.call('edit_file', {
             'path': '../outside/secret.txt',
-            'edits': [{'operation': 'replace', 'anchor': 'ungranted',
+            'edits': [{'anchor': 'ungranted',
                        'content': 'owned'}]})
     assert outside.read_text() == 'ungranted secret\n'
 
@@ -287,13 +313,13 @@ def test_scoped_batch_path_cannot_escape_the_granted_prefix(granted):
 def test_scoped_batch_path_requires_a_file_for_each_edit(granted):
     with pytest.raises(ValueError, match='explicit file per edit'):
         granted.call('edit_file', {
-            'edits': [{'operation': 'replace', 'anchor': 'alpha',
+            'edits': [{'anchor': 'alpha',
                        'content': 'gamma'}]})
     assert (granted.root / 'src/a.txt').read_text() == 'alpha\nbeta\n'
 
 
 def test_read_before_edit_and_stale_tokens_use_confined_preimage(granted):
-    edit = {'edits': [{'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'new'}]}
+    edit = {'edits': [{'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'new'}]}
     assert 'Read this scoped file' in granted.call('edit_file', edit)
     granted.call('read_files', {'path': 'src/a.txt'})
     (granted.root / 'src/a.txt').write_text('alpha\nchanged sibling\n')
@@ -347,7 +373,6 @@ def test_scoped_handler_fences_before_remote_refs_preimages(granted, monkeypatch
     monkeypatch.setattr(project, '_execute_remote_project_tool', lambda *a, **kw: pytest.fail('remote transport'))
     from lib.tasks_pkg import workspace_delivery
     monkeypatch.setattr(workspace_delivery, 'rebind_project_tool_arguments', lambda *a, **kw: pytest.fail('workspace expansion'))
-    monkeypatch.setattr(project, '_resolve_content_ref', lambda *a, **kw: pytest.fail('content ref'))
     result = project._handle_project_tool(granted.task, {}, 'read_files', 'call-1',
         {'path': 'src/a.txt'}, 1, {}, granted.task['config'], str(granted.root), True)
     assert result[0] == 'call-1' and 'alpha' in result[1]
@@ -481,7 +506,7 @@ def test_scoped_edit_batches_never_reread_or_sweep_an_oversized_history(granted,
 
     def edit(anchor, content):
         result = granted.call('edit_file', {'edits': [
-            {'path': 'src/a.txt', 'operation': 'replace', 'anchor': anchor, 'content': content}]})
+            {'path': 'src/a.txt', 'anchor': anchor, 'content': content}]})
         assert 'Applied 1/1' in result, result
 
     edit('alpha', 'gamma')
@@ -523,7 +548,7 @@ def test_scoped_write_above_sixteen_mib_is_complete_and_undoable(granted):
 def test_complete_scoped_edit_chain_past_thirty_retains_exact_undo(granted):
     target=granted.root/'src'/'a.txt';target.write_text('STATE_000\n')
     granted.call('read_files',{'path':'src/a.txt'})
-    edits=[{'path':'src/a.txt','operation':'replace','anchor':f'STATE_{number:03d}',
+    edits=[{'path':'src/a.txt','anchor':f'STATE_{number:03d}',
             'content':f'STATE_{number+1:03d}'} for number in range(64)]
     result=granted.call('edit_file',{'description':'Apply full edit chain','edits':edits})
     assert '64/64' in result and '[64] OK' in result
@@ -552,9 +577,9 @@ def test_scoped_batch_preflights_all_files_before_any_write(granted, atomic):
     (granted.root / 'src/b.txt').write_text('second\n')
     granted.call('read_files', {'reads': [{'path': 'src/a.txt'}, {'path': 'src/b.txt'}]})
     args = {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'changed'},
-        {'path': 'src/b.txt', 'operation': 'replace', 'anchor': 'absent', 'content': 'no'},
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'changed', 'content': 'final'},
+        {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'changed'},
+        {'path': 'src/b.txt', 'anchor': 'absent', 'content': 'no'},
+        {'path': 'src/a.txt', 'anchor': 'changed', 'content': 'final'},
     ]}
     if atomic is not None:
         args['atomic'] = atomic
@@ -577,7 +602,7 @@ def test_scoped_batch_validates_the_journal_without_rereading_history(granted, m
     in full, so a history above the cache budget does not stall other writers."""
     granted.call('read_files', {'reads': [{'path': 'src/a.txt'}]})
     assert 'Applied 1/1' in granted.call('edit_file', {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'gamma'}]})
+        {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'gamma'}]})
     monkeypatch.setattr(modifications, '_mods_cache_weight', lambda *a: float('inf'))
     modifications._invalidate_cache(modifications._get_session_dir(str(granted.root)))
     loads = []
@@ -585,7 +610,7 @@ def test_scoped_batch_validates_the_journal_without_rereading_history(granted, m
     monkeypatch.setattr(modifications, '_load_from_disk',
                         lambda session: (loads.append(session), load(session))[1])
     assert 'Applied 1/1' in granted.call('edit_file', {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'gamma', 'content': 'delta'}]})
+        {'path': 'src/a.txt', 'anchor': 'gamma', 'content': 'delta'}]})
     assert loads == []
     assert (granted.root / 'src/a.txt').read_text() == 'delta\nbeta\n'
     assert len(modifications.get_modifications(str(granted.root))) == 2
@@ -595,8 +620,8 @@ def test_scoped_later_unread_file_never_follows_an_earlier_write(granted):
     (granted.root / 'src/b.txt').write_text('second\n')
     granted.call('read_files', {'path': 'src/a.txt'})
     result = granted.call('edit_file', {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'changed'},
-        {'path': 'src/b.txt', 'operation': 'replace', 'anchor': 'second', 'content': 'changed'},
+        {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'changed'},
+        {'path': 'src/b.txt', 'anchor': 'second', 'content': 'changed'},
     ]})
     assert 'Read this scoped file' in result
     assert (granted.root / 'src/a.txt').read_text() == 'alpha\nbeta\n'
@@ -607,7 +632,7 @@ def test_scoped_later_unread_file_never_follows_an_earlier_write(granted):
 def test_scoped_atomic_argument_is_boolean_not_truthy(granted, atomic):
     with pytest.raises(ValueError, match='atomic'):
         granted.call('edit_file', {'atomic': atomic, 'edits': [
-            {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'no'},
+            {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'no'},
         ]})
     assert (granted.root / 'src/a.txt').read_text() == 'alpha\nbeta\n'
 
@@ -616,7 +641,7 @@ def test_scoped_out_of_bounds_range_cannot_certify_an_unseen_file(granted):
     with pytest.raises(ValueError, match='beyond EOF'):
         granted.call('read_files', {'path': 'src/a.txt', 'start_line': 500, 'end_line': 600})
     result = granted.call('edit_file', {'edits': [
-        {'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'changed'},
+        {'path': 'src/a.txt', 'anchor': 'alpha', 'content': 'changed'},
     ]})
     assert 'Read this scoped file' in result
     assert (granted.root / 'src/a.txt').read_bytes() == b'alpha\nbeta\n'

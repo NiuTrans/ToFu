@@ -33,6 +33,12 @@ DX_ROBOT = CONTRACT['x-dxRobot']
 # 大象 message types, the rich-text subtype, the voice format and the Web
 # SDK's file hosts (docs/CHANNELS.md C9).
 DX = CONTRACT['x-dx']
+# Bot platforms (docs/CHANNELS.md C12): a bot account the owner registered,
+# whose provider IDs are opaque strings carried in thread keys as base32.
+BOT_CHANNELS = tuple(CONTRACT['x-botChannels'])
+WECOM = CONTRACT['x-wecom']
+QQ = CONTRACT['x-qq']
+WECHAT = CONTRACT['x-wechat']
 DEFAULT_MODE_BY_KIND = dict(CONTRACT['x-defaults']['modeByKind'])
 DEFAULT_REPLY_POLICY = CONTRACT['x-defaults']['replyPolicy']
 # The owner's assistant for other people's messages (docs/CHANNELS.md C11).
@@ -60,6 +66,9 @@ ACTIVE_OUTBOX_STATES = tuple(s for s in OUTBOX_STATES if s not in TERMINAL_OUTBO
 
 TOOLS = CONTRACT['tools']
 TOOL_NAMES = frozenset(tool['function']['name'] for tool in TOOLS)
+# Tool arguments that are message content (channel_send's text and files): tool-call logs show
+# them only by size and digest (docs/CHANNEL_PROTOCOL.md P14).
+TOOL_CONTENT_ARGUMENTS = frozenset({'text', 'attachments'})
 
 _THREAD_KEY_RE = re.compile(_DEFS['ThreadKey']['pattern'])
 _EVENT_ID_RE = re.compile(_DEFS['EventId']['pattern'])
@@ -71,7 +80,11 @@ _GITHUB_THREAD_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}#[1-
 # Kinds per channel, as in the contract ThreadKey pattern. GitHub's REST API
 # treats every pull request as an issue (same number space, same comments
 # endpoint), so both are one kind.
-_KINDS_BY_CHANNEL = {'dx': frozenset({'gid', 'uid', 'pid'}), 'github': frozenset({'issue'})}
+_KINDS_BY_CHANNEL = {'dx': frozenset({'gid', 'uid', 'pid'}), 'github': frozenset({'issue'}),
+                     **{channel: frozenset({'uid', 'gid'}) for channel in BOT_CHANNELS}}
+# A bot platform's provider ID (user, group or chat ID) as unpadded lowercase
+# RFC 4648 base32 (lib.channels.bots.ids): reversible and lowercase ASCII.
+_PROVIDER_KEY_RE = re.compile(r'^[a-z2-7]{1,128}$')
 _GITHUB_PREFIX = 'github:'
 # Event keys sort by the provider ID; the contract caps IDs at 32 digits.
 _ORDER_KEY_WIDTH = 32
@@ -118,6 +131,8 @@ class ThreadKey:
             valid = (_GITHUB_THREAD_RE.fullmatch(self.external_id) is not None
                      # '.' and '..' are path segments, never repository names.
                      and self.external_id.split('#', 1)[0].split('/', 1)[1] not in ('.', '..'))
+        elif self.channel in BOT_CHANNELS:
+            valid = _PROVIDER_KEY_RE.fullmatch(self.external_id) is not None
         else:
             valid = _EXTERNAL_ID_RE.fullmatch(self.external_id) is not None
         if not valid:
@@ -184,6 +199,9 @@ def external_id_after(left: str, right: str | None) -> bool:
     return right is None or right == '' or int(left) > int(right)
 
 
+# Who authored a message, as the platform says (the channel protocol's Sender.kind):
+# a person, an automated account the platform flags, or a platform notice.
+SENDER_KINDS = ('user', 'bot', 'system')
 # Kinds of downloadable originals and their resolution states (C9).
 MEDIA_KINDS = ('image', 'file', 'voice')
 MEDIA_STATES = ('pending', 'attached', 'failed')
@@ -246,7 +264,12 @@ class ChannelEvent:
     ``mentioned_ids``/``mentions_all`` and ``reply_to_sender_id`` are protocol
     facts; ingress compares them with the bound owner identity. ``media`` are
     the event's downloadable originals; ``text`` is its own text or, for a
-    non-text message, a readable description.
+    non-text message, a readable description. ``sender_kind`` is the
+    platform's own fact about the author (``SENDER_KINDS``: a person, a bot
+    account, a platform notice). ``own_connection``: this
+    session sent it. ``host_sent``: another engine process of this server sent
+    it as the account (the engine's own sent-message record holds it), so it
+    is Tofu's send, not the owner's.
     """
 
     thread: ThreadKey
@@ -256,6 +279,7 @@ class ChannelEvent:
     text: str
     sent_at_ms: int
     thread_title: str = ''
+    sender_kind: str = 'user'
     message_type: int = 1
     mentioned_ids: tuple[str, ...] = ()
     mentions_all: bool = False
@@ -264,6 +288,7 @@ class ChannelEvent:
     client_id: str = ''
     outbox_marker: str = ''
     own_connection: bool = False
+    host_sent: bool = False
     url: str = ''
     media: tuple[ChannelMedia, ...] = ()
 
@@ -271,6 +296,8 @@ class ChannelEvent:
         require_external_id(self.external_id)
         if not isinstance(self.text, str) or not isinstance(self.sender_id, str):
             raise ChannelError('invalid_event', 'Channel event text and sender must be strings')
+        if self.sender_kind not in SENDER_KINDS:
+            raise ChannelError('invalid_event', f'Unknown channel sender kind {self.sender_kind!r}')
         if not all(isinstance(item, ChannelMedia) for item in self.media):
             raise ChannelError('invalid_event', 'Channel event media must be ChannelMedia')
 
@@ -286,7 +313,7 @@ class ChannelEvent:
         return {
             'eventId': self.event_id, 'thread': str(self.thread),
             'externalId': self.external_id, 'senderId': self.sender_id,
-            'senderName': self.sender_name, 'text': self.text,
+            'senderName': self.sender_name, 'senderKind': self.sender_kind, 'text': self.text,
             'sentAtMs': int(self.sent_at_ms), 'threadTitle': self.thread_title,
             'messageType': int(self.message_type),
             'mentionedIds': list(self.mentioned_ids), 'mentionsAll': bool(self.mentions_all),
@@ -300,6 +327,7 @@ class ChannelEvent:
         return cls(
             thread=ThreadKey.parse(value['thread']), external_id=value['externalId'],
             sender_id=value.get('senderId', ''), sender_name=value.get('senderName', ''),
+            sender_kind=value.get('senderKind') or 'user',
             text=value.get('text', ''), sent_at_ms=int(value.get('sentAtMs') or 0),
             thread_title=value.get('threadTitle', ''),
             message_type=int(value.get('messageType') or 1),
@@ -309,6 +337,38 @@ class ChannelEvent:
             reply_to_sender_id=value.get('replyToSenderId', ''),
             client_id=value.get('clientId', ''), url=value.get('url', ''),
             media=tuple(ChannelMedia.from_record(item) for item in value.get('media') or ()))
+
+
+# A message changed after it was sent (the channel protocol's edit and recall events).
+CHANGE_KINDS = ('edit', 'recall')
+
+
+@dataclass(frozen=True)
+class ChannelChange:
+    """An edit or a recall of a message, normalized by an adapter; facts only, no policy.
+
+    ``target`` is the changed message's external ID ('' when the adapter's
+    facts could not name it); ``change_id`` is the platform's stable identity
+    of this change, so a redelivered change is applied once. An edit carries
+    the message's new ``text``; a recall carries none. ``sent_at_ms`` is the
+    platform time of the change when the platform gives one.
+    """
+
+    kind: str
+    thread: ThreadKey
+    target: str
+    change_id: str
+    sender_id: str
+    text: str = ''
+    sent_at_ms: int = 0
+
+    def __post_init__(self):
+        if self.kind not in CHANGE_KINDS:
+            raise ChannelError('invalid_event', f'Unknown channel change kind {self.kind!r}')
+        if self.target:
+            require_external_id(self.target, field_name='target')
+        if not self.change_id or not isinstance(self.text, str):
+            raise ChannelError('invalid_event', 'A channel change needs its ID and text')
 
 
 # Outbound 大象 attachment facts: accepted types, size bound, preview sources (C10).
@@ -383,7 +443,9 @@ class OutboxItem:
             'attachments': [
                 {'index': index, 'name': record['name'], 'type': record['type'], 'size': int(record['size']),
                  'sha256': record['sha256'], 'kind': record['kind'], 'renditionOf': record.get('renditionOf'),
-                 'state': record.get('state') or 'pending', 'error': record.get('error')}
+                 'state': record.get('state') or 'pending', 'error': record.get('error'),
+                 **({'project': record['source']['project']} if (record.get('source') or {}).get('project')
+                    else {})}
                 for index, record in enumerate(self.extra.get('attachments') or ())],
             'approvalCode': approval_code(self.id),
             # Items recorded before authorities existed came from the router's own requests.
@@ -408,13 +470,14 @@ def session_owns_status(account: dict[str, Any] | None) -> bool:
 
 
 __all__ = [
-    'ACCOUNT_STATES', 'ACTIVE_OUTBOX_STATES', 'BRIDGE_CONTRACT', 'CHANNELS', 'CHANNEL_TRAITS',
-    'CONFIGURABLE_MODES', 'CONTRACT', 'ChannelError', 'ChannelEvent', 'ChannelMedia',
+    'ACCOUNT_STATES', 'ACTIVE_OUTBOX_STATES', 'BRIDGE_CONTRACT', 'CHANGE_KINDS', 'CHANNELS', 'CHANNEL_TRAITS',
+    'CONFIGURABLE_MODES', 'CONTRACT', 'ChannelChange', 'ChannelError', 'ChannelEvent', 'ChannelMedia',
     'DEFAULT_MODE_BY_KIND', 'DEFAULT_REPLY_POLICY', 'DISCLOSURE_LABEL', 'DX', 'DX_ROBOT',
     'EVENT_DISPOSITIONS', 'GITHUB', 'LIMITS', 'MEDIA_KINDS', 'MEDIA_STATES', 'NAMESPACE',
-    'OUTBOX_MARKER_FIELD',
+    'OUTBOX_MARKER_FIELD', 'BOT_CHANNELS', 'QQ', 'SENDER_KINDS', 'WECHAT', 'WECOM',
     'OUTBOX_STATES', 'OutboxItem', 'PROVIDER_LIMITS', 'REPLY_POLICIES', 'SESSION_REPORTED_STATES',
-    'TERMINAL_OUTBOX_STATES', 'THREAD_KINDS', 'THREAD_MODES', 'TOOLS', 'TOOL_NAMES', 'ThreadKey',
+    'TERMINAL_OUTBOX_STATES', 'THREAD_KINDS', 'THREAD_MODES', 'TOOLS', 'TOOL_CONTENT_ARGUMENTS', 'TOOL_NAMES',
+    'ThreadKey',
     'external_id_after', 'order_key', 'parse_event_id', 'require_external_id', 'session_owns_status',
     'DX_ATTACHMENTS', 'ASSISTANT', 'OUTBOX_AUTHORITIES', 'OWNER_NOTE_MAX_CHARS', 'approval_code',
 ]

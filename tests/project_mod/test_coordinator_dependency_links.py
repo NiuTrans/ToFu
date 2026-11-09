@@ -26,7 +26,7 @@ def test_automatic_dependent_waits_for_review_and_publication_then_reuses_its_gr
     r.service.publication_wake = lambda: None
     review = r.call('review_project_work', assignment_id=first['id'], result_revision=1,
         decision='accept', note='Verified exact code', checkpoint_sha=pin['checkpointSha'])
-    assert review['canonicalDelivery'], review
+    assert review['canonical_delivery'], review
     ready = r.call('delegate_project_work', **args)
     assert ready['dispatch'] == 'accepted' and ready['assignment_id'] == pending['assignment_id'], ready
     assert len(r.created) == len(r.calls) == 2
@@ -52,7 +52,7 @@ def test_automatic_rework_records_exact_link_and_replays_without_duplicate_birth
     assert len(r.calls) == 1
     reviewed = r.call('review_project_work', assignment_id=first['id'], result_revision=1,
                      decision='rework', note='Repair the missing acceptance check')
-    assert reviewed['review']['decision'] == 'rework'
+    assert reviewed['decision'] == 'rework'
     repair = r.call('delegate_project_work', **args)
     assert repair['dispatch'] == 'accepted', repair
     assert r.c.repo.read(repair['assignment_id'])['request']['reworkOf'] == pin

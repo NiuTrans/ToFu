@@ -49,6 +49,7 @@ from lib.tasks_pkg.cache_tracking._policy import (
     BUCKET_BREAKPOINT_LOST as BUCKET_BREAKPOINT_LOST,
     BUCKET_MID_WINDOW as BUCKET_MID_WINDOW,
     BUCKET_WRITE_UNSETTLED as BUCKET_WRITE_UNSETTLED,
+    BUCKET_TOOL_NAME_BUDGET as BUCKET_TOOL_NAME_BUDGET,
     BUCKET_UPSTREAM as BUCKET_UPSTREAM,
     BUCKET_BODY_CHANGE as BUCKET_BODY_CHANGE,
     BUCKET_NO_BREAK as BUCKET_NO_BREAK,
@@ -164,14 +165,14 @@ def _detect_client_changes(prev, messages, tools, model, wire_evidence, *,
                 logger.debug(
                     '[CacheTrack] conv=%s call=%d expected prefix rewrite '
                     'at api-form index %d (intended %d)',
-                    conv_id[:8], prev.call_count + 1,
+                    conv_id, prev.call_count + 1,
                     first_changed_prefix_index, _intended_idx)
             else:
                 logger.warning(
                     '[CacheTrack] conv=%s call=%d ⚠ PREFIX MUTATION DETECTED: '
                     'messages[0:%d] content hash changed without compaction. '
                     'This will cause a cache miss. changed=[%s]%s',
-                    conv_id[:8], prev.call_count + 1, previous_prefix_count,
+                    conv_id, prev.call_count + 1, previous_prefix_count,
                     ', '.join(prefix_culprits) or '?',
                     _prefix_mutation_content_fingerprints(
                         messages, prefix_culprits))
@@ -264,7 +265,8 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
                        model='', wire_available=False, wire_changed=False,
                        read_collapsed=False, lane='', tool_count=None,
                        wire_tool_count=None, wire_tool_name_bytes=None,
-                       cold_group='', affinity=''):
+                       wire_tool_name_budget_bytes=None,
+                       cold_group='', affinity='', request_identity=None, trace_id=''):
     """Emit ONE machine-readable per-round cache-verdict record (ALWAYS, every
     round — not only on a break).
 
@@ -279,7 +281,9 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
     """
     try:
         rec = {
-            'conv': (conv_id or '')[:8],
+            # Whole ID: siblings share long prefixes (worker-<hex>), and the
+            # read-source report chains rounds by this field.
+            'conv': conv_id or '',
             'call': call_num,
             'bucket': classify_verdict(verdict),
             'routing_diff': list(ns_switch or []),
@@ -334,6 +338,8 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
             rec['wire_tools'] = int(wire_tool_count)
         if wire_tool_name_bytes is not None:
             rec['wire_tool_name_bytes'] = int(wire_tool_name_bytes)
+        if wire_tool_name_budget_bytes:
+            rec['wire_tool_name_budget_bytes'] = int(wire_tool_name_budget_bytes)
         if cold_group:
             rec['cold_group'] = str(cold_group)
         # Wire slots that carried the lineage's cache-affinity key
@@ -342,6 +348,16 @@ def _emit_round_record(conv_id, call_num, verdict, *, ns_switch, ttl_flip,
         # entry while carrying a key shows that the hop ignored the key.
         if affinity:
             rec['affinity'] = str(affinity)
+        if isinstance(request_identity, dict):
+            identity = {key: request_identity[key] for key in (
+                'semantic_request_id', 'provider_prefix_id')
+                if isinstance(request_identity.get(key), str)
+                and len(request_identity[key]) == 64
+                and all(char in '0123456789abcdef' for char in request_identity[key])}
+            if len(identity) == 2:
+                rec['request_identity'] = identity
+                if isinstance(trace_id, str) and trace_id:
+                    rec['trace_id'] = trace_id
         # The RAW wire-culprit tokens (e.g. '<ttl-flip>', '<mid-out-of-window>',
         # 'assistant.content', '<hoisted>.system') that drove _wire_prefix_changed
         # this round. Emitted so a post-fix live A/B can see the ACTUAL driver of
@@ -414,7 +430,7 @@ def _cache_observation_elapsed(prev, now, scope, key, user_id, conv_id):
     return elapsed
 
 
-def _round_groups(scope, tools, model, call_count, wire_evidence) -> dict:
+def _round_record_context(scope, tools, model, call_count, wire_evidence, usage) -> dict:
     """Record fields naming this round's request groups, keyed as the finisher's.
 
     ``cold_group`` is read before the round is observed, so a round is judged
@@ -429,8 +445,11 @@ def _round_groups(scope, tools, model, call_count, wire_evidence) -> dict:
         'wire_tool_name_bytes': wire_evidence.tool_name_bytes})
     routing = wire_evidence.routing if isinstance(wire_evidence.routing, dict) else {}
     return {'lane': lane, 'tool_count': tool_count,
+            'request_identity': (usage or {}).get('_request_identity'),
+            'trace_id': (usage or {}).get('trace_id', ''),
             'wire_tool_count': wire_evidence.tool_count,
             'wire_tool_name_bytes': wire_evidence.tool_name_bytes,
+            'wire_tool_name_budget_bytes': wire_evidence.tool_name_budget_bytes,
             'cold_group': cold_group,
             'affinity': str(routing.get('affinity') or '').split('@', 1)[0]}
 
@@ -443,7 +462,8 @@ def _cache_verdict_finisher(
     prefix_mutation_break, _prefix_culprits, _wire_tools_verified, _wire_system_verified,
     turn_boundary_break, _cross_turn_prev_read, prev_cache_read, lane='',
     tool_count=None, wire_tool_count=None, wire_tool_name_bytes=None,
-    cold_group='', affinity='',
+    wire_tool_name_budget_bytes=None,
+    cold_group='', affinity='', request_identity=None, trace_id='',
 ):
     """Freeze this round's evidence for consistent telemetry and returned verdicts."""
     def _finish(v, record_as=None):
@@ -468,8 +488,9 @@ def _cache_verdict_finisher(
             wire_changed=_wire_prefix_changed,
             read_collapsed=_read_collapsed, lane=lane, tool_count=tool_count,
             wire_tool_count=wire_tool_count,
-            wire_tool_name_bytes=wire_tool_name_bytes, cold_group=cold_group,
-            affinity=affinity)
+            wire_tool_name_bytes=wire_tool_name_bytes,
+            wire_tool_name_budget_bytes=wire_tool_name_budget_bytes, cold_group=cold_group,
+            affinity=affinity, request_identity=request_identity, trace_id=trace_id)
         if v:
             # Keep legacy keys and the primary ledger bucket, but never
             # discard independent evidence merely because another reason
@@ -535,7 +556,7 @@ def _report_indeterminate_round(conv_id, prev, *, cache_write, elapsed,
             'advertised compaction rewrite: cache_write=%d '
             '(gap=%.1fs, advertised api-form index %d) — counted as '
             'indeterminate.',
-            conv_id[:8], prev.call_count, cache_write, elapsed,
+            conv_id, prev.call_count, cache_write, elapsed,
             expected_rewrite_index)
     else:
         logger.warning(
@@ -544,7 +565,7 @@ def _report_indeterminate_round(conv_id, prev, *, cache_write, elapsed,
             '— the spend is real but the cause is unresolved. Counted '
             'as indeterminate, NOT as no_break: a zero-read rebuild '
             'must not be filed alongside genuine cache hits.',
-            conv_id[:8], prev.call_count, cache_write, elapsed,
+            conv_id, prev.call_count, cache_write, elapsed,
             was_compaction)
     return {
         'indeterminate': (
@@ -579,7 +600,7 @@ def _report_uncached_round(conv_id, prev, *, prompt_tokens, markers) -> dict:
     logger.warning(
         '[CacheTrack] conv=%s call=%d UNCACHED: input=%d cache_read=0 '
         'cache_write=0 — %s. Counted as uncached, NOT as no_break.',
-        conv_id[:8], prev.call_count, prompt_tokens, evidence)
+        conv_id, prev.call_count, prompt_tokens, evidence)
     return {'uncached': (
         'the provider reported no cache read and no cache write on a '
         f'cacheable prompt ({prompt_tokens} input tokens), so the whole prompt '
@@ -748,7 +769,7 @@ def detect_cache_break(
                 logger.debug(
                     '[CacheTrack] conv=%s Expected cache drop after compaction: '
                     '%d → %d tokens',
-                    conv_id[:8], prev_cache_read, cache_read)
+                    conv_id, prev_cache_read, cache_read)
         if _expected_rewrite_index >= 0:
             prev.expected_rewrite_index = -1
         # Api-form index space (prefix-field hashes), NOT wire_fp positions.
@@ -951,7 +972,7 @@ def detect_cache_break(
         # below can call it too.
         _ttl_flip = '<ttl-flip>' in (_wire_culprits or [])
         _breakpoint_lost = '<breakpoint-lost>' in (_wire_culprits or [])
-        _groups = _round_groups(_scope, tools, model, prev.call_count, _wire_evidence)
+        _groups = _round_record_context(_scope, tools, model, prev.call_count, _wire_evidence, usage)
 
         _finish = _cache_verdict_finisher(
             conv_id, prev, _ns_switch, _ttl_flip,
@@ -1005,7 +1026,7 @@ def detect_cache_break(
             logger.debug(
                 '[CacheTrack] conv=%s call=%d client changes: %s '
                 '(cache_read: %d → %d, no confirmed break)',
-                conv_id[:8], prev.call_count,
+                conv_id, prev.call_count,
                 ', '.join(f'{k}={v}' for k, v in client_changes.items()),
                 prev_cache_read, cache_read,
             )

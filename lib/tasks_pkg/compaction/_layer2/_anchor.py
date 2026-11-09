@@ -633,7 +633,8 @@ def _extract_recently_accessed_files(messages: list,
                     if len(files_seen) >= max_files:
                         break
                     if isinstance(edit, dict):
-                        _add_path(edit.get('path', ''))
+                        # An edit_file item without its own path edits the batch file.
+                        _add_path(edit.get('path') or args.get('path', ''))
             elif fn_name in ('insert_content', 'insert_contents') and args.get('edits'):
                 for edit in _coerce_spec_list(args.get('edits')):
                     if len(files_seen) >= max_files:

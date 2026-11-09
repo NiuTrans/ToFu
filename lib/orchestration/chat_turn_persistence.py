@@ -114,7 +114,7 @@ class OrchestrationChatTurnPersistence:
             lambda: self._persist(turns),
             abort_event=self._task.get('abort_event'),
             label='flow chat turn commit '
-                  f'task={str(self._task.get("id") or "")[:8]}')
+                  f'task={str(self._task.get("id") or "")}')
 
     def __call__(self, _message: dict) -> bool:
         """Persist one completed turn snapshot."""
@@ -128,7 +128,7 @@ class OrchestrationChatTurnPersistence:
             logger.warning(
                 '[FlowChat] per-turn DB sync failed '
                 '(non-fatal) task=%s: %s',
-                str(self._task.get('id') or '')[:8], exc,
+                str(self._task.get('id') or ''), exc,
             )
             return False
         # Goal mode is a frontend surface, not a background swarm: each
@@ -146,7 +146,7 @@ class OrchestrationChatTurnPersistence:
             logger.debug(
                 '[FlowChat] settled-turn translate schedule failed '
                 '(non-fatal) task=%s: %s',
-                str(self._task.get('id') or '')[:8], exc,
+                str(self._task.get('id') or ''), exc,
             )
         return True
 
@@ -163,7 +163,7 @@ class OrchestrationChatTurnPersistence:
             synced = False
             logger.warning(
                 '[FlowChat] final DB sync failed (non-fatal) task=%s: %s',
-                str(self._task.get('id') or '')[:8], exc,
+                str(self._task.get('id') or ''), exc,
             )
         return synced
 

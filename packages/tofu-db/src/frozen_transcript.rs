@@ -314,6 +314,37 @@ pub(crate) fn recoverable_ranges(
         )?,
     ])
 }
+/// Visit every message of one complete frozen transcript in order, holding
+/// one decoded page at a time. Returns the message count, or None when the
+/// conversation has no frozen transcript.
+pub(crate) fn for_each_message(
+    database: &AuthorityDatabase,
+    tx: &mut AuthorityTransaction,
+    id: &str,
+    visit: &mut dyn FnMut(usize, Value) -> io::Result<()>,
+) -> io::Result<Option<usize>> {
+    let Some((m, _)) = load(database, tx, id)? else {
+        return Ok(None);
+    };
+    if !m.complete {
+        return Err(corrupt("frozen transcript import is incomplete"));
+    }
+    let mut position = 0usize;
+    for (index, p) in m.pages.iter().enumerate() {
+        let page = parse_page(&page_bytes(database, tx, &m, index)?)?;
+        if page.len() != p.count || p.start != position {
+            return Err(corrupt("frozen transcript page count differs"));
+        }
+        for message in page {
+            visit(position, message)?;
+            position += 1;
+        }
+    }
+    if position != m.messages {
+        return Err(corrupt("frozen transcript message range differs"));
+    }
+    Ok(Some(m.messages))
+}
 pub(crate) fn messages(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
@@ -698,6 +729,41 @@ mod tests {
             call(&mut db, "scan", json!({})).unwrap()["rows"],
             json!([{"conversation_id":"conv"}])
         );
+    }
+    #[test]
+    fn turn_usage_reads_frozen_rows_page_by_page_without_bodies() {
+        let (_, mut db) = prepared();
+        put(&mut db, 0, 0, json!([
+            {"role":"user","content":"imported question","timestamp":0},
+            {"role":"assistant","content":"x".repeat(4096),"usage":{"p":1}},
+            {"role":"assistant","timestamp":9000,"usage":{"p":3}},
+        ])).unwrap();
+        put(&mut db, 1, 3, json!([
+            {"role":"assistant","timestamp":150,"usage":{"p":4},"model":"m"},
+            {"role":"assistant","timestamp":"160","usage":{"p":5}},
+            {"role":"assistant","timestamp":170,"usage":{}},
+        ])).unwrap();
+        finish(&mut db).unwrap();
+        let usage = |db: &AuthorityDatabase, id: &str| {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            header::turn_usage(db, &mut tx, &header::TurnUsageRequest {
+                conversation_id: id.into(),
+                timestamp_gte: 100,
+                timestamp_lt: 1_000,
+                title_fallback_characters: 8,
+            }, &mut || false).unwrap()
+        };
+        let value: Value = serde_json::from_slice(&usage(&db, "conv").unwrap()).unwrap();
+        assert_eq!(value["message_count"], 6);
+        assert_eq!(value["metadata"]["title"], "historic");
+        // A titled conversation needs no fallback read.
+        assert_eq!(value["title_fallback"], "");
+        assert_eq!(value["turns"], json!([
+            {"index":1,"usage":{"p":1}},
+            {"index":3,"timestamp":150,"usage":{"p":4},"model":"m"},
+            {"index":4,"timestamp":"160","usage":{"p":5}},
+        ]));
+        assert!(usage(&db, "missing").is_none());
     }
     #[test]
     fn history_survives_clone_and_recoverable_delete_without_body_copy() {

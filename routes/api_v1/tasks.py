@@ -37,7 +37,7 @@ from lib.api_response import (
 from lib.error_envelope import BadRequest
 from lib.research.action_budget import action_logical_budget_schema
 from lib.production.work_unit import project_work_unit
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
 from lib.task_replay.task_replay import (
@@ -428,7 +428,7 @@ def _find_task(task_id: str, *, user_id: int):
         except Exception as e:
             logger.debug(
                 '[api_v1.tasks] live presence probe failed task=%s: %s',
-                task_id[:8], e)
+                task_log_tag(task_id), e)
     return None, None, foreign_present
 
 
@@ -457,7 +457,7 @@ def _task_accessible(task_id: str, *, user_id: int) -> bool:
             task_id, user_id=user_id)
     except Exception as e:
         logger.debug('[api_v1.tasks] persisted owner check failed for '
-                     'task=%s: %s', task_id[:8], e)
+                     'task=%s: %s', task_log_tag(task_id), e)
         return False
 
 
@@ -529,7 +529,7 @@ def get_task(task_id):
         except Exception as e:
             logger.error(
                 '[api_v1.tasks] durable state failed task=%s: %s',
-                task_id[:8], e, exc_info=True)
+                task_log_tag(task_id), e, exc_info=True)
             return api_internal_error('internal_error')
         if snapshot is None and retained_action is None:
             return api_not_found('Task not found')
@@ -577,7 +577,7 @@ def task_events(task_id):
         except Exception as e:
             logger.error(
                 '[api_v1.tasks] durable replay failed task=%s: %s',
-                task_id[:8], e, exc_info=True)
+                task_log_tag(task_id), e, exc_info=True)
             return api_internal_error('internal_error')
         return api_ok(payload)
     return api_ok(project_bounded_replay_payload(
@@ -623,7 +623,7 @@ def tasks_by_conv(conv_id):
             conv_id, user_id=owner_user_id, limit=limit, before=before))
     except Exception as e:
         logger.error('[api_v1.tasks] by-conv failed for conv=%s: %s',
-                     conv_id[:8], e, exc_info=True)
+                     conv_id, e, exc_info=True)
         return api_internal_error('internal_error')
 
 
@@ -646,7 +646,7 @@ def tasks_conv_wire(conv_id):
         return api_ok(get_conv_inspector_wire(conv_id, user_id=owner_user_id))
     except Exception as e:
         logger.error('[api_v1.tasks] conv-wire failed for conv=%s: %s',
-                     conv_id[:8], e, exc_info=True)
+                     conv_id, e, exc_info=True)
         return api_internal_error('internal_error')
 
 
@@ -670,7 +670,7 @@ def task_requests(task_id):
         return api_ok(fold_request_log(task_id))
     except Exception as e:
         logger.error('[api_v1.tasks] requests fold failed for task=%s: %s',
-                     task_id[:8], e, exc_info=True)
+                     task_log_tag(task_id), e, exc_info=True)
         return api_internal_error('internal_error')
 
 
@@ -716,7 +716,7 @@ def task_trace(task_id):
         return api_ok(durable or live)
     except Exception as e:
         logger.error('[api_v1.tasks] trace fold failed for task=%s: %s',
-                     task_id[:8], e, exc_info=True)
+                     task_log_tag(task_id), e, exc_info=True)
         return api_internal_error('internal_error')
 
 
@@ -757,7 +757,7 @@ def task_request_payload(task_id, round_num):
         return api_service_unavailable('Round evidence temporarily unavailable')
     except Exception as e:
         logger.error('[api_v1.tasks] request payload failed for task=%s '
-                     'round=%s: %s', task_id[:8], round_num, e, exc_info=True)
+                     'round=%s: %s', task_log_tag(task_id), round_num, e, exc_info=True)
         return api_internal_error('internal_error')
     if payload is None:
         logger.warning('[ri] payload MISS task=%s round=%s kind=%s — '
@@ -801,7 +801,7 @@ def task_raw_archive_chunk(task_id, archive_id, part):
             offset=offset, limit=limit)
     except Exception as exc:
         logger.error('[api_v1.tasks] raw archive read failed task=%s: %s',
-                     task_id[:8], exc, exc_info=True)
+                     task_log_tag(task_id), exc, exc_info=True)
         return api_internal_error('internal_error')
     return api_ok(chunk)
 
@@ -835,7 +835,7 @@ def task_stream(task_id):
         except Exception as e:
             logger.error(
                 '[api_v1.tasks] durable stream lookup failed task=%s: %s',
-                task_id[:8], e, exc_info=True)
+                task_log_tag(task_id), e, exc_info=True)
             return api_internal_error('internal_error')
         if durable_snapshot is None:
             return api_not_found('Task not found')

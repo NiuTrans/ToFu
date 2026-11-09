@@ -10,7 +10,7 @@ import time
 
 from lib.api_response import api_not_found, api_ok, api_service_unavailable
 from quart import current_app
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 
 from lib.openapi import api_meta
 from lib.request_parser import parse_body, require_int, require_str
@@ -65,9 +65,9 @@ def chat_abort_conv(conv_id):
     if aborted or tombstoned:
         logger.info('[Chat] Abort-by-conv conv=%s — aborted %d task(s), '
                     'tombstoned %d registry-lost',
-                    conv_id[:8], aborted, tombstoned)
+                    conv_id, aborted, tombstoned)
     else:
-        logger.debug('[Chat] Abort-by-conv conv=%s — no running tasks found', conv_id[:8])
+        logger.debug('[Chat] Abort-by-conv conv=%s — no running tasks found', conv_id)
     return api_ok({'aborted': aborted, 'tombstoned': tombstoned})
 @api_v1_chat_bp.route('/api/v1/chat/abort/<task_id>', methods=['POST'], endpoint='ui_chat_abort')
 @require_scope('chat')
@@ -155,7 +155,7 @@ def chat_abort(task_id):
             notify_conv_changed(_conv_id, rev=None, user_id=owner_user_id)
         except Exception as _ne:
             logger.warning('[Chat] Task %s abort busy-notify failed: %s',
-                           task_id[:8], _ne)
+                           task_log_tag(task_id), _ne)
 
     return api_ok()
 
@@ -200,7 +200,7 @@ def chat_interrupt_command(task_id):
               key_id=(current_auth().key_id if current_auth() else ''),
               task_id=task_id)
     logger.info('[Chat] Task %s — user interrupt requested for run_command pid=%s',
-                task_id[:8], pid)
+                task_log_tag(task_id), pid)
     return api_ok(result)
 
 
@@ -285,7 +285,7 @@ def chat_flow_trace(task_id):
             meta = json.loads(row['metadata'])
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning('[Chat] flow-trace %s — metadata parse failed: %s',
-                           task_id[:8], e)
+                           task_log_tag(task_id), e)
             meta = {}
         return api_ok({
             'taskId': task_id,

@@ -16,10 +16,10 @@ the UI-shaped duplicates (bare-dict status response) and add the
 
 from __future__ import annotations
 
-from quart import Blueprint
+from quart import Blueprint, current_app
 
 from lib.api_response import (
-    api_conflict, api_internal_error, api_not_found, api_ok, safe_route,
+    api_conflict, api_internal_error, api_not_found, api_ok, api_service_unavailable, safe_route,
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -79,24 +79,24 @@ def swarm_status(task_id):
     tags=['agents'], scope='agents:swarm',
 )
 def swarm_abort(task_id):
+    # The session lives in the process that runs its conversation.
+    from lib.tasks_pkg.command_control_runtime import execute
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
     try:
-        from lib.swarm.integration import abort_swarm
-    except ImportError as e:
-        return api_internal_error(e, context='Swarm unavailable',
-                                  source='api_v1.swarm.abort')
-    try:
-        result = abort_swarm(
-            task_id,
-            user_id=int(request_user_id()),
-        )
+        result = execute(current_app, 'swarm_abort', task_id, user_id=int(request_user_id()))
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the swarm abort.')
     except Exception as e:
         logger.warning('[Swarm.v1] abort failed task=%s: %s', task_id, e,
                        exc_info=True)
         return api_internal_error(e, context='swarm_abort',
                                   source='api_v1.swarm.abort',
                                   log_traceback=False)
-    if not result.get('success'):
+    if result is None:
         return api_not_found('Swarm not found')
+    if not result['aborted']:
+        return api_internal_error(RuntimeError('Swarm abort failed'), context='swarm_abort',
+                                  source='api_v1.swarm.abort', log_traceback=False)
     return api_ok({'message': 'Swarm abort requested'})
 
 
@@ -112,21 +112,27 @@ def swarm_abort(task_id):
         '(``swarms[].swarm_id``), not the reusable session key. 404 '
         '``swarm_agent_not_found`` when the caller owns no live run with that '
         'agent; 409 ``swarm_agent_not_running`` when the agent has no live '
-        'invocation to signal (pending, settled, or starting/finishing an attempt).'
+        'invocation to signal (pending, settled, or starting/finishing an attempt); '
+        '503 when the execution host that runs the swarm does not confirm the stop.'
     ),
     tags=['agents'], scope='agents:swarm',
 )
 @safe_route
 def swarm_agent_stop(swarm_id, agent_id):
-    from lib.swarm.integration import stop_swarm_agent
+    from lib.tasks_pkg.command_control_runtime import execute
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
 
-    result = stop_swarm_agent(swarm_id, agent_id, user_id=int(request_user_id()))
-    if result['outcome'] == 'not_found':
+    try:
+        result = execute(current_app, 'swarm_agent_stop', swarm_id,
+                         user_id=int(request_user_id()), agent_id=agent_id)
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the agent stop.')
+    if result is None:
         return api_not_found('No live swarm agent with this run and agent ID',
                              error_code='swarm_agent_not_found')
-    if result['outcome'] == 'not_running':
+    if not result['stopped']:
         return api_conflict(
-            f"Agent {agent_id!r} has no live invocation to stop (status: {result['status']})",
+            f"Agent {agent_id!r} has no live invocation to stop (status: {result.get('status', '')})",
             error_code='swarm_agent_not_running')
     return api_ok({'stopped': True, 'swarmId': swarm_id, 'agentId': agent_id})
 

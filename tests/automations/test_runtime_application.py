@@ -161,7 +161,8 @@ def test_claimed_jobs_start_beyond_the_idle_hint_and_leave_no_poll_receipts(sema
         assert wait_until(lambda: terminal(repo, second)).value['status'] == 'succeeded'
         assert service.stop(timeout=5)
         assert any(name == 'worker_job.claim_next' for name, _ in command_ids)
-        assert all(receipt is None for name, receipt in command_ids if name == 'worker_job.claim_next')
+        claims = [receipt for name, receipt in command_ids if name == 'worker_job.claim_next']
+        assert all(claims) and len(claims) == len(set(claims))
         assert all(receipt for name, receipt in command_ids if name == 'worker_job.complete')
     finally:
         release.set(); service.stop()

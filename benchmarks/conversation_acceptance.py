@@ -10,13 +10,22 @@ import json
 import math
 from pathlib import Path
 
-from benchmarks.conversation_provenance import capture_sources, qualify_pipeline_sources, qualify_provenance
+from benchmarks.conversation_provenance import (
+    FORMAT as PROVENANCE_FORMAT,
+    capture_sources,
+    qualify_pipeline_sources,
+    qualify_provenance,
+)
 
 POLICY = json.loads(Path(__file__).with_name('conversation_concurrency_contract.json').read_text())
 
 
 def assess(report: dict, *, current_sources: dict | None = None) -> dict:
-    if current_sources is None:
+    receipt = report.get('provenance')
+    # An unsupported receipt cannot be qualified by any checkout inventory.
+    # Supported receipts still require a fresh capture, including local edits.
+    if (current_sources is None and isinstance(receipt, dict)
+            and receipt.get('format') == PROVENANCE_FORMAT):
         try:
             current_sources = capture_sources()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -24,7 +33,7 @@ def assess(report: dict, *, current_sources: dict | None = None) -> dict:
     authority = report.get('authority')
     authority = authority if isinstance(authority, dict) else {}
     provenance = qualify_provenance(
-        report.get('provenance'), backend=report.get('backend'),
+        receipt, backend=report.get('backend'),
         binary_sha256=report.get('binary_sha256'), authority=authority,
         current_sources=current_sources)
     failures = list(provenance['failures'])

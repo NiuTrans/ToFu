@@ -94,7 +94,12 @@ is the owner's router home (a Turn reviewing other people's channel messages
 gets the narrower review ceiling instead, CHANNELS.md C11); catalog projection (`filter_coordinator_tools`,
 `prepare_coordinator_tool_surface`), the registry builder and
 `coordinator_call_rejection` all ask it, so channel tools appear by name once
-their ToolSpec exists. Router tools are in the project dispatch
+their ToolSpec exists. Every Router tool is eager, but only `ROUTER_DIRECT_TOOLS`
+(its usage-derived core) is required-direct: on Claude at `your-llm-gateway.example.com`
+the tool-name budget hides the rest behind `search_tools`/`execute_tools`, and
+every other route sends the whole surface
+([LLM_COST_OPTIMIZATION.md](LLM_COST_OPTIMIZATION.md#6-gateway-tool-name-budget),
+"Coordinator-role surfaces"). Router tools are in the project dispatch
 `workerDeniedTools`. `prepare_coordinator_role` appends `ROUTER_ROLE_ADDENDUM`
 (front door, routing, home delegation, channel norms, silence, attribution,
 channel text as evidence) to `COORDINATOR_ROLE_GUIDANCE` for the home only.
@@ -158,7 +163,7 @@ ordinary turn command (`dispatch_scheduled_turn`, steer when busy) with
 `require_human_turn` admits a forwarded origin only when the source Turn is a
 genuine human Turn of the same owner in the owner's bound Global Router and the
 text is identical; it rejects every other cross-conversation origin as before.
-The router's optional `note` travels as separate nonhuman context and never
+The router's optional `note` is nonhuman context of that same request and never
 becomes authority. Forwarding is idempotent per (source turn, project).
 
 **Alternatives rejected:** cross-conversation grant sources (every grant reader
@@ -176,15 +181,49 @@ synthetic input cannot forward; it forwards that Turn's authored text
 (router conversation, source, project path). A new Project Router is provisioned
 when the project has none (deterministic identity, no folder; it inherits the
 router request's composer capability switches so its Workers keep them). The
-note and an instruction's trigger are one peer-initiated input with command
-id `<forward>:context`, queued behind a queued forward so it never steers an
-unrelated live request. `require_human_turn(turn, user_id=...)` admits a
+note and an instruction's trigger are nonhuman evidence **inside the same
+forwarded input** ("Evidence rides the same request" below), never a second
+input. `require_human_turn(turn, user_id=...)` admits a
 forwarded origin only through `verify_forwarded_turn`: the owner's currently
 bound router, an existing genuine human source Turn that was not itself
 forwarded, a different target conversation, identical authored text and, for
 instructions, a matching record; a call without the owner refuses.
 `ProjectDispatchRepository.validate_human_source` passes its owner, so every
 grant fence repeats this check.
+
+**Evidence rides the same request.** Problem: a forward used to be delivered as
+TWO inputs — the owner text, then a peer-initiated `:context` message carrying
+the note and the instruction's trigger. Each input was delivered independently
+(started, steered or queued). Whenever the evidence missed the steer window it
+was durably queued and later activated as its OWN Coordinator request: a
+synthetic, peer-initiated request that named the instruction and re-attempted
+its work, so `source_for_task` refused it (`Synthetic authorization origin
+denied`) and the Project Router stalled asking the owner for "继续" (observed
+2026-11-09 on the parallel project's Project Router: four queued evidence
+requests, every `delegate_project_work` and even the read-only
+`get_project_workers` refused, while the original live reply that had actually
+received the owner text kept working).
+
+Decision: one forward is ONE Coordinator request. Its input `content` is the
+owner's verbatim text followed by the labelled nonhuman evidence block (the
+note, the instruction id and its triggering event); its `originalContent` is
+the owner's verbatim text alone, which is exactly what `authored_text` returns
+and `verify_forwarded_turn` compares. The owner words the authority is judged
+by are unchanged, no human message is synthesized and no gate is bypassed; the
+evidence is labelled nonhuman in the same model view, and it can no longer
+become a standalone request on any delivery path (started, steered or queued).
+
+Alternatives rejected: delivering the evidence through the R9 owner delegation
+(the delegation is a UI grant for lifecycle/session control, not a carrier for
+forwarded context, and it must not mint Worker authority); letting a verified
+`forwardedFrom.instructionId` source pass the synthetic-input gate in
+`source_for_task` (re-derives authority at read time, needs a per-application
+link and a revocation model, and still leaves a duplicate synthetic request
+running the same work); dropping the evidence on the floor (the trigger and the
+note are how the Project Router knows why it was woken); merging the two
+queue rows at activation time (changes generic queue semantics for one
+caller); a mailbox-only evidence input (either it never reaches the model, or
+it still starts an unauthorized request).
 
 **Steered owner messages.** Problem: a message the owner steers into the
 router's running reply has no Turn of its own, and
@@ -269,9 +308,16 @@ and has no deliverable text or automatic completion message. It cannot bypass
 reply policy, drafts, approval or a required owner decision. Python and Native
 stream/terminal projections share this policy; incomplete split markers flush
 as ordinary text at structural boundaries, and discarded attempts drop their
-uncommitted candidates. Automatic review failures/interruption send an
-out-of-band 大象 command-chat warning; successful silence does not suppress
-that failure. A human command steered into a notice supplies the reply origin,
+uncommitted candidates. The control token never reaches public text: a
+tool round's `[SILENT]` lives only in its private provider replay
+(`assistantModelContent`), stored answers, segments and channel replies strip
+it, and a refused declaration whose only text was the token is an empty
+response that Python recovers as an empty stop and Native settles as
+`abnormal_stop`, never a raw provider instruction shown to people. The native
+Turn projection takes its system-note kinds from the contract (generated
+`generated_system_note_vocabulary.rs`). Automatic review failures/interruption
+send an out-of-band command-chat warning naming the failure cause; successful
+silence does not suppress that failure. A human command steered into a notice supplies the reply origin,
 so its final answer and failure status return to that original thread.
 Alternatives rejected: an empty assistant answer (the transport recovery
 interprets it as a lost response), model-authored filler on every no-op event,
@@ -481,7 +527,9 @@ owner-scoped path, `<router home>/.tofu-watchdog` (ignored by the home's
 title `Watchdog`, settings marker `_routerWatchdog`). It reuses the binding,
 role, tool-ceiling and turn machinery: `coordinator_tool_ceiling` returns the
 narrowest ceiling, `WATCHDOG_TOOLS` (its `watchdog_*` tools plus
-`list_conversations`, `get_conversation`, `search_tools`, `execute_tools`; no
+`list_conversations`, `get_conversation`, `search_tools`, `execute_tools` and the
+`read_tool_artifact`/`search_tool_artifact` readers that continue a partial
+result it already received; no
 `update_task_progress` or `ask_human`: it owns no tasks and reaches the owner
 through the Global Router or its own chat), and
 `prepare_coordinator_role` replaces the delegation charter with
@@ -689,11 +737,15 @@ point. Scope:
   `acceptedAt`) and the outcome (`status` `accepted`/`restarting`/`completed`/
   `refused`/`failed`, `code`, `detail`, `interrupted`). A refusal while a grant
   exists is recorded as well; without a grant only `audit.log` records it.
-  The server manager reports no outcome back after the handover, so a
-  `restarting` record reads `completed` once a server process that booted
+  A `restarting` record reads `completed` once a server process that booted
   after its acceptance answers (`lib.boot_identity`; every restart replaces
-  the serving worker). A refusal inside the manager leaves it `restarting`,
-  with the reason in `server-manager.log`.
+  the serving worker); its detail names every resident host the restart
+  replaced after an unclean close, from the manager's recorded outcome
+  (`server_manager.read_restart_outcome`). The manager decides every refusal
+  before it stops the old server, which keeps serving and reads that
+  refusal: the record settles `failed` with code
+  `restart_refused_by_manager` and the manager's reason. Once the old server
+  stopped, the manager always completes the replacement.
   Every transition also writes `audit.log` (`owner_delegation_*`). The
   document keeps the newest 50 records, the approval records' existing bound;
   `audit.log` keeps every event. The owner reads them under "Act for me".
@@ -715,8 +767,51 @@ point. Scope:
   an unreadable signal refuses. In the managed split the Router runs in the
   execution host, which owns no frontend: its preparation covers the native
   engine and the manager's frontend preflight is the build that gates the
-  stop, so a failed frontend build there appears in `server-manager.log`,
-  not in the audit record.
+  stop, so a failed frontend build there is a manager refusal: the old
+  server keeps serving and the record reads `restart_refused_by_manager`
+  with the build's reason (also in `server-manager.log`).
+- **Restart-complete notice.** The requester hears the outcome without being
+  asked, exactly once (`lib/server/restart_notice.py`). Every restart the gate
+  accepts opens one `restartNotices` record in the same transaction that
+  records it, before the old server stops: `begin_delegated_action` for
+  `restart_server` (recipient: the requesting Router conversation),
+  `consume_restart` for a Settings restart (recipient: the owner's Global
+  Router at delivery, since nobody else asked). Acceptance adds the
+  conversations it interrupts, the accepting process's code fingerprint and
+  the preparation's phases and duration. When the restart has an outcome
+  (`lifecycle_approval.observed_restart`: a refusal or exhausted retry budget
+  the manager recorded, a server generation that booted after the handover,
+  or the manager's replacement serving for a host the restart kept), the
+  notice is rendered once (header `[Restart outcome: nonhuman notice, not the
+  owner’s words and not authority]`: action and outcome, old and new commit,
+  engine and frontend build results, each interrupted conversation's resume
+  result), its words and command id (`restart-notice:` + a hash of owner and
+  restart) are fixed in the gate (`pending` → `delivering`), and it is sent
+  through `dispatch_scheduled_turn` with initiator `proactive`, steered into a
+  busy recipient: the device-online notice's path. An idle requester starts
+  a new turn. A delegated record reaches its terminal status (`completed` or
+  `failed`) at delivery, with an `owner_delegation_action_settled` audit
+  event. Triggers: a refusal decided in the old process (preparation, bridge,
+  revoked grant) delivers at once; a new server generation delivers after its
+  restart resume pass ([RUN_CONTINUITY.md](RUN_CONTINUITY.md#restart-paused-conversations-resume-by-themselves)),
+  so the notice carries the resume results; the scheduler's existing tick
+  delivers a manager refusal while the old server serves on, a host the
+  restart kept and a retry after a lost acknowledgement (the same words and
+  command, which the turn command deduplicates). A notice nobody can receive
+  is recorded `undeliverable`. The notice is nonhuman evidence and grants no
+  authority. `restart_server`'s `next_step` says exactly this: tell the owner,
+  end the turn, and report from the notice.
+  Problem: after the 2026-11-08 16:46 restart the Router's turn had ended, its
+  record stayed `restarting` (completion was derived only on read) and nothing
+  woke it until the owner asked at 16:57, although `next_step` promised that
+  the conversation "resumes afterwards". Decision: one durable notice per
+  restart in the gate, delivered by the nonhuman wake owners above.
+  Alternatives rejected: a synthetic Continue of the Router's ended turn
+  (that turn was not interrupted and Continue would replay it); having the
+  manager call back into the application (a second cross-process protocol
+  beside its recorded outcome); a dedicated poller or timer (the scheduler
+  tick and boot already run; principle 5); a separate notice store beside the
+  gate's restart records (two authorities for one restart).
 - **Protected steps.** Landings and exports change or publish the served
   checkout and often run outside any conversation (a terminal, a background
   command, another agent), so conversation activity could not see them.
@@ -792,6 +887,213 @@ gate, principle 4); letting the grant also authorize answers, approvals or
 publications (the owner's voice is not an operation); per-operation switches
 or rate knobs (principle 5).
 
+### R10. Proactive coordination (owner request 2026-11-08)
+
+**Problem.** The owner asked the main and project coordinators to design how
+they act on their own: how to coordinate, when to infer his intent and hand
+out work, and what to report to him and when (2026-11-08,
+「我们的总负责人和项目负责人一定要思考清楚，怎么设计这个主动机制…」). The same
+day showed the gaps:
+
+- The restart he delegated woke nobody, so nothing was checked or reported
+  until he asked (R9).
+- "I'll report back when X" held only if a later relay happened to arrive,
+  and nothing checked that one did.
+- His decisions were spread over conversations and drifted.
+- No lead had a view of active, stalled or silent work, or of his unanswered
+  questions, and he kept nudging ("你怎么没…", "进展呢").
+
+A wake is not free: a Global Router turn is about six model requests over a
+350–800k-token context (latency study, 2026-11-08). A mechanism that wakes a
+lead for every event would trade nudges for cost and noise.
+
+**Decision.** Proactive means fewer owner prompts, not more messages.
+Deterministic code detects, counts, assembles and deduplicates. A model is
+woken only for an open obligation that needs its judgment, exactly once,
+through one wake primitive. The owner is pushed only what the reporting rules
+allow, and outside quiet hours only what cannot wait.
+
+**Principles and authority.** Proactivity never enlarges authority.
+
+- Inside an authorized objective, next steps, verification and repairs are
+  just done: that is a Coordinator continuation
+  ([PROJECT_COORDINATION.md](PROJECT_COORDINATION.md#result-driven-coordinator-continuation)).
+- When intent is unclear, take the reversible default and state the
+  assumption (`ask_human(blocking=false)` names the default it applies).
+- New scope, irreversible or externally visible actions, and quality or cost
+  trade-offs are asked: batched, with a default and numbers.
+- Only the owner's own messages, and his standing instructions (R4),
+  authorize. Reports, relays, Watchdog notices, wakes and digests are
+  evidence. A wake never widens what the woken turn may do: a nonhuman turn
+  opens no request account (R3), so it reads, reports, asks and updates the
+  board. Work that needs authority runs as a continuation of the request that
+  authorized it, or waits for the owner.
+
+**One wake primitive.** Every proactive wake has the same four parts:
+
+1. A durable obligation in its owner's record.
+2. A deterministic command id derived from (owner, obligation identity).
+3. `dispatch_scheduled_turn(..., inject_mode='steer')` with a nonhuman
+   initiator: it steers a live turn, starts an idle one, or queues behind a
+   closed steer window.
+4. The obligation settles on an accepted disposition; `busy` keeps it for its
+   next trigger.
+
+Time is the owner-visible scheduler: a `once:` row with a deterministic id
+runs the obligation's handler, which re-reads durable state and wakes only
+while the obligation is still open. No model call decides, no loop polls, and
+no process-local timer is the authority. A Coordinator obligation inside an
+open request is delivered as that request's continuation instead, so the
+woken turn keeps the request's authority.
+
+| Trigger | Detector (existing owner) | Obligation | Woken | Delivery |
+|---|---|---|---|---|
+| Restart done, failed or refused | restart gate and the new server generation, `lib/server/restart_notice.py` (R9) | `restartNotices` in `lifecycle_approvals.json` | the requesting conversation; for a Settings restart, the Global Router | `restart-notice:` notice, `proactive` |
+| Restart-interrupted turn | resume pass, `lib/conversations/restart_resume.py` | the interrupted Attempt | its conversation | checkpoint Continue, `restart-resume:<attemptId>` |
+| Device online | desktop bridge connection epoch | device wait (`await_device`) | the registering conversation | `device-wait:` notice |
+| Worker settled, decision due | dispatch settlement and recovery | continuation grant | Coordinator | continuation |
+| Project report or question | `report_to_user`, `ask_human` (R3) | report Turn, question card | Global Router | `router-relay:`, `router-question-relay:` peer notice; held in quiet hours |
+| Commitment due (a promise) | task-board `due` | board task and its receipt | the lead that owns the board | continuation `commitment_due` inside an open request, else a `commitment-due:` notice |
+| Scheduled deadline, e.g. a quota reset | a commitment due at that time | board task | the lead waiting for it | as above |
+| Owner question unanswered | `ask_human` seam | owner question record | nobody: listed in the digest and the quiet-end release | deterministic message |
+| Fault: failed Turn, recovery, outbox, channel, compute stall | existing reporters (R7) | fault signal | Watchdog, then Router or mailbox | `router-watchdog-signal:` |
+| Stalled Worker | Watchdog review (owner-enabled); the lead's own commitment | fault signal, commitment | Watchdog; the lead at its due | as above |
+| Channel reconnect | channel supervisor, outbox | queued outbox item | nobody: queued pushes send once on reconnect | outbox |
+| Digest time, quiet-hours end | owner preferences | preference record | nobody | deterministic message |
+| Cost or latency anomaly | cost and log owners | none | nobody until the owner chooses a threshold; daily figures go to the digest | digest |
+
+**Commitments (the promise ledger).** A promise is a task-board task with a
+`due` time ([PROJECT_COORDINATION.md](PROJECT_COORDINATION.md#commitments-on-the-task-board-owner-request-2026-11-08)).
+The board the owner already reads is the ledger (one progress source, owner
+decision 2026-11-08), so he sees every commitment, its time and whether it is
+overdue where he follows progress.
+
+- The lead sets `due` whenever it tells the owner it will do or report
+  something later.
+- Keeping it is marking the task completed. Re-dating it is a visible new
+  `due`. Dropping it is marking it cancelled. A board write that silently
+  drops an open commitment is refused.
+- The platform keeps one receipt per commitment in the same board head:
+  first and current due, slips, wake and closure.
+- At the due time the lead is woken once if the commitment is still open.
+  It is never woken twice for the same due time: a commitment left open after
+  its wake is surfaced in the digest and the cross-project view, not repeated.
+
+**Owner-intent record.** No new store.
+
+- His standing instructions (R4, e.g. `ri-9887c7de…`) hold his verbatim
+  standing objectives, constraints and explicit don'ts as well as channel
+  triggers. The Router records one only from his own message.
+- My Context holds stable preferences (language, report style).
+- His own Turns and answered questions remain the canonical wording.
+
+A model's summary of a decision is never the record: it cites the
+instruction ID or the owner's Turn, which is what keeps decisions from
+stretching. Every inferred task traces to an entry: the Global Router applies
+an instruction with `route_to_project(instruction_id=…)`, which records the
+trigger, and a Project Coordinator works inside the request it was given. An
+inferred task without an entry is a question to the owner with a default, not
+work.
+
+**Coordination.**
+
+- One voice per conversation, one pusher. A lead answers the owner in its own
+  conversation. Unprompted pushes to his phone have exactly one sender, the
+  Global Router, through its outbox (R3, [CHANNELS.md](CHANNELS.md) C5).
+  Project Coordinators never push; their reports and questions relay to the
+  Router, which pushes only what is new and unread.
+- Deduplication is by identity, not text: one push per report Turn, question
+  id, commitment (lead, title, due) or fault signal. The digest and the
+  quiet-end release skip identities already pushed, except open decisions,
+  which they repeat with their age until answered.
+- The cross-project view is `get_router_projects`, extended with each
+  project's board summary, open and overdue commitments, open owner questions
+  with age and default, unread reports, active Workers and open faults. It is
+  a deterministic read; the digest is assembled from the same read.
+- Restarts: protection already lists running conversations (R9). Afterwards
+  the restart notice gives the requester each interrupted conversation's
+  resume result to compare with the view.
+- Conflicts: the newer owner message wins; otherwise the reversible default,
+  with the assumption stated.
+
+**Reporting rules.**
+
+- Push now, via 大象 so his phone notifies: decisions only he can make,
+  blockers needing his action, verified deliveries, serious anomalies,
+  corrections.
+- Digest, at the owner's digest time and never when empty, most valuable
+  first: open decisions (blocking first, then oldest), overdue commitments,
+  open faults, verified deliveries, projects that were active but sent no
+  update since the last digest, then daily figures.
+- Silent: routine status changes, duplicate relays, acknowledgements
+  (`[SILENT]`, R3).
+- Quiet hours: urgent items only. Report and question relays that arrive in
+  quiet hours do not wake the Router; they are held and released at quiet end
+  as one deterministic message (decisions batched into one card) and one
+  Router notice. Watchdog notices still wake the Router, which pushes at night
+  only what cannot wait.
+- Every message: conclusion first, numbers, verified and unverified marked,
+  and the exact action needed from him. Related decisions go in one card.
+
+**Owner preferences** are settings he chooses (principle 5): digest times,
+quiet hours and push channel. Until he chooses: one digest at 21:00, quiet
+hours 00:00–08:00, 大象 falling back to in-app. There is no other knob: no
+reminder interval (a reminder is the next digest), no wake budget and no
+debounce window. Batching comes from steering into a live turn, from quiet
+hours and from the digest.
+
+**Failure modes.**
+
+| Failure | Prevention |
+|---|---|
+| Wake storm | Wakes only for open obligations. One wake per obligation identity (deterministic command id). A live lead is steered, not restarted. A lead's commitments due together share one wake, and each due time wakes once. Quiet hours hold relay wakes. |
+| Duplicate or conflicting reports | One pusher. Identity-keyed deduplication. Reports the owner already read are not pushed. The digest repeats only open decisions. |
+| Stale or over-stretched intent | Intent is the owner's verbatim words with IDs. The newer owner message wins. Pausing or cancelling an instruction stops future applications. |
+| Authority creep | Wakes are nonhuman: no request account and no delegation. Authority-bearing follow-up runs only as a continuation of the authorizing request. Every inferred task cites an intent entry. |
+| Cost blow-up from wakes | Detection and assembly are deterministic. The digest and the quiet-end release cost no model request. Wakes need an open obligation. Wake requests and tokens are measured per day. |
+| Promise spam | A commitment is a board task, so the 24-task board bounds them. One wake per due time. A missed commitment surfaces in the digest instead of waking again. Dropping one needs an explicit cancel. |
+| Quiet-hours violation | Deterministic messages run at owner-chosen times outside quiet hours. Relays are held. Notices that arrive inside the window name it. |
+
+**Measuring the mechanism.** Deterministic, from durable records and logs:
+
+- owner nudges per day (owner messages matching the nudge phrases);
+- event-to-owner latency: report, question or commitment due to push or
+  owner read;
+- commitments kept on time, kept late, slipped, cancelled or missed;
+- pushes never read, and replies that complain;
+- proactive wakes per day by trigger, with their model requests and tokens.
+
+**Current state (2026-11-08).** Implemented: commitments on the board
+(`progressTask.due`, `lib/conversations/coordinator_commitments.py`), due wakes
+through the scheduler (`coordinator_commitment_due`), continuation reason
+`commitment_due` (`lib/project_dispatch/continuation.py`), the owner question
+index (`lib/router/proactive/questions.py`), quiet-hours hold and release
+(`lib/router/proactive/held.py`), the deterministic digest
+(`lib/router/proactive/digest.py`), and the cross-project view extension
+(`lib/router/projects.py`). Specs: `tests/project_mod/test_coordinator_commitments.py`,
+`test_coordinator_commitment_continuation.py`, `tests/router/test_proactive.py`,
+`test_proactive_replay.py`. Owner preferences (digest times, quiet hours, push
+channel) are documented defaults; a settings UI for changing them is not built.
+The Watchdog's fault signals, the restart notice (RESTART-NOTICE lane) and the
+device-online wake are reused unchanged.
+
+**Alternatives rejected.**
+
+- A promise store and list beside the board: a second progress list, which
+  the owner asked to remove on 2026-11-08.
+- Waking a lead for every event in the catalog, as the Router's own proposal
+  had it: most events need no judgment, and each wake is a full
+  large-context request.
+- A model-written digest: a daily Router turn of about six large-context
+  requests for text the records already hold.
+- A model-paraphrased decision log: paraphrase is how decisions stretch.
+- The Router as the only voice: the owner talks to Project Coordinators
+  directly, and routing every answer through the Router adds minutes and
+  cost.
+- Quiet hours only in the outbox: the Router would still be woken and billed
+  at night for every relay.
+- Reminder intervals, wake budgets and debounce windows: knobs (principle 5).
+
 ## Interfaces
 
 Session execution control uses the common Coordinator tools
@@ -823,8 +1125,13 @@ target execution authority. See
   audit records and restart acceptance are `lib/lifecycle_approval.py`
   (`set_delegation`, `check_delegation`, `begin_delegated_action`,
   `record_delegated_refusal`, `settle_delegated_action`,
-  `accept_delegated_restart`, `delegated_actions`); protected steps are
+  `accept_delegated_restart`, `delegated_actions`, `observed_restart`, the
+  `restartNotices` store `restart_notices`/`note_restart_notice`/
+  `claim_restart_notice`/`finish_restart_notice`); protected steps are
   `lib/runtime/protected_steps.py`.
+- `lib/server/restart_notice.py` (R9) — `deliver_restart_notice(restart_id)`,
+  `deliver_restart_notices()`, `notice_command_id`, `render_notice`; specs
+  `tests/router/test_restart_notice.py`.
   Schemas: `contracts/router_v1.schema.json` through `lib/router/contract.py`.
   `forwarding.owner_steer_carriers` labels steered owner messages in the router's
   model view; `lib/turn_initiation.py` owns `steer_author` and
@@ -887,10 +1194,13 @@ target execution authority. See
   catalog loads, so labels carry `data-i18n`/`data-i18n-title` keys that
   `ready()` and every language switch translate; parameterized text (the
   Worker model's read and write failures) re-renders on `tofu:language-change` and removes that
-  listener on teardown. The retained presence section hides the card where the
-  listed conversations belong to a project (that project's coordinator card
-  takes the slot), gives the router home and Watchdog location no project
-  Coordinator row, hides `#projectBar` for chats in those homes, and publishes
+  listener on teardown. The retained presence section hides the card where a
+  folder is selected or the listed conversations belong to a project (that
+  project's coordinator card takes the slot; a folder that names no directory
+  shows its coordinator row with the way to add one, see
+  [PROJECT_COORDINATION.md](PROJECT_COORDINATION.md#coordinator-started-sidebar-conversations-owner-decision-2026-11-03)),
+  gives the router home and Watchdog location no project Coordinator row,
+  hides `#projectBar` for chats in those homes, and publishes
   `runtimeScope.routerConversationIds()` so the conversation list never shows
   either chat as a row or counts it in a folder count. Each owner's `conversationId()` is the bound
   conversation its header marks, which the composer steers without the
@@ -928,7 +1238,8 @@ in `conversation-project-draft-runtime.test.ts`); the role-title sentinels
 stay paired by `tests/router/test_role_title_sentinels.py` and are rendered
 as specified in `tests/i18n/test_shell_localization.py`. The real-browser
 journey `tests/frontend/test_main_coordinator_browser.py` covers R8 end to
-end: the single leader slot in both scopes, the header, health checks on,
+end: the single leader slot in both scopes and in a folder that names no
+directory, the header, health checks on,
 the Watchdog chat and back, no project location and no rows or counts for
 router chats, in English and Chinese. The Watchdog suites are
 `tests/router/test_watchdog_policy.py` (ceiling, role, registry, worker denial,

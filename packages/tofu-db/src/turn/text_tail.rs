@@ -69,6 +69,21 @@ pub(super) struct TextAppend {
     thinking: Option<String>,
 }
 
+impl TextAppend {
+    /// Advance a complete projection exactly as `materialize` appends these
+    /// pages. False when a non-empty suffix has no string field to extend.
+    pub(super) fn apply_to(&self, projection: &mut Map<String, Value>) -> bool {
+        for (field, suffix) in [("content", &self.content), ("thinking", &self.thinking)] {
+            let Some(suffix) = suffix.as_deref().filter(|suffix| !suffix.is_empty()) else { continue; };
+            match projection.get_mut(field) {
+                Some(Value::String(text)) => text.push_str(suffix),
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
 /// Recognize only the existing wire grammar's two top-level append_text ops.
 /// All other patches stay with the ordinary, fully validated projection path.
 pub(super) fn classify(request: &EventRecordRequest) -> Option<TextAppend> {
@@ -190,11 +205,17 @@ fn append_pages(database: &AuthorityDatabase, transaction: &mut AuthorityTransac
 pub(super) struct AppendOutcome {
     pub head: ProjectionHeadDescriptor,
     pub projection_bytes: usize,
+    /// The complete projection before this append, when opening the tail had
+    /// to reconstruct it; the caller keeps it reusable instead of dropping it.
+    pub reconstructed: Option<Map<String, Value>>,
 }
 
+/// `reused`, when present, is the exact projection of `loaded`'s live head;
+/// opening a tail then needs neither the checkpoint nor the patch chain.
 pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     loaded: &LoadedTurnForAttempt, append: &TextAppend, request: &EventRecordRequest,
-    conversation_id: &str, turn_id: &str) -> io::Result<Option<AppendOutcome>>
+    conversation_id: &str, turn_id: &str,
+    reused: Option<&super::projection_residency::ResidentProjection>) -> io::Result<Option<AppendOutcome>>
 {
     let revision = loaded.document.get("projectionRevision").and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("Turn text append revision is malformed"))?;
@@ -205,7 +226,17 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         patch_count: 0, patch_bytes: 0, text_tail: None, frame_witness: None,
     });
     let mut baseline = None;
-    let mut tail = if let Some(tail) = &head.text_tail { tail.clone() } else {
+    let mut reconstructed = None;
+    let mut tail = if let Some(tail) = &head.text_tail { tail.clone() } else if let Some(reused) = reused {
+        for (field, suffix) in [("content", &append.content), ("thinking", &append.thinking)] {
+            if suffix.is_some() && !reused.projection.get(field).is_some_and(Value::is_string) {
+                return Ok(None);
+            }
+        }
+        TextTail { format: "tofu.turn-text-tail/v1".to_owned(), revisions: 0,
+            projection_bytes: reused.projection_bytes, content: TextPages::default(),
+            thinking: TextPages::default() }
+    } else {
         let mut document = loaded.document.clone();
         if loaded.projection_head.is_some() { materialize_projection_head(database, transaction, &mut document, &head)?; }
         let projection = document.get("projection").and_then(Value::as_object)
@@ -218,6 +249,9 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         let projection_bytes = serde_json::to_vec(projection)
             .map_err(|_| invalid_data("Turn text append base cannot be encoded"))?.len();
         if loaded.projection_head.is_none() { baseline = Some(projection.clone()); }
+        if let Some(Value::Object(projection)) = document.remove("projection") {
+            reconstructed = Some(projection);
+        }
         TextTail { format: "tofu.turn-text-tail/v1".to_owned(), revisions: 0,
             projection_bytes, content: TextPages::default(), thinking: TextPages::default() }
     };
@@ -245,7 +279,69 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let projection_bytes = tail.projection_bytes;
     head.text_tail = Some(tail);
     head.frame_witness = None;
-    Ok(Some(AppendOutcome { head, projection_bytes }))
+    Ok(Some(AppendOutcome { head, projection_bytes, reconstructed }))
+}
+
+/// Close an open tail into the patch chain before one structural revision,
+/// instead of folding the whole head into a new checkpoint. Each tail
+/// revision becomes one chain patch at its own revision: the first carries
+/// every appended byte (pages keep no per-revision split), the rest are
+/// empty. Chain positions equal projection revisions again, so every reader,
+/// including the per-revision diagnostic, replays the identical projection.
+/// `previous` is the complete projection the tail belongs to and `following`
+/// the encoded bytes of the revision the caller appends next. None, with
+/// nothing written, when the chain lacks room; the caller keeps the fold.
+pub(super) fn close_into_chain(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    conversation_id: &str, turn_id: &str, current: &ProjectionHeadDescriptor,
+    previous: &Map<String, Value>, following: usize, now_ms: u64)
+    -> io::Result<Option<ProjectionHeadDescriptor>>
+{
+    let Some(tail) = &current.text_tail else { return Ok(None); };
+    let revisions = usize::try_from(tail.revisions)
+        .map_err(|_| invalid_data("Turn text revision count overflows"))?;
+    let mut operations = Vec::new();
+    for (field, cursor) in [("content", &tail.content), ("thinking", &tail.thinking)] {
+        if cursor.bytes == 0 { continue; }
+        let Some(text) = previous.get(field).and_then(Value::as_str) else { return Ok(None); };
+        let Some(start) = text.len().checked_sub(cursor.bytes).filter(|start| text.is_char_boundary(*start))
+        else { return Ok(None); };
+        operations.push(json!({"op": "append_text", "path": [field], "value": &text[start..]}));
+    }
+    let position = current.base_revision.checked_add(current.patch_count as u64)
+        .ok_or_else(|| invalid_data("Turn projection head revision overflows"))?;
+    let patches: Vec<_> = (0..revisions as u64).map(|offset| {
+        let Value::Object(patch) = json!({
+            "version": crate::turn_projection_patch::PROJECTION_PATCH_VERSION,
+            "baseRevision": position + offset, "targetRevision": position + offset + 1,
+            "operations": if offset == 0 { std::mem::take(&mut operations) } else { Vec::new() },
+        }) else { unreachable!("projection patch construction is an object") };
+        patch
+    }).collect();
+    let mut bytes = current.patch_bytes.saturating_add(following);
+    for patch in &patches {
+        bytes = bytes.saturating_add(serde_json::to_vec(patch)
+            .map_err(|_| invalid_data("Turn projection patch cannot be encoded"))?.len());
+    }
+    if current.patch_count + revisions + 1 > MAX_TURN_PROJECTION_HEAD_PATCHES
+        || bytes > MAX_TURN_PROJECTION_PATCH_BYTES
+    {
+        return Ok(None);
+    }
+    let mut next = current.clone();
+    next.text_tail = None;
+    for patch in &patches {
+        next.patch_count += 1;
+        next.patch_bytes += serde_json::to_vec(patch)
+            .map_err(|_| invalid_data("Turn projection patch cannot be encoded"))?.len();
+        store_projection_head_patch(database, transaction, conversation_id, turn_id, &next, patch, now_ms)?;
+    }
+    for (field, cursor) in [("content", &tail.content), ("thinking", &tail.thinking)] {
+        for page in 1..=cursor.pages {
+            database.entity_delete(transaction,
+                page_key(transaction, conversation_id, turn_id, &current.head_id, field, page)?)?;
+        }
+    }
+    Ok(Some(next))
 }
 
 pub(super) fn materialize(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,

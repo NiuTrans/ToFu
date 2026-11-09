@@ -1,4 +1,5 @@
 """Real owner-scoped binding HTTP/record CAS journey; no LLM is dispatched."""
+import unicodedata
 import uuid
 from unittest.mock import Mock
 import pytest
@@ -195,6 +196,38 @@ def test_create_empty_coordinator_replay_and_scope(flask_client, chat_sidecar, m
                               headers={'Idempotency-Key': 'replace-clean'})
     assert replay.status_code == 200
     assert replay.get_json()['conversationId'] == fresh['conversationId']
+
+
+# A project's identity is its exact path. POSIX names compare as bytes, so differently normalized
+# spellings are distinct directories and must never share one binding.
+@pytest.mark.parametrize('name', ['测试项目', 'プロジェクト', unicodedata.normalize('NFD', 'プロジェクト'), 'emoji 🚀 proj'])
+def test_non_ascii_project_path_keeps_one_exact_coordinator_identity(flask_client, chat_sidecar, monkeypatch, tmp_path, name):
+    from urllib.parse import quote
+    import routes.api_v1.folders as folders
+    from tests._seed import seed_conversation
+    monkeypatch.setattr(folders, '_FOLDERS_PATH', str(tmp_path / 'folders.json'))
+    root = str(tmp_path / name)
+    folder = folders._repository().create(1, {'name': name, 'projectPaths': [root]})
+    endpoint = '/api/v4/project/coordination'
+    created = flask_client.post(endpoint + '/create', json={'path': root, 'folderId': folder['id'], 'expectedRevision': 0},
+                                headers={'Idempotency-Key': 'create-' + uuid.uuid4().hex})
+    assert created.status_code == 200, created.get_json()
+    leader = created.get_json()['conversationId']
+    assert (created.get_json()['projectPath'], created.get_json()['availability']) == (root, 'available')
+    # Plain, and as a forwarding proxy that re-encodes the query (/proxy/<port>/) delivers it.
+    for value in (root, quote(root, safe='')):
+        read = flask_client.get(endpoint, query_string={'path': value}).get_json()
+        assert (read['projectPath'], read['conversationId'], read['revision']) == (root, leader, 1)
+    for other in {unicodedata.normalize(form, root) for form in ('NFC', 'NFD')} - {root}:
+        assert flask_client.get(endpoint, query_string={'path': other}).get_json()['availability'] == 'unbound'
+    worker = 'worker-' + uuid.uuid4().hex
+    seed_conversation(worker, title=name, settings={'projectPath': root, 'folderId': folder['id'], '_coordinatorSource': leader})
+    page = flask_client.get(endpoint + '/conversations', query_string={'path': root}).get_json()
+    rows = {row['conversationId']: row['coordinatorId'] for row in page['conversations']}
+    assert rows[worker] == leader and leader in rows
+    retry = flask_client.post(endpoint + '/create', json={'path': root, 'folderId': folder['id'], 'expectedRevision': 0},
+                              headers={'Idempotency-Key': 'create-' + uuid.uuid4().hex})
+    assert retry.get_json()['conversationId'] == leader
 
 
 def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shells(flask_client, chat_sidecar, monkeypatch):

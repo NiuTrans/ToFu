@@ -262,24 +262,28 @@ def _raw_archive_put(session: Session, payload: Mapping[str, Any]) -> Any:
     attempt_limit_exhausted = (
         attempt_usage + requested_stored_bytes > _MAX_ARCHIVE_STORED_BYTES
     )
-    quota_exhausted = current_usage + requested_stored_bytes > budget_bytes
-    if (
+    budget_exhausted = current_usage + requested_stored_bytes > budget_bytes
+    space_exhausted = (
         available_free_bytes > 0
         and available_free_bytes - requested_stored_bytes < min_free_bytes
-    ):
-        quota_exhausted = True
-    if quota_exhausted:
-        request_blob = b""
-        response_blob = b""
-        requested_stored_bytes = 0
-        integrity = "partial"
-        truncation_reason = "quota_exhausted"
+    )
+    # Name the constraint that bound, in the native authority's order: free
+    # space or parts above the whole budget, then the per-Attempt budget, then
+    # the shared budget. This authority reclaims nothing (module docstring).
+    if space_exhausted or requested_stored_bytes > budget_bytes:
+        scrub_reason = "quota_exhausted"
     elif attempt_limit_exhausted:
+        scrub_reason = "attempt_limit"
+    elif budget_exhausted:
+        scrub_reason = "quota_exhausted"
+    else:
+        scrub_reason = ""
+    if scrub_reason:
         request_blob = b""
         response_blob = b""
         requested_stored_bytes = 0
         integrity = "partial"
-        truncation_reason = "attempt_limit"
+        truncation_reason = scrub_reason
 
     created_at_ms = int(time.time() * 1000)
     session.execute(

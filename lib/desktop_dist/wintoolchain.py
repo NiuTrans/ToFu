@@ -208,9 +208,9 @@ def provision(force: bool = False) -> dict:
 
 def _download(url: str, dest: str, sha256: str) -> None:
     """Fetch ``url`` to ``dest`` (.part + atomic rename) and pin-verify."""
-    import requests
+    from lib.http_transport.client import http_get
     part = dest + '.part'
-    with requests.get(url, stream=True, timeout=120) as resp:
+    with http_get(url, stream=True, timeout=120) as resp:
         resp.raise_for_status()
         with open(part, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):

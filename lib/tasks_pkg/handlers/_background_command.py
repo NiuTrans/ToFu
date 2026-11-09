@@ -341,7 +341,7 @@ def _queue_completion(*, task: dict[str, Any], config: dict | None,
         queue_id = str(queued.get('queueId') or '')
         logger.info(
             '[BackgroundCommand:%s] completion queued conv=%s row=%s',
-            command_id, conv_id[:8], queue_id[:8])
+            command_id, conv_id, queue_id[:8])
         # Fast-path twin: a still-running turn drains this at its next round
         # boundary (deferred-confirm then deletes the durable row). Loss or
         # refusal (tombstoned slot) is harmless — the row above remains the
@@ -570,7 +570,7 @@ def run_with_steer_handoff(
             '[BackgroundCommand:%s] %s handed off PID=%s conv=%s',
             command_id, ('operator request' if manually_requested else
                          'elapsed-time' if timed_handoff else 'operator steer'),
-            command_task.get('_subprocess_pid'), delivery_conv[:8])
+            command_task.get('_subprocess_pid'), delivery_conv)
         if handoff is not None:
             retire_handoff_control(task, handoff)
         if on_handoff is not None:

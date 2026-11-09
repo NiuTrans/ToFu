@@ -254,7 +254,7 @@ class TaskTextDeltaCoalescer:
             from lib.turn_lifecycle import next_progress_projection_deadline
             deadline = lambda: next_progress_projection_deadline(attempt_id)
             if max_chars is None:
-                from lib.storage.storage_event_policy import (
+                from lib.agent_core.storage_event_policy import (
                     resolve_storage_event_budget, STORAGE_EVENT_FRAME_HEADROOM_BYTES,
                 )
                 from lib.agent_core.generated_task_event_delivery_contract import PROGRESS_BATCH_MAX_WIRE_BYTES

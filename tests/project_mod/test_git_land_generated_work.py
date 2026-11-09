@@ -97,7 +97,7 @@ def test_generated_cli_runs_without_pythonpath_or_repository_cwd(generated):
                             text=True, timeout=60)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'can land' in result.stdout
+    assert 'merges cleanly into main' in result.stdout
     assert state(shared) == before
 
 

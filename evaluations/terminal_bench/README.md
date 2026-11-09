@@ -31,7 +31,8 @@ PY=<interpreter with pssdk, aiohttp, dirhash>   # e.g. the Tofu app interpreter 
 RUN=.eval-runs/<run-dir>
 # 1. relay (keys stay in this process; sandboxes see a key-less URL)
 env -u PYTHONPATH $PY -m evaluations.terminal_bench.relay --port 18451 --model glm-5.3-flash-m17 \
-  --temperature 1.0 --top-p 1.0 --max-tokens 65536 --log $RUN/relay-requests.jsonl --files-dir $RUN/files
+  --temperature 1.0 --top-p 1.0 --max-tokens 65536 --reasoning-effort max \
+  --log $RUN/relay-requests.jsonl --files-dir $RUN/files
 # 1b. only for the claude-code arm: Anthropic bridge in front of the relay
 env -u PYTHONPATH $PY -m evaluations.terminal_bench.anthropic_bridge --port 18452 \
   --relay-url http://127.0.0.1:18451 --log $RUN/bridge-requests.jsonl
@@ -105,9 +106,10 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
 
 ## Fairness and protocol controls
 
-- Same model, keys, relay and sampling for every arm; the relay overrides
-  `temperature`, `top_p` and `max_tokens` on every request and logs the
-  harness's original values. The claude-code arm reaches that same relay
+- Same model, keys, relay, sampling and reasoning effort for every arm; the
+  relay overrides `temperature`, `top_p`, `max_tokens` and (when
+  `--reasoning-effort` is given) `reasoning_effort` on every request, and logs
+  both the harness's original values and what was sent. The claude-code arm reaches that same relay
   through `anthropic_bridge.py`: Claude Code speaks only Anthropic Messages,
   so the bridge translates each request to the relay's OpenAI dialect under
   the same arm label, and the response back. `output_config.effort` maps to
@@ -132,12 +134,16 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
   process lingering on children it started is not killed and its daemons stay
   up for the verifier.
 - Reasoning effort parity: Pi always sends `reasoning_effort` for GLM-5.3
-  (its catalog maps levels to low/high/max) and Tofu/OpenCode send none.
-  The 2026-11-03 relay probe (`.eval-runs/native-harness-artifacts/effort-probe`,
-  16 samples x 2 prompts) found the deployment default indistinguishable from
-  `max` (Mann-Whitney z 0.06 and -0.47) while `high`, the Harbor preflight's
-  level, used 2.3-2.6x fewer completion tokens, so `harness.PI_THINKING_LEVEL`
-  is `max`. Any arm that changes effort must be re-run for all arms.
+  (its catalog maps levels to low/high/max) and Tofu pins its native
+  `--thinking max`; OpenCode has no client-side effort field. TB2.1 runs also
+  pin `--reasoning-effort max` at the relay for every arm rather than relying
+  on the deployment default. The 2026-11-03 relay probe
+  (`.eval-runs/native-harness-artifacts/effort-probe`, 16 samples x 2 prompts)
+  found the default indistinguishable from `max` (Mann-Whitney z 0.06 and
+  -0.47) while `high`, the Harbor preflight's level, used 2.3-2.6x fewer
+  completion tokens; that justified the first baseline's default, not an
+  implicit default in later runs. Any arm that changes effort must be re-run
+  for all arms.
 - Pi's `models.json` replaces only the built-in provider's `baseUrl` and sets
   the same context/output limits every arm is told, so Pi keeps its shipped
   thinking format and tool streaming. Pi's stdout is filtered like Harbor's
@@ -193,6 +199,50 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
   repositories, so local reads of hidden lines are a weak flag. A strongly
   flagged pass is excluded after reviewing the cited tool calls.
 
+- Gateway cache affinity: Tofu's evaluation Connection declares
+  `cache_affinity_mt_session_id`, so the product sends its stable per-lineage
+  `Mt-Session-Id` header. The relay forwards this header for every arm, including
+  retries on another API key. It never generates an identity for a client that
+  sends none, and never inserts a marker into the prompt. The request log's
+  `cache_affinity` field records the carrier name without the identity. This
+  measures each harness's configured transport behavior; comparisons intended
+  to isolate agent behavior must separately control affinity for every arm.
+  Pre-change runs whose relay stripped client headers use a different transport
+  configuration and must be identified as such.
+
+## Claude Opus 5.5 at medium effort (`--protocol claude-6h-medium`)
+
+- Run model `claude-opus-5.5`, wire `kunlunbedrock.claude-opus-5.5-m17`, on
+  FRIDAY's Anthropic face. Start ONE relay for both arms:
+  `python -m evaluations.terminal_bench.relay --port 18521 --anthropic-model
+  kunlunbedrock.claude-opus-5.5-m17 --key-suffixes 6672,0733 --read-timeout
+  1800 --retry-budget 900 --log ... --files-dir ...`.
+- The protocol keeps vendor-6h's 21 600 s agent budget and resources, sets
+  reasoning to `medium` for both arms and uses the model's own facts: no
+  temperature/top_p (Opus 5.5's catalog profile omits them), a 1 000 000-token
+  context window and a 128 000-token output cap.
+- Tofu's routing envelope declares protocol `anthropic`, the FRIDAY wire name
+  and FRIDAY's provider id (`example-corp`, which selects its Claude cache
+  multipliers and gateway sanitization). Pi uses its built-in
+  `anthropic/claude-opus-5-5` definition, whose `models.json` override points
+  at the relay. Each trial's base URL is
+  `/arm/<arm>-<label>/task/<task>/anthropic`, so the relay attributes every
+  request to a trial; Pi sends no affinity header and sandbox peers are NAT'd.
+- Reasoning equivalence: Tofu sends `thinking: {type: adaptive, display:
+  summarized}` with `output_config.effort = medium`. Pi's built-in Opus 5.5
+  entry declares `supportsMidConvoEffort`, so it asks for a constant top-level
+  `effort: high` and carries `medium` in empty mid-conversation `system`
+  messages. FRIDAY rejects those markers (`system content must contain at
+  least one block`), so the relay folds them into the top-level effort their
+  last marker asks for and records the fold (`pi_effort_fold`, `sent_effort`).
+  Both arms therefore reach the model with `output_config.effort = medium`.
+  `--preserve-pi-effort-markers` passes them through instead, to measure that.
+- The relay logs, per request: cache breakpoints with their TTL, digests of
+  tools/system/each message (excluding `cache_control`), joined tool-name
+  bytes, a digest of the Mt-Session-Id value, the request's own settings and
+  the provider usage. No prompt text or affinity value is logged.
+- `count_tokens` is forwarded too, so Tofu's exact token counter keeps working.
+
 ## Decisions
 
 **Problem:** the runner resumed OpenCode and Pi with `--continue` and a
@@ -244,6 +294,55 @@ still get SIGKILL. **Alternatives rejected:** `docker exec <container> kill`
 (trusts tools inside the image); stopping the container (also stops the
 daemons the verifier tests).
 
+**Problem:** `start_container` made both log mounts `chmod 0777`. A process the
+agent or the verifier's own `test.sh` dropped to a de-privileged uid (e.g.
+65534) could then create, rewrite, delete, rename over or symlink-swap
+`/logs/verifier/reward.txt` — the reward channel was writable by the very code
+being scored, and a `reward.txt` the agent planted before the verifier ran was
+read back as a real reward when the test never wrote one. Verified in a real
+container on cluster 857 (2026-11-09, one synthetic task, no model): with
+0777 a uid-65534 child forged the reward six ways and a delayed grandchild
+deleted it, ending in `no_reward`; a uid-1000 agent's planted `1.0` was the
+score. **Decision:** `/logs/verifier` is a root:root 0700 directory
+(`seal_verifier_logs`), emptied again immediately before the verifier runs so
+nothing the agent phase planted survives; every verifier command runs as
+uid 0, so the test still writes its reward and logs as root; `/logs/agent`
+belongs to the image's user (the agent's uid/gid, read from the container) at
+0755, so the agent still writes its own logs and nobody else can; rewards are
+read only from regular files, never through a symlink, and a planted FIFO or
+directory no longer blocks or crashes the reader. The red-team attacker is
+`tests/support/reward_forgery_probe.py` (create, in-place rewrite, truncate,
+delete, rename swap, symlink swap, hard-link swap, directory rename/chmod,
+read), driven as uid 65534 by
+`tests/evaluations/test_tb_reward_forgery.py`; that module is stdlib-only so
+the VM smoke uploads and runs it inside the real container.
+**Alternatives rejected:** keeping 0777 and trusting the verifier's `test.sh`
+not to run untrusted code (the submitted code is the thing under evaluation);
+only removing `reward.txt` before verifying, which still allows the swap races
+after the legitimate reward is written; running the verifier as the agent's
+uid, which shares the reward channel with the agent.
+
+**Problem:** Harbor 0.25.0 does the same thing in its own run mode:
+`environments/docker/docker.py` calls
+`ensure_dirs(_mount_targets(writable_only=True))` at start, which is
+`mkdir -p ... && chmod 777 /logs/verifier /logs/agent` as root
+(`environments/base.py::_ensure_dirs_command`), `TrialPaths.chmod_dir` makes
+the host-side trial/agent/verifier dirs 0777, and
+`trial/trial.py::_run_separate_verifier` empties and re-`chmod 777`s the
+verifier mount right before `test.sh` runs. Tofu's rootless QEMU adapter
+inherits all of it even though `capabilities.mounted` is False (the trial
+passes the log binds as `auto_mounts`). **Decision:**
+`rootless_vm/harbor_environment.py` re-seals `/logs/verifier` to root:root
+0700 at the end of every directory command it builds, and a verifier exec runs
+as root explicitly (a task-level `[verifier] user` is honored by chowning that
+directory to the named user, never by re-opening it to every uid). The logs
+come back by guest download, so a root-only container directory does not
+impede the host reader. **Alternatives rejected:** patching Harbor upstream
+(different owner, and its `prepare_logs_for_host` chowns host binds back to
+the host user, so a root-only mount would break a non-root Harbor host);
+leaving the mount 0777 because the guest is a VM (the uid boundary is inside
+the container, exactly where the agent's and the tests' code runs).
+
 ## Verification
 
 `pytest -q tests/evaluations/test_terminal_bench_native.py` (offline: bundle
@@ -256,7 +355,19 @@ against a fake relay), `pytest -q tests/evaluations/test_tb_source_guard.py`
 pass/fail, audit evidence), and
 `pytest -q tests/evaluations/test_pi_native_contract.py` (Pi launch spec,
 guest program and event filtering against a scripted Pi, audit of Pi session
-files). Setting `TB_NATIVE_PI_RUNTIME` to an extracted Pi runtime tree also
+files),
+`pytest -q tests/evaluations/test_tb_reward_forgery.py` (the reward channel is
+root-only: directory modes and owners before the agent and before the
+verifier, verifier execs as uid 0, agent-planted rewards/links/FIFOs removed,
+rewards read only from regular files, and — with real root, or in the VM smoke
+— a uid-65534 child unable to create, rewrite, delete or swap `reward.txt`
+while a legitimate root reward is written and read back and the agent's own
+log still works), and
+`pytest -q tests/evaluations/test_harbor_verifier_log_permissions.py`
+(rootless Harbor adapter: the verifier mount is re-sealed to root:root 0700
+after Harbor's own `chmod 777` preparation, `/logs/agent` keeps its
+writability, and a task-named verifier user gets ownership instead of a
+world-writable directory). Setting `TB_NATIVE_PI_RUNTIME` to an extracted Pi runtime tree also
 runs the real pinned Pi against a local OpenAI-compatible stub, asserting the
 wire request and that an output-limit stop ends the run unresumed. Live smoke: two short tasks per arm
 on cluster 857.

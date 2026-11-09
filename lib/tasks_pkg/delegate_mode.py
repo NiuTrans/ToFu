@@ -150,7 +150,7 @@ def narrow_root_to_delegate_surface(
         logger.warning(
             '[Task %s] Delegate mode requested but spawn_agents is not in the '
             'executable catalog; keeping the ordinary tool surface',
-            str(task.get('id') or '')[:8])
+            str(task.get('id') or ''))
         return None
     task[DELEGATION_VIEW_KEY] = {
         'task': {key: _copy_value(task[key]) for key in _TASK_POLICY_FIELDS if key in task},

@@ -446,7 +446,7 @@ class TestRepeatReminder:
         assert '_programmaticAdoptionNudges' not in task
 
     def test_adoption_nudge_metadata_is_bounded_and_damage_tolerant(self):
-        from lib.storage.storage_projection import (
+        from lib.task_replay.persistence_projection import (
             project_task_result_metadata_for_storage,
         )
         from lib.tasks_pkg.manager._persist import build_result_meta

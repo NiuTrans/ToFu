@@ -126,7 +126,10 @@ def get_workers(task, scope, arguments, *, repository=None):
         budgets=[budget_id] if budget_id else []))
     project_history = arguments.get('scope', 'request') == 'project'
     page = repository.history_page(arguments.get('after_id')) if project_history else None
-    rows = [row for row in (page['rows'] if page else value['assignments'])
+    candidates = page['rows'] if page else value['assignments']
+    continuations = dict(zip((row['id'] for row in candidates),
+                             page['rowOlderCursors'] if page else (row['id'] for row in candidates)))
+    rows = [row for row in candidates
             if row['request']['coordinatorId'] == scope['conversation_id']
             and row['grant'].get('bindingRevision') == scope['binding_revision']
             and row['grant']['tenant'] == principal.tenant_id
@@ -152,7 +155,24 @@ def get_workers(task, scope, arguments, *, repository=None):
         budget_id = source['id'] if source is not None else None
     if budget_id:
         result['request_usage'] = request_view(repository, value, budget_id)
-    return result
+    return _readable_page(task, result, 'workers', lambda shown: continuations[rows[shown - 1]['id']])
+
+
+def _readable_page(task, result, key, cursor_after):
+    """Keep the leading rows the model reads inline; the cursor resumes after the last one.
+
+    A page that spills over the single tool-result budget reaches the model as
+    an artifact pointer, so a shorter page plus an exact cursor costs less.
+    """
+    from lib.tasks_pkg.compaction.api import fits_tool_result_budget
+    rows = result[key]
+    shown = len(rows)
+    while shown > 1 and not fits_tool_result_budget(
+            json.dumps({**result, key: rows[:shown]}, ensure_ascii=False), model=task.get('model', '')):
+        shown -= 1
+    if shown == len(rows):
+        return result
+    return {**result, key: rows[:shown], 'next_cursor': cursor_after(shown)}
 
 
 def delegate(task, scope, arguments, *, repository=None, service=None, create=None):
@@ -192,7 +212,15 @@ def delegate(task, scope, arguments, *, repository=None, service=None, create=No
     validate_source(repository, request)
     if original is None:
         # Refuse before any conversation or grant exists: every worker would fail binding.
-        require_isolated_worker_root(repository.project)
+        # Preparing a plain folder walks and commits its whole tree (6,931 s for
+        # 1.4M files on 2026-11-09). Each observed advance proves this waiter
+        # live, as a completed status poll does; Stop ends the preparation.
+        def advanced():
+            task['_dispatch_heartbeat'] = time.time()
+
+        from lib.project_mod.tool_admission import Cancellation
+        require_isolated_worker_root(repository.project, cancel=Cancellation(task),
+                                     progress=advanced)
     if create is None:
         from .coordinator_tools import _create
         create = _create

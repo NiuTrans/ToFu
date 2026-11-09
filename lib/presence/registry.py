@@ -189,9 +189,9 @@ def announce(
         "[presence] announce owner=%s root=%s conv=%s agent=%s task=%s run=%s",
         owner,
         os.path.basename(normalized_root) or normalized_root,
-        conv_id[:8],
+        conv_id,
         agent_id or "-",
-        (task_id or "-")[:8],
+        (task_id or "-"),
         (run_id or "-")[:8],
     )
     _start_sweeper_once()
@@ -339,7 +339,7 @@ def depart(
         "[presence] depart owner=%s root=%s conv=%s agent=%s",
         owner,
         os.path.basename(normalized_root) or normalized_root,
-        conv_id[:8],
+        conv_id,
         agent_id or "-",
     )
 

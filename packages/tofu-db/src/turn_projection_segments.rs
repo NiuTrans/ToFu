@@ -39,14 +39,7 @@ const SYNTHETIC_INBOX_MARKERS: [&str; 5] = [
     "_stallNudge",
     "_programSynthetic",
 ];
-const NOTE_KINDS: [&str; 5] = [
-    "intent-stall",
-    "todo-continuation",
-    "system-intervention",
-    "round-context",
-    "session-prefix",
-];
-const NOTE_ACTIONS: [&str; 4] = ["prompt", "stop", "tool-policy", "continue"];
+use crate::generated_system_note_vocabulary::{NOTE_ACTIONS, NOTE_KINDS};
 
 fn integrity(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -565,6 +558,16 @@ mod tests {
                 "terminal": true,
             }])
         );
+    }
+
+    #[test]
+    fn contract_note_kinds_survive_projection_normalization() {
+        for kind in NOTE_KINDS {
+            let note = json!({"type": "system_note", "blockId": "note",
+                "noteKind": kind, "text": "reviewed", "action": "stop"});
+            let notes = preserved_notes(Some(&json!([note])));
+            assert_eq!(notes[0]["noteKind"], json!(kind));
+        }
     }
 
     #[test]

@@ -199,11 +199,12 @@ def render_events(owner: int, events: list[tuple[ChannelEvent, str]],
         if event.reply_to_external_id:
             reply = f' reply_to="{escape(str(event.thread))}/{escape(event.reply_to_external_id)}"'
         link = f' url="{escape(event.url)}"' if event.url else ''
+        kind = f' sender_kind="{event.sender_kind}"' if event.sender_kind != 'user' else ''
         owner_authored = bool(owner_uid) and event.sender_id == owner_uid
         media = ''.join('\n' + _media_element(item) for item in event.media)
         lines.append(
             f'<channel-event id="{escape(event.event_id)}" thread="{escape(str(event.thread))}" '
-            f'sender="{escape(event.sender_name or event.sender_id)}" sender_id="{escape(event.sender_id)}" '
+            f'sender="{escape(event.sender_name or event.sender_id)}" sender_id="{escape(event.sender_id)}"{kind} '
             f'owner_authored="{str(owner_authored).lower()}" '
             f'time="{_time_text(event.sent_at_ms)}" disposition="{disposition}" '
             f'private_chat="{str(event.thread.is_private).lower()}" '
@@ -213,10 +214,11 @@ def render_events(owner: int, events: list[tuple[ChannelEvent, str]],
     return '\n'.join(lines)
 
 
-# Turn command IDs minted here are the only durable trace of a delivery that
-# was steered into a running Turn (``_userSteerInjects[].commandId``): the
-# steer lane records text, not origin. Nonhuman batches and owner commands
-# use distinct namespaces so authority checks can tell them apart.
+# Turn command IDs are deterministic per target and event IDs, so replaying the
+# same batch reuses its command. Nonhuman batches and owner commands use
+# distinct namespaces, which name a steered batch's review scope (C11);
+# authority never trusts a namespace: a steered input keeps owner authority
+# only through its committed human author (C7).
 EVENT_COMMAND_PREFIX = 'channel-event-'
 OWNER_COMMAND_PREFIX = 'channel-owner-'
 

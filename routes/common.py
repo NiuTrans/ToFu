@@ -114,35 +114,14 @@ def _db_safe(fn):
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# ── Native mobile client (Android APK) download ──
-# The Android client's SOURCE lives in-tree at android/ (merged 2026-08-05),
-# but its CI (.github/workflows/build-android-apk.yml) publishes release APKs
-# to the SEPARATE github.com/rangehow/tofu-android repo's /releases — NOT this
-# repo. That is deliberate: /releases/latest/download/<asset> resolves to the
-# NEWEST release, and on this repo any newer desktop-only release (v0.14.x,
-# no APK asset) would shadow the deep link into a permanent 404. The filename
-# here MUST equal the asset that workflow publishes. The coupling is guarded
-# by tests/server/test_mobile_client_apk_url.py so it can't silently drift into a 404.
-MOBILE_CLIENT_APK_ASSET = "tofu-android.apk"
-# Direct-download DEEP LINK, not the releases HTML page. GitHub's
-# /releases/latest/download/<asset> is a stable redirect that always serves the
-# newest release's asset and triggers a real download on tap — exactly what a
-# phone needs. Before the first tagged release this 404s (honest "not published
-# yet"); that is a better mobile outcome than landing on the /releases/latest
-# page full of wrong-platform desktop installers. TOFU_MOBILE_CLIENT_URL
-# overrides it (e.g. to pin a specific version's asset).
-DEFAULT_MOBILE_CLIENT_URL = (
-    "https://github.com/rangehow/tofu-android/releases/latest/download/"
-    + MOBILE_CLIENT_APK_ASSET
+# Publication metadata is independent of unreleased Android source versions.
+# Re-export the maintained names for existing callers of this serving owner.
+from lib.mobile_distribution import (  # noqa: E402
+    DEFAULT_MOBILE_CLIENT_URL as DEFAULT_MOBILE_CLIENT_URL,
+    MOBILE_CLIENT_APK_ASSET as MOBILE_CLIENT_APK_ASSET,
+    MOBILE_CLIENT_VERSION as MOBILE_CLIENT_VERSION,
+    mobile_download_metadata,
 )
-
-
-# Android APK version advertised on the Settings download card. The single
-# source of truth is android/app/build.gradle.kts `versionName` — the coupling
-# is pinned by tests/server/test_mobile_client_apk_url.py so a version bump that
-# forgets this constant fails loudly. TOFU_MOBILE_CLIENT_VERSION overrides
-# (e.g. a deployment built without the android/ subtree).
-MOBILE_CLIENT_VERSION = "0.1.18"
 
 common_bp = Blueprint("common", __name__)
 # v1 blueprint for the JSON routes (page-serving carve-outs above stay on common_bp).
@@ -796,22 +775,9 @@ def health_check():
     except Exception as _bid_e:
         logger.debug("[Health] build id unavailable: %s", _bid_e)
 
-    # Native mobile-client download URL, surfaced in the Settings footer.
-    # Defaults to a DIRECT APK deep link (see DEFAULT_MOBILE_CLIENT_URL) so a
-    # phone tap downloads the app rather than landing on a wrong-platform
-    # releases page; TOFU_MOBILE_CLIENT_URL overrides.
-    _mobile_url = (
-        os.environ.get("TOFU_MOBILE_CLIENT_URL") or ""
-    ).strip() or DEFAULT_MOBILE_CLIENT_URL
-    result["mobile_client_url"] = _mobile_url
-    # Version badge for the Android download card (see MOBILE_CLIENT_VERSION).
-    result["mobile_client_version"] = (
-        os.environ.get("TOFU_MOBILE_CLIENT_VERSION") or ""
-    ).strip() or MOBILE_CLIENT_VERSION
-    # iOS client: no TestFlight/App Store build exists yet, so this is empty
-    # by default and the Settings card renders a "coming soon" row. Setting
-    # TOFU_IOS_CLIENT_URL flips the row into an active download link.
-    result["ios_client_url"] = (os.environ.get("TOFU_IOS_CLIENT_URL") or "").strip()
+    # Local publication receipt only: never relabel a stale APK with the
+    # source version or block health on a GitHub/network lookup.
+    result.update(mobile_download_metadata())
 
     # Sidecar status is an in-memory snapshot: it must stay non-blocking just
     # like process liveness.  A runtime crash is visible here without turning

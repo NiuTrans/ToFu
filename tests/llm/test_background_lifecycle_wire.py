@@ -321,6 +321,17 @@ def test_runtime_gate_survives_local_swarm_projection_and_budget(storage_free):
         assert 'delivered automatically' not in text
     else:
         _assert_canonical(plan.body)
-        assert 'get_agent_result' in functions
+        assert 'get_agent_result' not in functions
+        assert {'search_tools', 'execute_tools'}.issubset(functions)
+        from lib.tools.gateway import search_executable_catalog
+
+        recovery = search_executable_catalog(
+            ctx.executable_tool_catalog, 'get_agent_result',
+            visible_names=set(functions),
+            contract_documents_by_name=ctx.tool_contract_documents_by_name)
+        assert recovery['execute_with'] == 'execute_tools'
+        assert recovery['items'][0]['name'] == 'get_agent_result'
+        assert {'agent_id', 'agent_ids', 'swarm_run_id'}.issubset(
+            recovery['items'][0]['arguments_schema']['properties'])
     assert body == before
     assert SPAWN_AGENTS_TOOL == spawn_before

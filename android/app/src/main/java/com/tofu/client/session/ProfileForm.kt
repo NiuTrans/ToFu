@@ -45,12 +45,10 @@ object ProfileForm {
         val u = baseUrl.trim()
         if (u.isEmpty()) {
             errors["baseUrl"] = "Server URL is required"
-        } else if (ServerUrl.parse(u) == null) {
-            errors["baseUrl"] = "Must be a full http(s):// URL"
-        } else if (!u.startsWith("http://") && !u.startsWith("https://")) {
-            errors["baseUrl"] = "Must start with http:// or https://"
-        } else if (LocalKernelCookie.isReservedUrl(u)) {
-            errors["baseUrl"] = LocalKernelCookie.RESERVED_HOST_MESSAGE
+        } else {
+            val error = ServerUrl.storageError(u)
+            if (error != null) errors["baseUrl"] = error
+            else if (LocalKernelCookie.isReservedUrl(u)) errors["baseUrl"] = LocalKernelCookie.RESERVED_HOST_MESSAGE
         }
 
         // A blank password selects interactive sign-in. The outer gateway may
@@ -58,6 +56,9 @@ object ProfileForm {
 
         return ValidationResult(errors)
     }
+
+    /** A new incoming link can auto-fill only a pristine, new-server form. */
+    fun mayAutofill(editing: Boolean, dirty: Boolean): Boolean = !editing && !dirty
 
     /**
      * Validate the SSH kernel form. Ports arrive as the typed text; an ok result
@@ -129,6 +130,9 @@ object ProfileForm {
         projectPath: String? = null,
     ): com.tofu.client.data.Profile {
         val u = baseUrl.trim()
+        val error = ServerUrl.storageError(u)
+            ?: LocalKernelCookie.RESERVED_HOST_MESSAGE.takeIf { LocalKernelCookie.isReservedUrl(u) }
+        require(error == null) { error.orEmpty() }
         return com.tofu.client.data.Profile(
             id = id,
             alias = alias.trim(),

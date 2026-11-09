@@ -176,7 +176,8 @@ def test_prompt_returns_the_selected_channel(inject_mode_behavior: dict):
 
 
 def test_prompt_auto_resolves_when_the_turn_ends(inject_mode_behavior: dict):
-    assert inject_mode_behavior["autoResolve"] == "queue"
+    # A moot prompt closes unsent; the message stays in the composer.
+    assert inject_mode_behavior["autoResolve"] == "cancel"
 
 
 def test_choice_keyboard_navigation_wraps(inject_mode_behavior: dict):
@@ -197,5 +198,5 @@ def test_coordinator_conversation_steers_without_prompt(
 
 
 def test_prompt_falls_back_without_dialog_service(inject_mode_behavior: dict):
-    assert inject_mode_behavior["withoutDialog"] == "queue"
+    assert inject_mode_behavior["withoutDialog"] == "cancel"
     assert inject_mode_behavior["overlaysAfterDestroy"] == 0

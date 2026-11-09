@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 # The attributes sync_search_config reads off `lib` (aliased _lib).
 _LIB_STUB = {
     'SKIP_DOMAINS': {'youtube.com'},
+    'FETCH_SKIP_DOMAINS': {'junk.example'},
     'PREFETCH_GATE_ENABLED': True,
 }
 
@@ -68,6 +69,7 @@ class TestSyncSearchConfigKnobs:
         # 0.4.1 adaptive proxy
         assert cap['proxy_dual_attempt'] is True
         assert cap['skip_domains'] == {'youtube.com'}
+        assert cap['fetch_skip_domains'] == {'junk.example'}
 
     def test_search_limits_stay_library_defaults(self, monkeypatch):
         cap = _capture_configure_kwargs(monkeypatch)
@@ -129,9 +131,10 @@ class TestSyncSearchConfigKnobs:
         supported = 'proxy_fallback_urls' in getattr(
             tofu_search.SearchConfig, '__dataclass_fields__', {})
         if supported:
-            # The primary is excluded; the rest of the pool becomes the chain.
-            assert cap['proxy_url'] == 'http://p1:1'
-            assert cap['proxy_fallback_urls'] == ['http://p2:2']
+            # The bridge resolves no primary at all (call-time routing owns it),
+            # so it passes neither a primary nor a precomputed failover chain.
+            assert 'proxy_url' not in cap
+            assert 'proxy_fallback_urls' not in cap
             assert cap['proxy_race'] is True
         else:
             # SOFT floor: an older installed library receives NEITHER kwarg.

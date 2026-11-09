@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.approval import request_write_approval
 from lib.tasks_pkg.executor import _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
@@ -293,53 +293,8 @@ def _approval_meta_apply_diffs(approval_meta, fn_args):
     approval_meta['editSummaries'] = edit_summaries
 
 
-def _approval_meta_insert_content(approval_meta, fn_args):
-    """Enrich approval metadata for ``insert_content`` (single insertion)."""
-    anchor_text = fn_args.get('anchor', '')
-    content_text = fn_args.get('content', '')
-    pos = fn_args.get('position', 'after')
-    approval_meta['search'] = anchor_text[:2000] + ('…' if len(anchor_text) > 2000 else '')
-    approval_meta['replace'] = content_text[:2000] + ('…' if len(content_text) > 2000 else '')
-    approval_meta['searchLines'] = anchor_text.count('\n') + 1
-    approval_meta['searchChars'] = len(anchor_text)
-    approval_meta['replaceLines'] = content_text.count('\n') + 1
-    approval_meta['replaceChars'] = len(content_text)
-    approval_meta['description'] = approval_meta.get('description', '') or f'Insert {pos} anchor'
-
-
-def _approval_meta_insert_contents(approval_meta, fn_args):
-    """Enrich approval metadata for ``insert_contents`` (batch)."""
-    edits = fn_args.get('edits') or []
-    paths = list(dict.fromkeys(
-        e.get('path', '?') for e in edits if isinstance(e, dict)
-    ))
-    approval_meta['path'] = (
-        ', '.join(paths[:5])
-        + (f' +{len(paths)-5} more' if len(paths) > 5 else '')
-    )
-    approval_meta['editCount'] = len(edits)
-    approval_meta['batchMode'] = True
-    approval_meta['description'] = f'Batch: {len(edits)} insertions across {len(paths)} file(s)'
-    edit_summaries = []
-    for e in edits[:20]:
-        if not isinstance(e, dict):
-            continue
-        anchor_text = e.get('anchor', '')
-        content_text = e.get('content', '')
-        pos = e.get('position', 'after')
-        edit_summaries.append({
-            'path': e.get('path', '?'),
-            'description': e.get('description', f'Insert {pos} anchor'),
-            'search': anchor_text[:500] + ('…' if len(anchor_text) > 500 else ''),
-            'replace': content_text[:500] + ('…' if len(content_text) > 500 else ''),
-            'searchLines': anchor_text.count('\n') + 1,
-            'replaceLines': content_text.count('\n') + 1,
-        })
-    approval_meta['editSummaries'] = edit_summaries
-
-
 def _approval_meta_edit_file(approval_meta, fn_args):
-    """Show mixed edit operations without hiding insert direction."""
+    """Show every replacement of an edit_file batch."""
     edits = fn_args.get('edits') or []
     paths = list(dict.fromkeys(
         e.get('path', '?') for e in edits if isinstance(e, dict)
@@ -360,7 +315,7 @@ def _approval_meta_edit_file(approval_meta, fn_args):
             continue
         anchor = edit.get('anchor', '')
         content = edit.get('content', '')
-        operation = edit.get('operation', '?')
+        operation = edit.get('operation', 'replace')
         summaries.append({
             'path': edit.get('path', '?'),
             'operation': operation,
@@ -1113,8 +1068,6 @@ _APPROVAL_META_ENRICHERS = {
     'edit_file':        _approval_meta_edit_file,
     'apply_diff':       _approval_meta_apply_diff,
     'apply_diffs':      _approval_meta_apply_diffs,
-    'insert_content':   _approval_meta_insert_content,
-    'insert_contents':  _approval_meta_insert_contents,
     # Newly write-partitioned families. Without an enricher the prompt renders
     # a bare tool name and the user approves blind — false confidence, worse
     # than not prompting at all.
@@ -1219,7 +1172,7 @@ def _handle_approval(
     if file_recovery is None and approval_receipt_authority(
             task, fn_name, round_entry.get('toolCallId'), fn_args):
         return True, None
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     approval_id = f'{task["id"]}_{uuid.uuid4().hex[:8]}'
     approval_meta = {
         'approvalId': approval_id,

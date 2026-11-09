@@ -44,10 +44,10 @@ def _unique_budgets(*entries: tuple[str, str, int]) -> dict[tuple[str, str], int
 # Split a function, then lower or remove its entry in the same change. Exact
 # budgets make both growth and unclaimed shrinkage visible.
 FUNCTION_LINE_BUDGETS = _unique_budgets(
-    ('lib/tasks_pkg/turn_trace.py', '_fold_task_trace', 223),
+    ('lib/tasks_pkg/turn_trace.py', '_fold_task_trace', 221),
     ('lib/tasks_pkg/cache_tracking/_detect.py', 'detect_cache_break', 378),
     ('lib/tasks_pkg/orchestrator/_finalize.py', '_finalize_and_emit_done', 392),
-    ('lib/tasks_pkg/stream_handler/_analyse.py', 'analyse_stream_result', 238),
+    ('lib/tasks_pkg/stream_handler/_analyse.py', 'analyse_stream_result', 237),
     ('lib/translate/engine/_engine.py', '_translate_one_chunk', 425),
     ('evaluations/long_agent_release/tofu_projection.py', 'project_tofu_trial', 630),
     ('lib/cost_experiments/cost_experiments.py', 'aggregate_cost_experiment_rows', 634),
@@ -56,10 +56,10 @@ FUNCTION_LINE_BUDGETS = _unique_budgets(
     ('lib/tasks_pkg/compaction/_layer2/_compact.py', 'execute_compact_tool', 431),
     ('lib/tasks_pkg/compaction/_layer2/_summary.py', '_generate_query_aware_summary', 482),
     ('lib/tasks_pkg/context_composer/_providers.py', 'collect_context_blocks', 605),
-    ('lib/tasks_pkg/handlers/project.py', '_handle_project_tool', 561),
+    ('lib/tasks_pkg/handlers/project.py', '_handle_project_tool', 538),
     ('lib/tasks_pkg/manager/_events.py', '_append_event_ordered', 593),
     ('lib/tasks_pkg/manager/_stream.py', 'stream_llm_response', 655),
-    ('lib/tasks_pkg/tool_dispatch/_parse.py', 'parse_tool_calls', 621),
+    ('lib/tasks_pkg/tool_dispatch/_parse.py', 'parse_tool_calls', 604),
     ('packages/tofu-search/tofu_search/search/orchestrator.py', '_perform_web_search_impl', 660),
     ('scripts/rootless_terminal_bench_21.py', '_classify_trial', 645),
     ('tests/storage/test_native_task_terminal.py', 'test_real_native_route_commits_application_terminal', 782),

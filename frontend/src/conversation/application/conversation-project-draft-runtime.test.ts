@@ -233,6 +233,8 @@ describe('composer delivery into a live reply', () => {
     Object.assign(h.env, {
       window, showChoice, pushSubscribe: vi.fn(), pushUnsubscribe: vi.fn(),
       createProjectCoordinationSurface, createSameTaskReadJoin, createGlobalRouterEntry, createRouterWatchdogEntry, createCoordinatorConversationGroups,
+      // The main coordinator header's owner-delegation disclosure is not under test here.
+      createRouterOwnerDelegation: () => ({ settings: document.createElement('details'), destroy() {} }),
       openProjectCoordinationWorkspace: vi.fn(), getFolders: () => folders,
       // Retained conversation-list owners the Coordinator groups paint rows and status with.
       _convStatusFlags: () => ({}), mergeConversationCatalogRows: vi.fn(),

@@ -36,7 +36,7 @@ import re
 import signal
 import subprocess
 import time
-import urllib.request
+from lib.http_transport import http_get
 
 from runtime_guards import pid_is_alive
 
@@ -101,8 +101,9 @@ def _rotate_log(path: str) -> None:
 
 def _http_get(url: str, timeout: float = 2.0) -> tuple[int, str]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.status, resp.read(65536).decode('utf-8', 'replace')
+        with http_get(url, timeout=timeout, stream=True) as resp:
+            resp.raise_for_status()
+            return resp.status_code, resp.raw.read(65536, decode_content=True).decode('utf-8', 'replace')
     except Exception as exc:
         # Readiness failures are expected while a model boots, so keep them at
         # debug level while retaining a traceback for diagnosing TLS/proxy or

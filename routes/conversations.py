@@ -565,7 +565,7 @@ async def debug_messages(conv_id: str):
         messages, manifest = await asyncio.to_thread(_build)
     except Exception as exc:
         logger.error(
-            "[debug_messages] conv=%s failed: %s", conv_id[:8], exc,
+            "[debug_messages] conv=%s failed: %s", conv_id, exc,
             exc_info=True,
         )
         return api_internal_error("internal_error")
@@ -624,7 +624,7 @@ async def export_conv(conv_id: str):
                 return api_conflict("conversation_changed_during_export")
             logger.error(
                 "[export_conv] markdown export refused conv=%s code=%s",
-                conv_id[:8], code,
+                conv_id, code,
             )
             return api_internal_error("conversation_export_failed")
         audit_log(
@@ -781,7 +781,7 @@ def _conv_has_live_task(conv_id: str, *, user_id) -> bool:
     except Exception as exc:
         logger.warning(
             "[conversations] live-task probe failed conv=%s: %s",
-            conv_id[:8], exc,
+            conv_id, exc,
         )
         return True
 

@@ -201,6 +201,50 @@ class UpdateRestartGuardTest(unittest.TestCase):
         reexec.assert_not_called()
         m.assert_called_once()
 
+    def test_an_accepted_restart_opens_its_notice_for_the_global_router(self):
+        """docs/ROUTER.md R9: a Settings restart has no requesting conversation, so its
+        restart-complete notice goes to the owner's Global Router. It is recorded at
+        acceptance, before the old server stops, with what the restart interrupts."""
+        token = self._approved_token()
+        running = [{'taskId': 'task-a', 'convId': 'chat-a', 'elapsed': 3.0},
+                   {'taskId': 'protected-step:x', 'convId': '', 'elapsed': 1.0}]
+        with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=running), \
+             patch('routes.api_v1.update._deferred_reexec') as reexec:
+            response = self._post({'approvalId': token, 'force': True})
+        self.assertEqual(response.status_code, 200)
+        [notice] = la.restart_notices()
+        self.assertEqual((notice['restartId'], notice['source'], notice['owner']), (token, 'settings', 1))
+        self.assertIsNone(notice['recipient'])
+        self.assertEqual(notice['interrupted'], ['chat-a'])
+        self.assertEqual(notice['state'], 'pending')
+        self.assertIsInstance(notice['acceptedAt'], float)
+        self.assertIs(notice['preparation']['ok'], True)
+        self.assertEqual(reexec.call_args.kwargs['approval_id'], token)
+
+    def test_a_restart_every_bridge_refuses_notifies_the_global_router_at_once(self):
+        import routes.api_v1.update as update_route
+        from lib.scheduler.conversation_dispatch import ScheduledTurnDispatch
+        token = self._approved_token()
+        with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
+             patch('routes.api_v1.update._deferred_reexec'):
+            self.assertEqual(self._post({'approvalId': token}).status_code, 200)
+        sent = []
+
+        def dispatch(conversation, message, tools_config, **kwargs):
+            sent.append((conversation, message['content'], kwargs['command_id']))
+            return ScheduledTurnDispatch('started', task_id='notice-task')
+        with patch('lib.server.server_reexec.perform_server_reexec', return_value=False), \
+             patch('lib.router.binding.global_router', return_value={
+                 'conversationId': 'router-home', 'availability': 'available', 'revision': 1}), \
+             patch('lib.scheduler.conversation_dispatch.dispatch_scheduled_turn', dispatch):
+            update_route._deferred_reexec(0, frontend_prevalidated=True, approval_id=token)
+        [(conversation, text, command_id)] = sent
+        self.assertEqual(conversation, 'router-home')
+        self.assertIn('restart_bridge_refused', text)
+        self.assertIn('keeps', text)
+        [notice] = la.restart_notices(states=('delivered',))
+        self.assertEqual((notice['restartId'], notice['commandId']), (token, command_id))
+
     def test_forged_token_403(self):
         with patch('lib.tasks_pkg.manager.list_running_tasks',
                    return_value=[]), \

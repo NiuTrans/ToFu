@@ -172,8 +172,8 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
             f'{type(tool_history).__name__}')
 
     task = task if isinstance(task, dict) else {}
-    tid = str(task.get('id') or '')[:8]
-    conv_id_short = str(task.get('convId') or '')[:8]
+    tid = str(task.get('id') or '')
+    conv_id = str(task.get('convId') or '')
 
     # Per-provider capability gates — None→Python-bool so log output is clean.
     _wants_thinking_block = model_requires_thinking_signature_replay(model)
@@ -332,7 +332,7 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
                 logger.warning(
                     '[Task %s] conv=%s Replaying tool_call %s with sanitized '
                     'arguments (original was malformed JSON, %d chars)',
-                    tid, conv_id_short, tc.get('name', '?'),
+                    tid, conv_id, tc.get('name', '?'),
                     len(_args_str) if isinstance(_args_str, str) else 0)
                 _args_str = '{}'
             tc_entry = {
@@ -350,13 +350,13 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
                 logger.debug(
                     '[Task %s] conv=%s model=%s — dropping extraContent on '
                     'replayed tool_call (%s) since provider does not require it',
-                    tid, conv_id_short, model, tc.get('name', '?'),
+                    tid, conv_id, model, tc.get('name', '?'),
                 )
             elif extra and _wants_thought_sig:
                 logger.warning(
                     '[Task %s] conv=%s model=%s — dropping malformed '
                     'extraContent on replayed tool_call (%s)',
-                    tid, conv_id_short, model, tc.get('name', '?'))
+                    tid, conv_id, model, tc.get('name', '?'))
             if caller is not None:
                 tc_entry['caller'] = copy.deepcopy(dict(caller))
             built_tool_calls.append(tc_entry)
@@ -402,7 +402,7 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
             logger.debug(
                 '[Task %s] conv=%s model=%s — dropping %d chars of checkpoint '
                 'thinking on replay; provider does not accept thinking replay',
-                tid, conv_id_short, model, len(th_text),
+                tid, conv_id, model, len(th_text),
             )
         elif _wants_thinking_block and th_text and not th_sig:
             # Claude: text without signature can't be replayed — the API
@@ -412,7 +412,7 @@ def prepare_tool_history(cfg, task, model) -> PreparedContinueToolHistory:
                 '[Task %s] conv=%s model=%s — checkpoint has %d chars of '
                 'thinking but NO signature; not re-injecting (Claude would '
                 'reject without signature). This is a lossy continuation.',
-                tid, conv_id_short, model, len(th_text),
+                tid, conv_id, model, len(th_text),
             )
 
         injected_msgs.append(clean_assistant)
@@ -461,8 +461,8 @@ def inject_tool_history(
         '[Task %s] conv=%s Restored %d tool round(s) (%d tool calls) '
         'from continue context, inserted at position %d, model=%s, '
         'thinking_blocks=%d thought_sigs=%d',
-        str(task.get('id') or '')[:8],
-        str(task.get('convId') or '')[:8],
+        str(task.get('id') or ''),
+        str(task.get('convId') or ''),
         prepared.injected_rounds,
         prepared.injected_calls,
         insert_idx,

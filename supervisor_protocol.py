@@ -40,6 +40,7 @@ SUPERVISOR_SOURCE_FILES = (
     'server_manager.py',
     'serverctl_pkg/__init__.py',
     'serverctl_pkg/execution_service.py',
+    'serverctl_pkg/execution_plan.py',
     'serverctl_pkg/native_engine.py',
     'serverctl_pkg/native_storage_service.py',
     'serverctl_pkg/resident_service.py',

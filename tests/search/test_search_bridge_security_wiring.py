@@ -53,20 +53,17 @@ def test_allow_private_hosts_is_populated_from_env():
     assert set(kw['allow_private_hosts']) == {'your-llm-gateway.example.com', 'other.internal'}
 
 
-def test_empty_proxy_url_is_not_passed_so_env_survives():
-    """An explicit '' would SHADOW TOFU_SEARCH_PROXY_URL.
+def test_bridge_leaves_proxy_routing_to_the_library():
+    """sync_search_config never resolves a proxy itself (d2df4d2b70).
 
-    configure() applies its env default only to fields ABSENT from kwargs, so
-    passing '' means "no proxy" instead of "fall back to the environment".
+    HTTP and anonymous browser contexts resolve the host's route policy at call
+    time inside tofu-search, so no proxy_url/failover kwarg is pushed in;
+    configure()'s own environment defaults apply to absent fields.
     """
     import lib.search.search_bridge as sb
-    with mock.patch.object(sb, '_resolve_proxy_url', return_value=''):
+    with mock.patch.object(sb, '_resolve_proxy_url', return_value='http://p:8080'):
         kw = _sync_kwargs()
     assert 'proxy_url' not in kw
-
-    with mock.patch.object(sb, '_resolve_proxy_url', return_value='http://p:8080'):
-        kw2 = _sync_kwargs()
-    assert kw2['proxy_url'] == 'http://p:8080'
 
 
 def test_searxng_instances_only_overrides_when_asked():

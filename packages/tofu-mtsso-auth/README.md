@@ -27,7 +27,9 @@
 
 可选 `MTSSO_SESSION_SDK` 是已安装 `@datafe/llm-cli/dist/lib/auth.js` 的绝对路径；不配置时只查本地 CLI/已知安装目录，不在线安装。该上游模块拥有登录 client 的配置。本包不复制其默认 client secret。可选 `MTSSO_SESSION_TOKEN_FILE` 是已有登录会话的绝对路径；不配置时选 `~/.mlp-cli-token.json`，不存在才选 `~/.llm-cli-token.json`。显式文件不存在、不可读或身份不匹配时不换另一个文件。
 
-仅接收当前进程用户拥有的普通私有文件，拒绝符号链接、FIFO、大文件及组/其他用户可访问的票据文件。共享 SDK 的生产登录能力已核验，因此共享路径仅支持 `PROD`；`TEST` 必须使用配套的官方 Agent 配置，不能把生产会话换成测试票据。`MTSSO_NODE_EXECUTABLE` 可显式指定兼容 Node；上游官方 SDK 要求 Node 20+。
+仅接收当前进程用户拥有的普通私有文件，拒绝符号链接、FIFO、大文件及组/其他用户可访问的票据文件。共享 SDK 的生产登录能力已核验，因此共享路径仅支持 `PROD`；`TEST` 必须使用配套的官方 Agent 配置，不能把生产会话换成测试票据。`MTSSO_NODE_EXECUTABLE` 可显式指定兼容 Node；上游官方 SDK 要求 Node 20+（`@mtfe/mtsso-auth-official` 的 `engines.node`）。未显式指定时按 PATH 顺序选第一个能运行且满足该下限的 Node；所有探测共用五秒预算，每次探测可用剩余预算，所以负载下冷启动慢的前序 Node 不会被后面更旧的 Node 顶替。低于下限的 Node 不会被选用（`SSO_NODE_RUNTIME_INCOMPATIBLE`），预算内没有 Node 应答时报 `SSO_NODE_UNAVAILABLE`。两者都是运行环境问题，与登录无关。
+
+问题：大象启动器的 PATH 上依次有网络文件系统上的 Node 24 和系统 Node 12。主机负载高时，Node 24 回答 `--version` 超过原先每次探测 2 秒的上限，于是选中了 Node 12。Node 12 无法加载 ESM 桥，退出码 1 且没有输出，被报告成像登录态问题的 `SSO_EXCHANGE_FAILED`。决定：按官方 `engines` 设版本下限，并删除单次探测上限，由 PATH 顺序决定选择。否决：保留上限只加下限（负载下仍会间歇不可用）；探测失败后回退到任意可运行 Node（重现本问题）。
 
 所有共享访问用同一个私有源会话锁协调 MCP 进程，刷新和登录交给 SDK 写回其原会话文件，不在 MCP 之间复制 token。SDK 写入前要求源目录由当前用户拥有且不可被组/其他用户写入，并以独占 0600 文件预留上游固定 `.tmp` 路径，预留内记录本进程（pid、Linux 启动时间、主机名）。已有 scratch 文件只在它是无人使用的预留时回收：当前用户的单链接私有普通文件，且为空（旧版本的预留，或刚创建就被中断）或所记本机进程已不存在；所记进程仍在运行（例如启动器已退出、在自己会话里等待授权的登录）时报 `SSO_AUTH_REQUEST_PENDING`；其他已有文件一律拒绝，不跟随链接、不覆盖遗留内容。会话和 SDK 路径在操作前后重新核对，未经调用的 SDK 不能承接旧结果。进程内同一来源的并发调用合并；不同 audience 的缓存命中无需等待锁。交互式调用在锁上最多等待一次换票加一个授权窗口（`_TIMEOUT + _LOGIN_TIMEOUT`），状态探测只等待一次换票（`_TIMEOUT`），超时报 `pending`。外部 CLI 不遵守本包锁，源文件内容变化会导致本包丢弃旧缓存。
 

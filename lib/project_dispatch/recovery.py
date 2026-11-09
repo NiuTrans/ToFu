@@ -16,6 +16,7 @@ durable Stop withdrawal; legacy rows cannot be auto-promoted through a TTL fence
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 
@@ -31,6 +32,57 @@ logger = get_logger(__name__)
 def _stats():
     return dict(scanned=0, eligible=0, accepted=0, deferred=0, aborted=0,
                 skipped=0, failed=0)
+
+
+# Filters that only select another lane's pass; they say nothing about this one.
+_RECOVERY_FILTERS = frozenset({'other_scope', 'other_recipient', 'not_a_dependent'})
+
+
+def _recovery_skip_reason(assignment, repository, *, owner, project, recipient_id,
+                          coordinator_only, affected, clock) -> str:
+    """Why recovery leaves this assignment alone, or '' when it is eligible.
+
+    Evaluated in the original order, so the restart-paused read still runs only
+    for assignments that pass the cheaper checks.
+    """
+    request, grant = assignment['request'], assignment['grant']
+    if coordinator_only or request.get('profile', {}).get('mode') == 'coordinator':
+        return 'coordinator_profile'
+    if grant.get('lifecycleVersion') != 1:
+        return 'grant_without_durable_stop_lifecycle'
+    if request['projectPath'] != project or grant['owner'] != owner:
+        return 'other_scope'
+    if recipient_id is not None and request['recipientId'] != recipient_id:
+        return 'other_recipient'
+    if affected is not None and assignment['id'] not in affected:
+        return 'not_a_dependent'
+    if assignment['execution'] is not None and not repository.restart_paused(assignment):
+        return 'execution_not_restart_paused'
+    if grant['revoked']:
+        return 'grant_revoked'
+    deadline = request['budget'].get('deadline')
+    if deadline is not None and deadline <= clock():
+        return 'deadline_passed'
+    return ''
+
+
+def _log_recovery_skip(assignment, owner, reason: str) -> None:
+    """Leave a trace for every decision not to resume a lane that has run.
+
+    One counter used to hide all of these; a restart left four of five
+    interrupted lanes without an attempt and no line saying why. A
+    restart-paused lane whose authority ended is a warning; filters and
+    settled executions stay at debug so ordinary passes add no noise.
+    """
+    ran = assignment['execution'] is not None
+    if reason in _RECOVERY_FILTERS or reason == 'execution_not_restart_paused' or not ran:
+        level = logging.DEBUG
+    elif reason in {'grant_revoked', 'deadline_passed'}:
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    logger.log(level, '[ProjectDispatch] recovery left assignment=%s owner=%s unresumed: %s',
+               assignment.get('id'), owner, reason)
 
 
 def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coordinator_only=False,
@@ -83,14 +135,12 @@ def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coo
                                'assignment=%s', owner, assignment.get('id'), exc_info=True)
         try:
             request, grant = assignment['request'], assignment['grant']
-            if (coordinator_only or request.get('profile', {}).get('mode') == 'coordinator'
-                    or grant.get('lifecycleVersion') != 1 or request['projectPath'] != project or grant['owner'] != owner
-                    or recipient_id is not None and request['recipientId'] != recipient_id
-                    or affected is not None and assignment['id'] not in affected
-                    or assignment['execution'] is not None and not repository.restart_paused(assignment)
-                    or grant['revoked']
-                    or request['budget'].get('deadline') is not None and request['budget']['deadline'] <= clock()):
+            reason = _recovery_skip_reason(
+                assignment, repository, owner=owner, project=project, recipient_id=recipient_id,
+                coordinator_only=coordinator_only, affected=affected, clock=clock)
+            if reason:
                 stats['skipped'] += 1
+                _log_recovery_skip(assignment, owner, reason)
                 continue
             # Preserve observed STOP beyond the runtime watermark's TTL by
             # revoking this existing grant, never by granting new authority.
@@ -102,6 +152,8 @@ def recover_project_dispatch(owner: int, project: str, *, recipient_id=None, coo
                     or repository.stopped(assignment)):
                 repository.revoke(assignment['id'], expected_revision=grant['revision'])
                 stats['aborted'] += 1
+                logger.info('[ProjectDispatch] recovery withdrew assignment=%s owner=%s: '
+                            'a recorded Stop postdates its grant', assignment['id'], owner)
                 continue
             binding = repository.admission(assignment['id'])
             stats['eligible'] += 1
@@ -207,12 +259,19 @@ def revoke_conversation_dispatch(conversation_id, *, user_id, occurred_at=None,
     that loses its bounded CAS returns ``pending_revocation``. Settlement or
     startup recovery revokes an unstarted grant it would otherwise retry from
     the same watermark, and a repeated Stop revokes any referenced grant.
+
+    ``occurred_at`` is the human Stop's own time. A repeated Stop of an already
+    ended attempt passes its settlement time (0 when unknown): the watermark
+    never moves forward, so grants created after the original Stop keep their
+    authority, while the original withdrawal is still retired.
     """
     owner = require_user_id(user_id, context='project dispatch Stop')
 
     timestamp = time.time() if occurred_at is None else occurred_at
     from .repository import DispatchContention, record_stop
-    record_stop(owner, conversation_id, timestamp, client=stop_client)
+    # The stored watermark keeps the maximum Stop time; revoke against it so a
+    # terminal retry dated at settlement still retires the original withdrawal.
+    timestamp = record_stop(owner, conversation_id, timestamp, client=stop_client)
     outcome = {'revoked': 0, 'withdrawal': 'complete'}
     if conversations is None:
         from lib.conversations.repository import ConversationRepository

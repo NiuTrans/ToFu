@@ -69,7 +69,7 @@ class TestEgressStatus(unittest.TestCase):
         self.assertIn('preferred_server_route_mode', st)
 
     def test_preferred_proxy_metadata_is_credential_free_and_named(self):
-        from lib.subscription_routes import Route, manager as route_manager
+        from lib.network_routes import Route, manager as route_manager
         route_status = {
             'preferred': {'api.anthropic.com': 'pool:hk'},
             'routes': {

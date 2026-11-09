@@ -36,6 +36,7 @@ def test_round_usage_projection_is_storage_only_and_forward_compatible():
             '_wire_fp': wire_fp,
             '_wire_field_bytes': {'messages': 42000},
             '_wire_bytes': [10, 20, 30],
+            '_wire_context_lineage': {'version': 1, 'sources': [{'id': 'source'}]},
             '_future_public_field': 'keep-me',
         },
     }

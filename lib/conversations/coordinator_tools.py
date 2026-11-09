@@ -76,14 +76,50 @@ def _create(scope: dict, arguments: dict) -> dict:
                           'Use dispatch_project_assignment only for an already-authorized assignment.')}
 
 
+def _work_receipt(view: dict, decision: str, next_step: str) -> dict:
+    """What a review or cancel changed: identity, decision, revisions, delivery and next step.
+
+    The brief, granted tools and Worker transcript stay with get_project_assignment
+    and get_conversation; echoing that view cost thousands of tokens per call.
+    """
+    execution = view.get('execution') or {}
+    return {'assignment_id': view['assignmentId'], 'decision': decision,
+            'grant_revision': view['grantRevision'], 'revoked': view['revoked'],
+            'result_revision': (view.get('review') or {}).get('resultRevision', execution.get('resultRevision')),
+            'execution_status': execution.get('status'),
+            'checkpoint_sha': (view.get('publication') or {}).get('checkpointSha'),
+            'delivery': view.get('delivery'), 'canonical_delivery': view['canonicalDelivery'],
+            'next_step': next_step}
+
+
+def _review_receipt(view: dict) -> dict:
+    decision = view['review']['decision']
+    if decision != 'accept':
+        step = ('Repair with delegate_project_work and rework_of {assignmentId, grantRevision, '
+                'resultRevision} copied from this receipt. The review is immutable.')
+    elif view.get('publication'):
+        step = ('Publication is asynchronous: await_project_workers with wait_for=delivery and confirm '
+                'canonical_delivery before reporting completion.')
+    else:
+        step = ('Recorded as Coordinator judgment, not human acceptance. No code is published without '
+                'checkpoint_sha (the exact delivery.checkpointSha).')
+    return _work_receipt(view, decision, step)
+
+
 def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_context=None) -> str:
     """Handle explicit create/dispatch/read; all results preserve owner scope.
 
-    Reads and the replay-safe delegation re-read through dispatch contention
-    (``reread_on_contention``): a lost CAS or a torn snapshot never reaches the model.
+    Reads, replay-safe delegation and the write tools re-read through dispatch
+    contention (``reread_on_contention``): a lost CAS or a torn snapshot never
+    reaches the model. Review/cancel/finish/decision are idempotent commands:
+    replaying the same one is a no-op, a different one is still immutable, so
+    re-running the whole tool call after contention never double-applies it.
+    Each repeat re-validates live authority and takes the publication lock
+    fresh, so a contended call never holds the repo lock while it waits.
     """
     from lib.project_dispatch.admission import reread_on_contention
     from lib.storage.errors import StorageError
+    progress = None
     try:
         scope = _scope(task)
         if name in {'get_conversation_status', 'control_conversation'}:
@@ -104,23 +140,33 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
         elif name == 'review_project_work':
             from lib.project_dispatch.repository import ProjectDispatchRepository
             from lib.project_dispatch.service import ProjectDispatchService
-            result = ProjectDispatchService(ProjectDispatchRepository(scope['user_id'], scope['project_path'])).review_for_coordinator(task, scope, arguments)
+            result = _review_receipt(reread_on_contention(
+                task, lambda: ProjectDispatchService(
+                    ProjectDispatchRepository(scope['user_id'], scope['project_path'])
+                ).review_for_coordinator(task, scope, arguments),
+                label='coordinator review'))
         elif name == 'get_project_workers':
             from .coordinator_workers import get_workers
             result = reread_on_contention(task, lambda: get_workers(task, scope, arguments),
                                           label='coordinator worker page', effect_free=True)
         elif name in {'finish_project_request', 'cancel_project_work', 'request_user_decision'}:
             from lib.project_dispatch.repository import ProjectDispatchRepository
-            repository = ProjectDispatchRepository(scope['user_id'], scope['project_path'])
-            if name == 'finish_project_request':
-                from lib.project_dispatch.continuation import finish_request
-                result = finish_request(repository, task, arguments)
-            elif name == 'request_user_decision':
-                from lib.project_dispatch.continuation import request_decision
-                result = request_decision(repository, task, arguments)
-            else:
+
+            def command():
+                repository = ProjectDispatchRepository(scope['user_id'], scope['project_path'])
+                if name == 'finish_project_request':
+                    from lib.project_dispatch.continuation import finish_request
+                    return finish_request(repository, task, arguments)
+                if name == 'request_user_decision':
+                    from lib.project_dispatch.continuation import request_decision
+                    return request_decision(repository, task, arguments)
                 from lib.project_dispatch.service import ProjectDispatchService
-                result = ProjectDispatchService(repository).cancel_for_coordinator(task, scope, arguments)
+                return _work_receipt(
+                    ProjectDispatchService(repository).cancel_for_coordinator(task, scope, arguments),
+                    'cancelled', 'Grant withdrawn and live Worker attempts stopped; results and receipts '
+                    'are preserved. Cancel other unwanted work before finish_project_request.')
+
+            result = reread_on_contention(task, command, label='coordinator ' + name)
         elif name == 'report_to_user':
             from lib.conversations.coordinator_reports import CoordinatorReports
             result = CoordinatorReports(scope['user_id'], scope['project_path']).publish({
@@ -128,23 +174,20 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
                 'coordinatorId': scope['conversation_id'], 'bindingRevision': scope['binding_revision'],
             }, arguments)
         elif name == 'update_task_progress':
-            from lib.conversations.coordinator_progress import CoordinatorTaskProgress
-            from lib.conversations.coordinator_progress_translation import (
-                progress_translation_target, schedule_progress_translation)
+            from lib.conversations.coordinator_progress import progress_view, publish_task_board
+            from lib.tools.todo import render_todo_snapshot
             progress_scope = {
                 'owner': scope['user_id'], 'projectPath': scope['project_path'],
                 'coordinatorId': scope['conversation_id'], 'bindingRevision': scope['binding_revision'],
             }
-            target = progress_translation_target(task, progress_scope)
-            published = CoordinatorTaskProgress(scope['user_id'], scope['project_path']).publish(
-                progress_scope, arguments, translation_target=target)
-            if target is not None:
-                # Also for an unchanged board: it retries a translation that failed before.
-                schedule_progress_translation(scope['user_id'], scope['project_path'], progress_scope, target)
+            published, plan = publish_task_board(task, progress_scope, arguments)
+            # ``plan`` is the board as the checklist this task now holds; it is
+            # also the receipt that proves that checklist visible to the model.
             result = {'revision': published['board']['revision'], 'changed': published['changed'],
-                      'task_count': len(published['board']['tasks']),
-                      'next_step': 'Shown to the human above this chat. Send the complete board again '
-                                   'whenever a task starts, advances, finishes or is dropped.'}
+                      'task_count': len(published['board']['tasks']), 'plan': render_todo_snapshot(plan),
+                      'next_step': 'Shown to the human above this chat and kept as your checklist. Send the '
+                                   'complete board again whenever a task starts, advances, finishes or is dropped.'}
+            progress = progress_view(progress_scope, published['board'], plan)
         elif name in {'dispatch_project_assignment', 'get_project_assignment'}:
             from lib.identity import PrincipalContext
             from lib.project_dispatch.repository import ProjectDispatchRepository
@@ -180,10 +223,16 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
             result = execute_watchdog_tool(task, scope, name, arguments)
         else:
             raise ValueError('Unknown Coordinator tool')
-        return json.dumps(result, ensure_ascii=False)
+        text = json.dumps(result, ensure_ascii=False)
+        if progress is None:
+            return text
+        from lib.conversations.coordinator_progress import ProgressReceipt
+        return ProgressReceipt(text, progress)
     except (PermissionError, ValueError, KeyError, StorageError) as error:
         # A typed refusal states its own effect and recovery; generic errors stay uncertain.
         typed = {'code': error.code} if isinstance(getattr(error, 'code', None), str) else {}
+        if typed and isinstance(getattr(error, 'details', None), dict):
+            typed['details'] = error.details
         return json.dumps({'error': str(error), **typed,
                            'execution_started': getattr(error, 'execution_started',
                                None if name in {'dispatch_project_assignment', 'delegate_project_work', 'review_project_work',

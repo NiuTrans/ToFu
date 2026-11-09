@@ -4,6 +4,9 @@ use crate::vfs::{DeterministicVfs, FaultAction, Operation, Vfs};
 use std::{path::Path, sync::Arc};
 const CONVERSATION: &str = "context-frontier";
 fn append(db: &mut AuthorityDatabase, index: usize) {
+    append_projection(db, index, json!({"content":format!("content-{index}")}));
+}
+fn append_projection(db: &mut AuthorityDatabase, index: usize, projection: Value) {
     let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
     append_settled(
         db,
@@ -12,8 +15,7 @@ fn append(db: &mut AuthorityDatabase, index: usize) {
             conversation_id: CONVERSATION.into(),
             actor: "human".into(),
             status: "completed".into(),
-            projection_json: serde_json::to_vec(&json!({"content":format!("content-{index}")}))
-                .unwrap(),
+            projection_json: serde_json::to_vec(&projection).unwrap(),
             projection_timestamp: None,
             settlement_json: br#"{"outcome":"completed","cause":"ingested","resumeOptions":[]}"#
                 .to_vec(),
@@ -126,6 +128,48 @@ fn stored_certificate(db: &AuthorityDatabase) -> Option<frontier::Frontier> {
         .unwrap()
         .filter(|v| !v.is_empty())
         .map(|bytes| frontier::Frontier::decode(&key, &bytes).unwrap())
+}
+#[test]
+fn a_turn_above_one_projection_page_travels_as_its_page_zero_head() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    append(&mut db, 0);
+    let round = json!({"toolName": "read", "toolContent": "x".repeat(1 << 20)});
+    append_projection(&mut db, 1, json!({"content": "paged", "toolRounds": vec![round; 9]}));
+    append(&mut db, 2);
+    let read = context(&db, 2, false);
+    let mut tx = db.begin(7, 11).unwrap();
+    let page = super::super::projection_page::read(&db, &mut tx, CONVERSATION, "turn-1", None, 0)
+        .unwrap()
+        .unwrap();
+    let first: Value = serde_json::from_slice(&page).unwrap();
+    assert!(first["pageCount"].as_u64().unwrap() > 1);
+    assert_eq!(
+        read["turns"],
+        json!([turn(&db, 0), {"pagedTurn": first["turn"]}, turn(&db, 2)])
+    );
+    assert_eq!((read["nextTurnId"].clone(), read["proofEligible"].clone()), (Value::Null, json!(true)));
+    let small = turn(&db, 0);
+    assert_eq!(
+        super::super::projection_page::paged_head(small.clone()).unwrap(),
+        (small, false)
+    );
+}
+#[test]
+fn a_paged_row_names_its_turn_as_the_cursor_and_keeps_the_media_fence() {
+    let mut page = Page::new(CONVERSATION, "target", None, None, None);
+    page.turns.push(json!({"pagedTurn": {"turnId": "paged",
+        "projection": {"attachments": [{"id": "media"}]}}}));
+    page.full = true;
+    let response: Value = serde_json::from_slice(
+        &page
+            .respond(0, 1, "0".repeat(64), "replay_disabled", None)
+            .unwrap()
+            .into_bytes(),
+    )
+    .unwrap();
+    assert_eq!(response["nextTurnId"], "paged");
+    assert_eq!(response["proofEligible"], false);
 }
 #[test]
 fn authenticated_continuation_read_and_publication_work_stays_constant_as_history_grows() {

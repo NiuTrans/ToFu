@@ -19,6 +19,11 @@ import type { ProjectCoordinationPorts } from './project-coordination';
 import type { CoordinationBinding } from '../api/project-coordination.generated';
 import '../styles/application/33-project-coordination.css';
 
+/** One progress write as its round reports it: the board revision the Coordinator's write left. */
+export interface CoordinatorProgressObservation {
+  projectPath: string; conversationId: string; bindingRevision: number; revision: number;
+}
+
 /** Hub-with-satellites mark: the sidebar entry needed a recognizable identity,
  * not a bare text row that read as a stray label. */
 function coordinationMark(): SVGSVGElement {
@@ -47,6 +52,8 @@ export function createProjectCoordinationSurface(ports: {
   mode?: 'sidebar' | 'canvas';
   scope(): ProjectCoordinationPorts | null;
   sidebarPath(): string;
+  /** Sidebar: opens the selected folder's settings while that folder names no project directory; otherwise null. */
+  folderSetup?(): (() => void) | null;
   details(scope: ProjectCoordinationPorts): void;
   create(scope: ProjectCoordinationPorts, binding: CoordinationBinding): Promise<void> | void;
 
@@ -125,6 +132,25 @@ export function createProjectCoordinationSurface(ports: {
     row.append(mark, body);
     ports.sidebar.replaceChildren(row);
   }
+  /** The folder has no project to bind yet: its row says so and opens the settings where a directory is added. */
+  function paintSidebarSetup() {
+    const row = document.createElement('section');
+    row.className = 'coordination-leader';
+    row.dataset.coordinatorId = '';
+    const mark = document.createElement('span'); mark.className = 'coordination-leader-mark';
+    mark.setAttribute('aria-hidden', 'true'); mark.append(coordinationMark());
+    const body = document.createElement('span'); body.className = 'coordination-leader-body';
+    const label = document.createElement('span'); label.className = 'coordination-leader-label';
+    label.textContent = t('projectCoordination.coordinator');
+    const meta = document.createElement('span'); meta.className = 'coordination-leader-meta';
+    meta.textContent = t('projectCoordination.noDirectory');
+    body.append(label, meta);
+    const actions = document.createElement('span'); actions.className = 'coordination-leader-actions';
+    // Resolved on click: switching between two such folders keeps this row but changes its folder.
+    actions.append(createButton({ label: t('folder.settings.title'), size: 'sm', onClick: () => ports.folderSetup?.()?.() }));
+    row.append(mark, body, actions);
+    ports.sidebar.replaceChildren(row);
+  }
   function invalidate() { pending = true; void refresh(true); }
   // Recovery signals retry failed demand, never ordinary list renders or a timer.
   function recoverBinding() {
@@ -138,7 +164,8 @@ export function createProjectCoordinationSurface(ports: {
     if (!alive) return;
     if (createControl && ports.sidebar.contains(createControl.button)) showCreateAvailability(createControl);
     const scope = ports.scope();
-    const key = JSON.stringify([scope?.path, scope?.currentConversationId, ports.sidebarPath(), !!scope?.workerModel]);
+    const setup = ports.mode === 'sidebar' && !scope ? ports.folderSetup?.() ?? null : null;
+    const key = JSON.stringify([scope?.path, scope?.currentConversationId, ports.sidebarPath(), !!scope?.workerModel, !!setup]);
 
     if (!force && key === signature) return;
     let resumed: ProjectReads | undefined;
@@ -146,7 +173,7 @@ export function createProjectCoordinationSurface(ports: {
       /* Only a project/folder switch (or unmount) tears the surfaces down; a
        * conversation switch inside one project must leave the coordinator row
        * mounted so the sidebar does not jump. */
-      const projectKey = JSON.stringify([scope?.path, ports.sidebarPath()]);
+      const projectKey = JSON.stringify([scope?.path, ports.sidebarPath(), !!setup]);
       const projectChanged = projectKey !== projectSignature;
       projectSignature = projectKey;
       signature = key; generation++;
@@ -158,6 +185,7 @@ export function createProjectCoordinationSurface(ports: {
          * container here left the sidebar empty until the binding read
          * resolved, then the row pushed the conversation list down. */
         if (ports.mode !== 'canvas' && scope && norm(ports.sidebarPath()) === norm(scope.path)) paintSidebarPending(scope.path);
+        else if (setup) paintSidebarSetup();
         else ports.sidebar.replaceChildren();
         ports.canvas.replaceChildren(); finishedOpen = false; rendered = '';
         lastReport = undefined; acknowledgedTurnId = ''; settled = undefined;
@@ -419,7 +447,27 @@ export function createProjectCoordinationSurface(ports: {
     const read = settled?.reads[0];
     return read?.status === 'fulfilled' && read.value.availability === 'available' ? read.value.conversationId : '';
   };
-  return { refresh, coordinatorId, destroy() {
+  /* Newest board revision a progress round asked this surface to read, per binding. */
+  let observed = { binding: '', revision: 0 };
+  /** A progress round of the bound Coordinator reached the open conversation. Its
+   * stream carries writes from every process, while a project push reaches only
+   * the writer's own sockets (the execution host has none), so a newer board
+   * revision than the one shown re-reads the board in place. */
+  function observeProgress(progress: CoordinatorProgressObservation) {
+    const reads = settled?.reads;
+    if (!alive || !reads || reads[0].status !== 'fulfilled' || !Number.isInteger(progress?.revision)) return;
+    const binding = reads[0].value;
+    if (binding.availability !== 'available' || binding.conversationId !== progress.conversationId
+      || binding.revision !== progress.bindingRevision) return;
+    const key = `${binding.conversationId}:${binding.revision}`;
+    const state = reads[1].status === 'fulfilled' ? reads[1].value : null;
+    const shown = state?.conversationId === binding.conversationId && state.bindingRevision === binding.revision
+      ? state.board?.revision ?? 0 : 0;
+    if (progress.revision <= shown || (observed.binding === key && progress.revision <= observed.revision)) return;
+    observed = { binding: key, revision: progress.revision };
+    invalidate();
+  }
+  return { refresh, coordinatorId, observeProgress, destroy() {
     alive = false; generation++; flight?.abort(); flight = null; pending = false; unreadInView = null;
     dropBoardCard();
     window.removeEventListener('online', recoverBinding);

@@ -1040,6 +1040,51 @@ fn catalog_pressure_consolidates_small_segments_into_one() {
     }
 }
 
+/// A consolidation replaces its victims with one segment, so the plan admits
+/// a victim only while the retained union still fits the segment format.
+/// The search projection's posting segments hold tens of thousands of tiny
+/// blocks: on 2026-11-08 its collector planned two such victims, the build
+/// refused the union ("payload segment block count is outside its bounded
+/// range") and every following epoch failed the same way.
+#[test]
+fn pressured_consolidation_plans_only_unions_one_segment_can_hold() {
+    let (_vfs, database) = authority();
+    let per_segment = crate::payload_segment::MAX_SEGMENT_BLOCKS / 2 + 1;
+    let mut live = Vec::new();
+    {
+        let mut database_guard = database.lock().unwrap();
+        for segment in 0..2_usize {
+            let payloads: Vec<Vec<u8>> = (0..per_segment)
+                .map(|index| format!("union-bound-{segment}-{index}").into_bytes())
+                .collect();
+            let mut ids = Vec::with_capacity(per_segment + 1);
+            for chunk in payloads.chunks(1_000) {
+                ids.extend(database_guard.commit_block_payloads_for_test(chunk).unwrap());
+            }
+            ids.push(database_guard
+                .write_orphan_block_for_test(format!("union-bound-dead-{segment}").as_bytes())
+                .unwrap());
+            database_guard.compact_payload_blocks_for_test(&ids).unwrap();
+            live.extend(ids[..per_segment].iter().copied().zip(payloads));
+        }
+        assert_eq!(database_guard.payload_segment_count_for_test(), 2);
+    }
+    let mut collector = OnlineGarbageCollector::with_min_epoch_interval(
+        test_budget(),
+        Duration::from_millis(1),
+    );
+    collector.set_catalog_pressure_floor_for_test(1);
+    for _ in 0..3 {
+        run_epoch(&mut collector, &database);
+    }
+    let final_metrics = metrics(&collector);
+    assert_eq!((final_metrics.failed_epochs, final_metrics.epoch_error), (0, None));
+    let database_guard = database.lock().unwrap();
+    for (id, payload) in live.iter().step_by(997) {
+        assert_eq!(&database_guard.read_block_for_test(*id).unwrap(), payload);
+    }
+}
+
 /// Publishes a catalog of `count` one-block segments that all hold `payload`
 /// (mirrors engine_adoption_tests::build_full_catalog) and returns it.
 fn publish_one_block_segments(

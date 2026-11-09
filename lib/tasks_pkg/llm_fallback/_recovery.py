@@ -6,7 +6,7 @@ share the normal context owners; _state owns the per-task recovery budget."""
 from lib import llm
 from lib.agent_core.events import Phase, build_phase
 from lib.llm import AbortedError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
 from lib.tasks_pkg.manager import _events as task_events
 
@@ -212,7 +212,7 @@ def _attempt_request_payload_recovery(
     the reactive retry's actual exception, so downstream policy never
     misclassifies it as the original size failure.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     task_id = task.get('id', '')
     attempts = _state._reactive_compact_attempts.get(task_id, 0)
 
@@ -400,7 +400,7 @@ def recover_rejected_encrypted_state(
 
     if not isinstance(error, InvalidEncryptedContentError):
         return None, error, body
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     retired = retire_rejected_reasoning_state(messages)
     if not retired:
         return None, error, body

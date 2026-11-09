@@ -15,7 +15,7 @@ from lib.storage.client import StorageClient
 from lib.storage.deadline_policy import storage_write_deadline
 from lib.storage.errors import ERROR_CODES, StorageError
 from lib.storage.protocol import canonical_json
-from lib.storage.storage_event_policy import resolve_storage_event_budget
+from lib.agent_core.storage_event_policy import resolve_storage_event_budget
 from lib.log import get_logger
 from lib.storage.storage_metric_policy import bounded_storage_metric_sample_capacity
 from lib.storage.event_composition import EventBatchCompositionBudget

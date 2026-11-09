@@ -149,6 +149,13 @@ pub(crate) struct ActivityDatesRequest {
     pub limit: usize,
 }
 
+pub(crate) struct TurnUsageRequest {
+    pub conversation_id: String,
+    pub timestamp_gte: i64,
+    pub timestamp_lt: i64,
+    pub title_fallback_characters: usize,
+}
+
 pub(crate) struct TaskResultParentSnapshot {
     conversation_id: String,
     header: Map<String, Value>,
@@ -729,6 +736,125 @@ fn load_header(
         _ => return Err(invalid_data("conversation header is malformed")),
     };
     Ok(Some((header, physical_version)))
+}
+
+/// Settings that attribute usage to a model when its Turn names none.
+const TURN_USAGE_SETTINGS_FIELDS: [&str; 3] = ["model", "preset", "effort"];
+
+/// `conversation.turn_usage`: header fields plus the usage rows of one
+/// conversation's main-lane messages in a turn-time window (docs/STORAGE.md
+/// "Per-Turn usage projection"). No transcript content is returned.
+pub(crate) fn turn_usage(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &TurnUsageRequest,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<Vec<u8>>> {
+    let conversation_id = request.conversation_id.as_str();
+    let Some((header, _physical_version)) =
+        load_header(database, transaction, conversation_id)?
+    else {
+        return Ok(None);
+    };
+    let title = header
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("conversation header text field is malformed"))?;
+    let (Some(created_at), Some(updated_at)) = (
+        header.get("created_at").and_then(Value::as_u64),
+        header.get("updated_at").and_then(Value::as_u64),
+    ) else {
+        return Err(invalid_data("conversation header integer field is malformed"));
+    };
+    let settings = header
+        .get("settings")
+        .and_then(Value::as_object)
+        .filter(|_| header.get("id").and_then(Value::as_str) == Some(conversation_id))
+        .ok_or_else(|| invalid_data("conversation header identity is malformed"))?;
+    let attribution: Map<String, Value> = TURN_USAGE_SETTINGS_FIELDS
+        .iter()
+        .filter_map(|field| settings.get(*field).map(|value| ((*field).to_owned(), value.clone())))
+        .collect();
+    let window = (request.timestamp_gte, request.timestamp_lt);
+    let characters = if title.is_empty() {
+        request.title_fallback_characters
+    } else {
+        0
+    };
+    let (message_count, rows, title_fallback) = match crate::turn::usage_projection::main_lane(
+        database,
+        transaction,
+        conversation_id,
+        window,
+        characters,
+        deadline_elapsed,
+    )? {
+        Some(lane) => (lane.message_count, lane.rows, lane.title_fallback),
+        None => {
+            // A frozen pre-Turn archive keeps raw message timestamps; only a
+            // non-zero integer outside the window proves a row irrelevant.
+            let mut rows = Vec::new();
+            let mut title_fallback = String::new();
+            let count = crate::frozen_transcript::for_each_message(
+                database,
+                transaction,
+                conversation_id,
+                &mut |index, message| {
+                    let Value::Object(message) = message else {
+                        return Err(invalid_data("frozen transcript message is malformed"));
+                    };
+                    if index == 0 && characters != 0 {
+                        title_fallback =
+                            crate::turn::usage_projection::content_prefix(&message, characters);
+                    }
+                    let timestamp = message.get("timestamp").cloned();
+                    let integer = timestamp
+                        .as_ref()
+                        .and_then(|value| {
+                            value
+                                .as_i64()
+                                .map(i128::from)
+                                .or_else(|| value.as_u64().map(i128::from))
+                        })
+                        .filter(|time| *time != 0);
+                    if integer.is_some_and(|time| {
+                        !crate::turn::usage_projection::in_window(time, window)
+                    }) {
+                        return Ok(());
+                    }
+                    if let Some(row) = crate::turn::usage_projection::usage_row(
+                        &message,
+                        index as u64,
+                        timestamp,
+                    ) {
+                        rows.push(row);
+                    }
+                    Ok(())
+                },
+            )?;
+            (count.unwrap_or(0) as u64, rows, title_fallback)
+        }
+    };
+    let response = json!({
+        "metadata": {
+            "id": conversation_id,
+            "title": title,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "settings": attribution,
+        },
+        "message_count": message_count,
+        "title_fallback": title_fallback,
+        "turns": rows,
+    });
+    let encoded = serde_json::to_vec(&response)
+        .map_err(|_| invalid_data("conversation usage cannot be encoded"))?;
+    if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
+        return Err(crate::resource_exhaustion::domain_bound(
+            "conversation usage exceeds its bounded streamed payload",
+        ));
+    }
+    Ok(Some(encoded))
 }
 
 pub(crate) fn require_active(

@@ -14,6 +14,7 @@ _FETCH_FAILURE_NOTES = {
     'bad_url': 'The URL has no valid host.',
     'ssrf_blocked': 'The URL was refused by the network-address policy.',
     'skip_domain': 'This domain is excluded by the configured fetch policy.',
+    'fetch_skip': 'The fetcher skips this site because its pages yield no useful text; it is not a source ban.',
     'binary_media': 'The URL points to binary media rather than readable text.',
     'circuit_open': 'The source is temporarily paused after repeated failures.',
     'guard_error': 'The URL could not be admitted by the fetch guard.',

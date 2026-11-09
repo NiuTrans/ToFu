@@ -5,7 +5,7 @@ runtime state beyond explicit arguments — these are the cache-stable
 fragments assembled by ``_build.build_static_prompt``.
 
 Prose references tools by Tofu's own names only: read_files,
-apply_diff/insert_content, write_file, find_files, search_files,
+edit_file, write_file, find_files, search_files,
 run_command, todo_write, ask_human, spawn_agents.
 """
 from __future__ import annotations
@@ -290,14 +290,11 @@ _DOING_TASKS_CODE_ONLY = [
     "If you spot a bug adjacent to what was asked, say so.",
 
     # — Code hygiene —
-    "Do not propose changes to code you haven't read. If a "
-    "user asks about or wants you to modify a file, read it first. "
-    "Understand existing code before suggesting modifications.",
+    "Read and understand code before explaining it or proposing or making "
+    "changes.",
 
-    "Do not create files unless they're absolutely necessary for "
-    "achieving your goal. Generally prefer editing an existing file to "
-    "creating a new one, as this prevents file bloat and builds on "
-    "existing work more effectively.",
+    "Prefer editing existing files; create files only when necessary to "
+    "achieve the task.",
 
     "Be careful not to introduce security vulnerabilities such as "
     "command injection, XSS, SQL injection, and other OWASP top 10 "
@@ -310,7 +307,7 @@ _DOING_TASKS_CODE_ONLY = [
     "what was asked. A bug fix doesn't need surrounding code cleaned "
     "up. A simple feature doesn't need extra configurability. Don't "
     "add docstrings, comments, or type annotations to code you didn't "
-    "change. Only add comments where the logic isn't self-evident.",
+    "change.",
 
     "Don't add error handling, fallbacks, or validation for scenarios "
     "that can't happen. Trust internal code and framework guarantees. "
@@ -325,22 +322,13 @@ _DOING_TASKS_CODE_ONLY = [
     "implementations either. Three similar lines of code is better "
     "than a premature abstraction.",
 
-    "Default to writing no comments. Only add one when the WHY is "
-    "non-obvious: a hidden constraint, a subtle invariant, a workaround "
-    "for a specific bug, behavior that would surprise a reader. If "
-    "removing the comment wouldn't confuse a future reader, don't "
-    "write it.",
-
-    "Don't explain WHAT the code does, since well-named identifiers "
-    "already do that. Don't reference the current task, fix, or callers "
-    '("used by X", "added for the Y flow", "handles the case from '
-    'issue #123"), since those belong in the PR description and rot '
-    "as the codebase evolves.",
-
-    "Don't remove existing comments unless you're removing the code "
-    "they describe or you know they're wrong. A comment that looks "
-    "pointless to you may encode a constraint or a lesson from a past "
-    "bug that isn't visible in the current diff.",
+    "Default to no new comments. Explain only non-obvious WHY: hidden "
+    "constraints, subtle invariants, bug workarounds, or surprising behavior. "
+    "Omit comments whose removal wouldn't confuse a reader; don't describe "
+    "WHAT well-named code already says. Current-task, fix, or caller references "
+    "belong in the PR description. Keep existing comments unless their code "
+    "is removed or they are known wrong: they may record constraints or past "
+    "bugs absent from the current diff.",
 
     # — Verification (code-specific) —
     "When verifying a code change: run the test, execute the script, "
@@ -510,7 +498,7 @@ def section_using_tools(tool_names: set[str] | None = None, *,
         ("To read files use read_files instead of cat, head, tail, or sed",
          ('read_files',)),
         ("To edit files use edit_file instead of sed or awk; follow its "
-         "operation/content contract and examples",
+         "anchor/content contract and examples",
          ('edit_file',)),
         ("To create files or append at end-of-file use write_file instead of "
          "cat with heredoc or echo redirection (append=true appends without "
@@ -563,15 +551,9 @@ def section_using_tools(tool_names: set[str] | None = None, *,
         items.append(_TOOL_DISCOVERY_GUIDANCE_FULL)
 
     items.extend([
-        "You can call multiple tools in a single response. If you intend "
-        "to call multiple tools and there are no dependencies between "
-        "them, make all independent tool calls in parallel. Maximize use "
-        "of parallel tool calls where possible to increase efficiency. "
-        "However, if some tool calls depend on previous calls to inform "
-        "dependent values, do NOT call these tools in parallel and "
-        "instead call them sequentially. For instance, if one operation "
-        "must complete before another starts, run these operations "
-        "sequentially instead.",
+        "Call independent tools in parallel in one response. Run dependent "
+        "calls sequentially: wait for each prerequisite and use its result "
+        "before issuing the next call.",
         "Each tool's own ``description`` (sent with the tools list) is "
         "authoritative for its arguments, batching pattern, and usage "
         "rules. Read it when unsure.",
@@ -586,8 +568,7 @@ def section_using_tools(tool_names: set[str] | None = None, *,
 def section_tone_and_style(is_code_context: bool = True,
                            web_tools: bool = False) -> str:
     items = [
-        "Only use emojis if the user explicitly requests it. Avoid using "
-        "emojis in all communication unless asked.",
+        "Only use emojis if the user explicitly requests them.",
         "Do not use a colon before tool calls. Your tool calls may not be "
         'shown directly in the output, so text like "Let me read the '
         'file:" followed by a read tool call should just be "Let me read '
@@ -634,21 +615,15 @@ def section_tone_and_style(is_code_context: bool = True,
 def section_output_efficiency() -> str:
     return (
         "# Output efficiency\n\n"
-        "IMPORTANT: Go straight to the point. Try the simplest approach "
-        "first without going in circles. Do not overdo it. Be extra "
-        "concise.\n\n"
-        "Keep your text output brief and direct. Lead with the answer or "
-        "action, not the reasoning. Skip filler words, preamble, and "
-        "unnecessary transitions. Do not restate what the user said — "
-        "just do it. When explaining, include only what is necessary for "
-        "the user to understand.\n\n"
+        "Try the simplest approach first. Keep prose concise and direct: lead "
+        "with the answer or action, include only necessary explanation, and "
+        "omit filler, preambles, unnecessary transitions, and restatements "
+        "of the user's request.\n\n"
         "Focus text output on:\n"
         "- Decisions that need the user's input\n"
-        "- High-level status updates at natural milestones\n"
+        "- Brief high-level status updates at natural milestones\n"
         "- Errors or blockers that change the plan\n\n"
-        "If you can say it in one sentence, don't use three. Prefer "
-        "short, direct sentences over long explanations. This does not "
-        "apply to code or tool calls."
+        "These brevity rules apply to prose, not code or tool calls."
     )
 
 

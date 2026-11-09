@@ -139,6 +139,25 @@ def test_continuation_preserves_messages_tools_and_fold_across_pages(
     assert not scan.index.baselines and not scan.index.tools_by_hash
 
 
+@pytest.mark.parametrize('capped', [False, True])
+def test_selected_late_round_rebuilds_wire_sources_from_unselected_rounds(source, capped):
+    projector = SnapshotProjector()
+    rows = []
+    sources = []
+    for number in range(1, 4):
+        sources = sources + [{'id': f'source-{number}', 'spanHash': 'a' * 64}]
+        trace = {'version': 1, 'stage': 'chat_projection', 'sources': sources}
+        for payload in (snapshot(number), {
+                'type': 'tool_wire_projection', 'kind': 'request',
+                'roundNum': number, 'turn': '', 'traceId': f'trace-{number}',
+                'contextLineage': trace}):
+            rows.append(projector.project('sources', payload))
+    source(rows, capped=capped)
+    result = ri.get_request_payload('sources', 3)
+    assert result['wireProjection']['contextLineage']['sources'] == sources
+    assert not result['wireProjection']['contextLineage'].get('degraded')
+
+
 def test_v2_request_state_dependency_and_missing_baseline_remain_honest(source):
     tools = [{"name": "tool"}]
     full = snapshot(1, tools=tools, toolsHash=content_hash(tools))

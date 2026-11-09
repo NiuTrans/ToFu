@@ -1,6 +1,9 @@
 """Conversation transcript and revision-CAS operations."""
 
 from lib.storage_authority_sql import operations as ops
+from lib.storage_authority_sql.operations_pkg._conversation_usage import (
+    _conversation_turn_usage,
+)
 
 
 OPERATIONS = {
@@ -12,6 +15,8 @@ OPERATIONS = {
         'query', False, ops._conversation_list),
     'conversation.activity_dates': ops.OperationSpec(
         'query', False, ops._conversation_activity_dates),
+    'conversation.turn_usage': ops.OperationSpec(
+        'query', False, _conversation_turn_usage),
     'conversation.count': ops.OperationSpec(
         'query', False, ops._conversation_count),
     'conversation.search': ops.OperationSpec(

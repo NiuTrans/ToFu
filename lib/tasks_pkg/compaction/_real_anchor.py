@@ -68,7 +68,7 @@ def real_prompt_anchor(conv_id: str, task: dict | None = None) -> tuple[int, str
             return int(entry.prompt_tokens), 'usage_cache'
     except Exception as e:
         logger.debug('[RealAnchor] usage_cache lookup failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
 
     # 2. Durable per-turn final cache read (survives restarts).
     try:
@@ -81,7 +81,7 @@ def real_prompt_anchor(conv_id: str, task: dict | None = None) -> tuple[int, str
             return int(durable), 'durable:lastTurnCacheRead'
     except Exception as e:
         logger.debug('[RealAnchor] durable read failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
 
     return 0, 'none'
 

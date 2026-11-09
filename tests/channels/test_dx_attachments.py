@@ -36,6 +36,7 @@ class Bridge:
         self.uploads: list[dict] = []
         self.history: list[dict] = []
         self.results: dict[str, object] = {}  # file name or text -> response or exception
+        self.history_failure: dict | None = None  # the engine's answer to every history read while set
         self.mid = 7400000000000000100
 
     def _next(self):
@@ -64,6 +65,8 @@ class Bridge:
                 raise scripted
             return scripted or {'ok': True, 'result': {'serverMsgId': mid, 'msgUuid': f'uu-{mid}'}}
         if op == 'history':
+            if self.history_failure:
+                return self.history_failure
             return {'ok': True, 'result': {'messages': [] if args.get('cursor') else list(self.history),
                                            'nextCursor': '-1'}}
         raise AssertionError(op)
@@ -212,12 +215,45 @@ def test_a_conversation_without_a_workspace_has_nothing_to_attach(workspace):
     assert refused.value.code == 'attachment_outside_workspace'
 
 
-def test_github_threads_take_no_attachments(store, github_enabled, workspace):
+def test_a_platform_without_files_gets_each_one_named_in_the_text_instead(store, github_enabled, workspace):
+    """Channel protocol P5: degraded, never refused or dropped. The item carries only text, the note is in
+    it from the start (a draft shows it), and its records keep the request's idempotency."""
+    from lib.channels import attachments
     github_enabled()
-    with pytest.raises(ChannelError) as refused:
+    files = attachments.from_tool(task_for(workspace), OWNER, ROUTER,
+                                  [{'path': 'out/chart.png'}, {'path': 'out/notes.md'}], carried=False)
+    item = outbox.enqueue(OWNER, 'github:octo/repo#1', 'see file', idempotency_key='g', origin=ORIGIN,
+                          attachments=files, store=store)
+    assert 'attachments' not in item.extra and item.view()['attachments'] == []
+    assert [record['name'] for record in item.extra['degradedAttachments']] == ['chart.png', 'notes.md']
+    assert item.text == ('[Tofu 代发] see file\n\n（未附上 chart.png：GitHub 不支持发送文件。）\n'
+                         '（未附上 notes.md：GitHub 不支持发送文件。）')
+    again = outbox.enqueue(OWNER, 'github:octo/repo#1', 'see file', idempotency_key='g', origin=ORIGIN,
+                           attachments=files, store=store)
+    assert again.id == item.id
+    with pytest.raises(ChannelError) as conflict:
         outbox.enqueue(OWNER, 'github:octo/repo#1', 'see file', idempotency_key='g', origin=ORIGIN,
-                       attachments=admitted(workspace, 'out/chart.png'), store=store)
-    assert refused.value.code == 'attachments_unsupported'
+                       attachments=files[:1], store=store)
+    assert conflict.value.code == 'idempotency_conflict'
+
+
+def test_the_send_tool_names_files_a_platform_cannot_carry_without_its_upload_limits(
+        channel, github_enabled, workspace):
+    """An undocumented 大象 type is only named on GitHub, never refused; it still has to be this
+    conversation's file, and an artifact keeps its delivery URL in the note."""
+    from lib.channels import tools
+    github_enabled()
+    result = tools.execute('channel_send', {'thread': 'github:octo/repo#1', 'text': 'notes', 'idempotency_key': 'k',
+                                            'attachments': [{'path': 'out/notes.md'}]}, task_for(workspace))
+    assert '（未附上 notes.md：GitHub 不支持发送文件。）' in result['item']['text']
+    assert result['item']['attachments'] == [] and 'previews' not in result
+    answer = json.loads(tools.execute_json(
+        'channel_send', {'thread': 'github:octo/repo#1', 'text': 'x', 'idempotency_key': 'k2',
+                         'attachments': [{'path': '../../etc/passwd'}]}, task_for(workspace)))
+    assert answer['code'] == 'attachment_path_invalid'
+    from lib.channels.attachments import degraded_note
+    note = degraded_note({'name': 'r.pdf', 'source': {'artifact': 'a1', 'store': 'file'}}, 'GitHub')
+    assert note == '（未附上 r.pdf：GitHub 不支持发送文件；在 Tofu 中打开：/api/artifacts/a1/download。）'
 
 
 # ── delivery: native messages, order, confirmation ───────────────────────────
@@ -331,6 +367,132 @@ def test_an_unknown_upload_absent_from_history_is_sent_again_with_the_same_marke
     assert {u['marker'] for u in bridge.uploads} == {f'{item.id}/0'}  # the text is not repeated
 
 
+def test_a_failed_history_read_proves_nothing_and_holds_only_the_uploads_thread(channel, workspace):
+    """Only a complete read settles an unknown upload (docs/CHANNEL_PROTOCOL.md P4): while the thread's
+    history fails, the file is neither sent again nor settled, and a thread the executor visits after it
+    still sends in the same pass (C5)."""
+    other = 'dx:uid:2002'
+    channel.update_thread(ThreadKey.parse(other), lambda value: {**value, 'replyPolicy': 'auto'})
+    bridge = Bridge()
+    bridge.results['report.pdf'] = TimeoutError('ack timeout')
+    item = enqueue(channel, workspace, 'out/report.pdf')
+    adapter = make_adapter(channel, bridge)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert stored(channel, item).state == 'unknown'
+    bridge.results.pop('report.pdf')
+    bridge.history_failure = {'ok': False, 'error': {'code': 'browserless_runtime_error',
+                                                     'message': 'This operation was aborted'}}
+    independent = outbox.enqueue(OWNER, other, 'independent', idempotency_key='other', origin=ORIGIN,
+                                 store=channel)
+    assert [queued.thread for queued in channel.active_outbox(channel='dx')] == [COMMAND, other]
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert stored(channel, independent).state == 'sent'
+    assert stored(channel, item).state == 'unknown'
+    assert bridge.sends == [('text', '见附件'), ('file', 'report.pdf'), ('text', '[Tofu 代发] independent')]
+    # The file had reached the thread: the first complete read settles it, and it never goes twice.
+    bridge.history_failure = None
+    bridge.show()
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert stored(channel, item).state == 'sent'
+    assert [send for send in bridge.sends if send[0] == 'file'] == [('file', 'report.pdf')]
+
+
+# The engine's answer to every history read once the bridge's launch-time SSO ticket had expired
+# (production, 2026-11-09 from 06:14): the session still sent, but nothing could read the thread.
+TOKEN_REFUSAL = {'ok': False, 'error': {'code': 'browserless_runtime_error',
+                                        'message': 'DX IM token generation failed: rescode=92002'}}
+
+
+def _faults(monkeypatch):
+    faults = []
+    monkeypatch.setattr('lib.router.watchdog.signals.report_outbox_fault',
+                        lambda owner, item: faults.append((item.id, item.state, item.error)))
+    return faults
+
+
+def test_an_unreadable_history_holds_no_later_item_of_the_files_thread_or_another(channel, workspace):
+    """2026-11-09: the text went out with its message ID, 大象 accepted the PDF, and every history read
+    failed. The outbox then running raised out of each pass at that item, so the two items queued behind
+    it in the command chat and every thread after it were never sent. Parts that only await confirmation
+    never block (C5), and a read that fails holds nothing (P4): the same pass sends all three."""
+    other = 'dx:uid:2002'
+    channel.update_thread(ThreadKey.parse(other), lambda value: {**value, 'replyPolicy': 'auto'})
+    bridge = Bridge()
+    bridge.history_failure = TOKEN_REFUSAL
+    item = enqueue(channel, workspace, 'out/report.pdf')
+    adapter = make_adapter(channel, bridge)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert (stored(channel, item).state, stored(channel, item).error) == ('unknown', 'awaiting_confirmation')
+    behind = [outbox.enqueue(OWNER, COMMAND, text, idempotency_key=text, origin=ORIGIN, store=channel)
+              for text in ('论文还要不要坚持新方法？', '结果不明时怎么办？')]
+    independent = outbox.enqueue(OWNER, other, 'independent', idempotency_key='other', origin=ORIGIN,
+                                 store=channel)
+    assert [queued.thread for queued in channel.active_outbox(channel='dx')] == [COMMAND] * 3 + [other]
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert [stored(channel, queued).state for queued in (*behind, independent)] == ['sent'] * 3
+    assert stored(channel, item).state == 'unknown'
+    assert [send for send in bridge.sends if send[0] == 'file'] == [('file', 'report.pdf')]
+
+
+def test_an_accepted_file_whose_history_stays_unreadable_is_held_with_a_typed_reason(channel, workspace,
+                                                                                     monkeypatch):
+    """The 2026-11-09 shape (text sent with its message ID, the file accepted and pending, the item
+    unknown) sat silently awaiting_confirmation for good. An unreadable history is no evidence (P4),
+    but the next pass is C10's confirmation point: from then on the item is held with the typed reason
+    history_failed and reported once (R7), the file is never sent again, and the first readable history
+    settles it."""
+    faults = _faults(monkeypatch)
+    bridge = Bridge()
+    bridge.history_failure = TOKEN_REFUSAL
+    item = enqueue(channel, workspace, 'out/report.pdf')
+    adapter = make_adapter(channel, bridge)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    shape = stored(channel, item)
+    assert (shape.state, shape.error) == ('unknown', 'awaiting_confirmation')
+    assert shape.extra['textPart']['state'] == 'sent' and shape.external_id == shape.extra['textPart']['externalId']
+    assert {'state': 'pending', 'acked': True}.items() <= shape.extra['attachments'][0].items()
+    assert faults == []
+    for _ in range(3):
+        outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    held = stored(channel, item)
+    assert (held.state, held.error) == ('unknown', 'history_failed')
+    assert {'state': 'pending', 'error': 'history_failed'}.items() <= held.view()['attachments'][0].items()
+    assert faults == [(item.id, 'unknown', 'history_failed')]
+    bridge.history_failure = None
+    bridge.show()
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    done = stored(channel, item)
+    assert (done.state, done.error) == ('sent', None)
+    assert {'state': 'sent', 'error': None}.items() <= done.view()['attachments'][0].items()
+    assert bridge.sends == [('text', '见附件'), ('file', 'report.pdf')]
+
+
+def test_an_accepted_file_the_readable_history_cannot_place_needs_the_owner(channel, workspace, monkeypatch):
+    """A history that answers but shows neither the accepted file nor any later message proves nothing
+    either way (C10). From the next pass the item needs the owner's confirmation, is reported once (R7)
+    and is never sent again. The reconciler keeps reading, so the first later message settles the file:
+    here absent, so it is failed (not_delivered), which a new send may retry."""
+    faults = _faults(monkeypatch)
+    bridge = Bridge()
+    item = enqueue(channel, workspace, 'out/report.pdf')
+    adapter = make_adapter(channel, bridge)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert (stored(channel, item).state, stored(channel, item).error) == ('unknown', 'awaiting_confirmation')
+    for _ in range(3):
+        outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    held = stored(channel, item)
+    assert (held.state, held.error) == ('unknown', 'needs_owner_confirmation')
+    assert {'state': 'pending', 'error': 'needs_owner_confirmation'}.items() <= held.view()['attachments'][0].items()
+    assert faults == [(item.id, 'unknown', 'needs_owner_confirmation')]
+    bridge.history.append(row('', 'later text', mid=str(bridge.mid + 50), sender='2002'))
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    failed = stored(channel, item)
+    assert (failed.state, failed.error) == ('failed', 'attachment_failed')
+    assert {'state': 'failed', 'error': 'not_delivered'}.items() <= failed.view()['attachments'][0].items()
+    assert faults[-1] == (item.id, 'failed', 'attachment_failed')
+    assert bridge.sends == [('text', '见附件'), ('file', 'report.pdf')]
+
+
 def test_resume_after_a_crash_sends_only_the_parts_not_yet_sent(channel, workspace):
     bridge = Bridge()
     item = enqueue(channel, workspace, 'out/chart.png', 'out/report.pdf')
@@ -378,6 +540,27 @@ def test_an_echo_during_a_resumed_attempt_is_not_lost(channel, workspace, monkey
     states = [a['state'] for a in stored(channel, item).view()['attachments']]
     assert states == ['sent', 'pending']  # the confirmation survives the resumed attempt's plan
     assert bridge.sends.count(('image', 'chart.png')) == 1
+
+
+def test_a_deferred_upload_queues_the_item_again_and_sends_that_file_next_without_a_lookup(channel, workspace):
+    """A deferral (channel protocol P4) is no attempt: the part stays unsent, the item is queued again,
+    and the next pass sends the file before any history read."""
+    bridge = Bridge()
+    bridge.results['chart.png'] = {'ok': False, 'error': {'code': 'rate_limited', 'message': 'slow down'}}
+    item = enqueue(channel, workspace, 'out/chart.png')
+    adapter = make_adapter(channel, bridge)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    waiting = stored(channel, item)
+    assert (waiting.state, waiting.error) == ('queued', 'rate_limited')
+    assert waiting.extra['textPart']['state'] == 'sent'
+    part = waiting.extra['attachments'][0]
+    assert part['state'] == 'pending' and not part.get('attempted') and not part.get('acked')
+    del bridge.results['chart.png']
+    ops, request = [], bridge.request
+    bridge.request = lambda op, **args: ops.append(op) or request(op, **args)
+    outbox.execute(OWNER, adapter, channel='dx', store=channel)
+    assert ops[0] == 'send_image'
+    assert bridge.sends == [('text', '见附件'), ('image', 'chart.png'), ('image', 'chart.png')]
 
 
 def test_a_definite_upload_refusal_fails_that_file_only(channel, workspace):
@@ -586,9 +769,70 @@ def test_a_final_answer_attaches_the_slide_deck_it_links(channel, workspace, sli
     slides_jobs('deck1', ROUTER)
     slides_jobs('theirs', 'conv-elsewhere')
     content = '做好了：[季度复盘](/api/v4/slides/deck1/file)，另见 [别人的](/api/v4/slides/theirs/file)'
-    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'content': content})
+    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'finishReason': 'stop', 'content': content})
     reply, _ = channel.active_outbox(COMMAND)
     assert [a['name'] for a in reply.view()['attachments']] == ['季度复盘.pptx'] and reply.text == content
+
+
+@pytest.fixture
+def projects(monkeypatch, tmp_path):
+    """The owner's registered projects (get_recent_projects): one real root, and one registered through a link."""
+    root = tmp_path / 'projects' / 'deck-lane'
+    (root / 'out').mkdir(parents=True)
+    (root / 'out' / 'report.pdf').write_bytes(b'%PDF-1.7 project report')
+    linked = tmp_path / 'projects-link'
+    linked.symlink_to(tmp_path / 'projects')
+    registered = [str(root), str(linked / 'deck-lane')]
+    monkeypatch.setattr('lib.project_mod.config.get_recent_projects',
+                        lambda *, user_id: [{'path': path} for path in registered] if user_id == OWNER else [])
+    return root, linked / 'deck-lane'
+
+
+def test_a_registered_projects_file_is_attached_with_the_project_as_provenance(channel, workspace, projects):
+    """Channel protocol P13: how a project's deliverable reaches a chat, through the Global Router."""
+    from lib.channels import tools
+    root, _ = projects
+    result = tools.execute('channel_send', {
+        'thread': COMMAND, 'text': '报告', 'idempotency_key': 'p1',
+        'attachments': [{'path': 'out/report.pdf', 'project': str(root)},
+                        {'path': str(root / 'out' / 'report.pdf'), 'project': str(root) + '/'}]}, task_for(workspace))
+    [attachment] = result['item']['attachments']
+    assert (attachment['name'], attachment['project']) == ('report.pdf', str(root))
+    bridge = Bridge()
+    outbox.execute(OWNER, make_adapter(channel, bridge), channel='dx', store=channel)
+    assert bridge.sends == [('text', '报告'), ('file', 'report.pdf')]
+    assert bridge.uploads[0]['data'] == b'%PDF-1.7 project report'
+
+
+def test_a_project_registered_through_a_link_resolves_once_and_stays_no_follow_inside(workspace, projects):
+    from lib.channels import attachments
+    root, linked = projects
+    [record] = attachments.from_tool(task_for(workspace), OWNER, ROUTER,
+                                     [{'path': str(linked / 'out' / 'report.pdf'), 'project': str(linked)}])
+    assert record['source'] == {'path': str(root / 'out' / 'report.pdf'), 'roots': [str(root)],
+                                'project': str(linked)}
+    (root / 'out' / 'escape.pdf').symlink_to(workspace / 'out' / 'report.pdf')
+    with pytest.raises(ChannelError) as refused:
+        attachments.from_tool(task_for(workspace), OWNER, ROUTER,
+                              [{'path': 'out/escape.pdf', 'project': str(root)}])
+    assert refused.value.code == 'attachment_symlink'
+
+
+@pytest.mark.parametrize('entry, code', [
+    ({'path': 'out/report.pdf', 'project': '/srv/not-registered'}, 'attachment_project_unknown'),
+    ({'path': 'out/missing.pdf', 'project': None}, 'invalid_attachments'),
+    ({'path': '/etc/hosts.txt'}, 'attachment_outside_workspace'),
+    ({'path': 'out/report.pdf', 'project': 'deck-lane', 'extra': 1}, 'invalid_attachments'),
+])
+def test_every_send_tool_attachment_refusal_names_the_supported_path(channel, workspace, projects, entry, code):
+    """On 2026-11-08 a refusal that named no supported path sent a Worker looking for a second login."""
+    from lib.channels import tools
+    answer = json.loads(tools.execute_json('channel_send', {
+        'thread': COMMAND, 'text': 'x', 'idempotency_key': 'k', 'attachments': [entry]}, task_for(workspace)))
+    assert (answer['executed'], answer['code']) == (False, code)
+    assert '"project"' in answer['error'] and 'get_router_projects' in answer['error']
+    assert 'asks it to send; nothing sends through a platform login of its own' in answer['error']
+    assert channel.active_outbox(COMMAND) == []
 
 
 def test_the_send_tool_returns_refusals_as_actionable_results(channel, workspace):
@@ -628,7 +872,7 @@ def test_a_final_answer_attaches_only_the_workspace_files_it_links(channel, work
         '`[inline](out/report.pdf)`',
         '```', '[fenced](out/report.pdf)', '```',
     ])
-    task = {**task_for(workspace), 'status': 'done', 'content': answer}
+    task = {**task_for(workspace), 'status': 'done', 'finishReason': 'stop', 'content': answer}
     autoreply.on_task_terminal(task)
     reply, status = channel.active_outbox(COMMAND)
     assert reply.origin['kind'] == 'router_reply' and status.origin['kind'] == 'router_status'
@@ -647,14 +891,14 @@ def test_a_final_answer_never_decodes_artifacts_it_links(channel, workspace, rep
     monkeypatch.setattr('lib.response_assets.load_asset',
                         lambda *args, **kwargs: pytest.fail('artifact read on the terminal seam'))
     content = '报告 [pdf](/api/artifacts/a1/download) 与 ![图](/api/response-assets/a2) 以及 [文件](out/report.pdf)'
-    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'content': content})
+    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'finishReason': 'stop', 'content': content})
     reply, _ = channel.active_outbox(COMMAND)
     assert [a['name'] for a in reply.view()['attachments']] == ['report.pdf'] and reply.text == content
 
 
 def test_a_final_answer_without_links_or_workspace_stays_text_only(channel, workspace, reply_origin):
     from lib.channels import autoreply
-    task = {**task_for(workspace), 'status': 'done', 'content': 'plain [web](https://example.com/a.pdf)'}
+    task = {**task_for(workspace), 'status': 'done', 'finishReason': 'stop', 'content': 'plain [web](https://example.com/a.pdf)'}
     autoreply.on_task_terminal(task)
     reply, _ = channel.active_outbox(COMMAND)
     assert reply.view()['attachments'] == [] and reply.text == 'plain [web](https://example.com/a.pdf)'
@@ -664,7 +908,7 @@ def test_attachment_trouble_never_drops_the_final_answer(channel, workspace, rep
     from lib.channels import autoreply
     monkeypatch.setattr('lib.channels.attachments.for_final_answer',
                         lambda *args: (_ for _ in ()).throw(RuntimeError('roots')))
-    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'content': 'see [d](out/deck.pptx)'})
+    autoreply.on_task_terminal({**task_for(workspace), 'status': 'done', 'finishReason': 'stop', 'content': 'see [d](out/deck.pptx)'})
     reply, _ = channel.active_outbox(COMMAND)
     assert reply.text == 'see [d](out/deck.pptx)' and reply.view()['attachments'] == []
 
@@ -725,13 +969,14 @@ def test_a_draft_lists_its_attachments_and_serves_image_thumbnails(app, channel,
 
 def test_with_a_robot_the_files_come_before_the_text_that_notifies(store, enabled, router, dispatch, mailbox,
                                                                    vault, workspace):
-    from tests.channels.test_dx_robot import CLIENT_ID, SECRET, FakeOpenPlatform
+    from tests.channels.test_dx_robot import CLIENT_ID, SECRET, FakeOpenPlatform, bind
     from lib.channels.dx import robot as robot_module
     enabled(command_chat=COMMAND)
     entry = f'channel.u{OWNER}.dx.robot'
     vault.set_entry(entry, SECRET)
     store.update_account('dx', lambda account: {
         **account, 'robot': {'clientId': CLIENT_ID, 'credential': {'name': entry, 'managed': True}}})
+    bind(store, COMMAND)
     platform = FakeOpenPlatform(robot_module)
     bridge = Bridge()
     from lib.channels.dx.adapter import DxAdapter
@@ -740,6 +985,7 @@ def test_with_a_robot_the_files_come_before_the_text_that_notifies(store, enable
                             client_id, secret, transport=platform, clock=lambda: 0.0,
                             wall_clock=lambda: platform.now, sleep=lambda seconds: None))
     adapter._bridge = bridge
+    adapter._self_uid = OWNER_UID  # the uid the live session logged in as
     adapter._connected.set()
     item = enqueue(store, workspace, 'out/chart.png', 'out/report.pdf', text='报告好了')
     outbox.execute(OWNER, adapter, channel='dx', store=store)

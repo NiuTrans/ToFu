@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager.runtime import chat_task_runtime
 from lib.tasks_pkg.tool_runtime import cancel_task_contexts
@@ -87,7 +87,7 @@ def cancel_task(task_id: str, *, user_id: int,
     if callback_errors:
         logger.warning(
             '[Task %s] %d scoped cancellation callback(s) failed',
-            task_id[:8], len(callback_errors), exc_info=callback_errors[0])
+            task_log_tag(task_id), len(callback_errors), exc_info=callback_errors[0])
 
     queued_cancelled = False
     if was_pending:
@@ -104,7 +104,7 @@ def cancel_task(task_id: str, *, user_id: int,
             notify_conv_changed(conv_id, rev=None, user_id=owner_user_id)
         except Exception as exc:
             logger.warning('[Task %s] cancel busy-notify failed: %s',
-                           task_id[:8], exc)
+                           task_log_tag(task_id), exc)
 
     if persistence_error is not None:
         raise persistence_error

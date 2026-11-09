@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, {'data': {'apiMajor': 4}})
         elif path == '/app/api/v4/conversations':
             if 'code-server-session=fixture' in self.headers.get('Cookie', ''):
-                self.reply(200, {'requestId': 'loopback', 'data': {'items': [], 'page': {}}, 'meta': {'serverTimeMs': 1}})
+                self.reply(200, {'data': {'items': [], 'page': {}}, 'meta': {'requestId': 'loopback', 'serverTimeMs': 1}})
             else:
                 self.reply(302, headers=(('Location', '/login'),))
         else:

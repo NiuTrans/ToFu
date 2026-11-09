@@ -162,14 +162,99 @@ fn encrypted_authority_keeps_original_writes_and_never_queues_plaintext() {
 }
 
 #[test]
-fn normal_durability_keeps_physical_append_before_return() {
+fn normal_durability_queues_the_frame_and_acknowledges_after_its_physical_write() {
     let (vfs, mut log, barrier) = log(65536);
     log.set_durability(WalDurability::Normal);
     vfs.arm_operation_fault(Operation::Write, 1,
         FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied)).unwrap();
-    assert_eq!(log.append(1, [0; 32], b"ordinary normal append").unwrap_err().kind(),
-        io::ErrorKind::PermissionDenied);
-    assert_eq!(barrier.write_buffer_metrics()["queuedFrames"], 0);
+    log.append(1, [0; 32], b"queued normal frame").unwrap();
+    assert!(!vfs.operation_fault_fired().unwrap(), "the appender performs no file write");
+    assert_eq!(barrier.write_buffer_metrics()["queuedFrames"], 1);
+    let witness = barrier.witness(log.len()).unwrap();
+    assert_eq!(barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap_err().kind(),
+        io::ErrorKind::TimedOut, "an unwritten frame is never acknowledged");
+    vfs.arm_fault(None).unwrap();
+    barrier.write_for_test(vfs.as_ref()).unwrap();
+    barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap();
+    assert_eq!(barrier.wait_witness(&witness, std::time::Instant::now()).unwrap_err().kind(),
+        io::ErrorKind::TimedOut, "a write is not a sync for durable dependents");
+    // Process loss keeps every acknowledged (written) frame.
+    std::mem::forget(log);
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+    assert_eq!(reopened.recover_from(0, [0; 32], 1).unwrap().records[0].payload,
+        b"queued normal frame");
+}
+
+#[test]
+fn normal_unsynced_written_frame_is_the_documented_power_loss_window() {
+    let (vfs, mut log, barrier) = log(65536);
+    log.set_durability(WalDurability::Normal);
+    let first = log.append(1, [0; 32], b"synced").unwrap();
+    barrier.sync_for_test(vfs.as_ref()).unwrap();
+    log.append(2, first, b"written, not synced").unwrap();
+    barrier.write_for_test(vfs.as_ref()).unwrap();
+    barrier.wait_acknowledged(&barrier.witness(log.len()).unwrap(), std::time::Instant::now()).unwrap();
+    std::mem::forget(log);
+    vfs.crash().unwrap();
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    let rows = reopened.recover_from(0, [0; 32], 1).unwrap().records;
+    assert_eq!(rows.iter().map(|r| r.payload.clone()).collect::<Vec<_>>(), vec![b"synced".to_vec()]);
+}
+
+#[test]
+fn normal_torn_worker_write_is_never_acknowledged_and_recovery_keeps_the_written_prefix() {
+    let (vfs, mut log, barrier) = log(65536);
+    log.set_durability(WalDurability::Normal);
+    let first = log.append(1, [0; 32], b"acknowledged prefix").unwrap();
+    barrier.write_for_test(vfs.as_ref()).unwrap();
+    let acknowledged = barrier.witness(log.len()).unwrap();
+    barrier.wait_acknowledged(&acknowledged, std::time::Instant::now()).unwrap();
+    let second = log.append(2, first, &[7; 4096]).unwrap();
+    log.append(3, second, b"after the tear").unwrap();
+    let pending = barrier.witness(log.len()).unwrap();
+    vfs.arm_operation_fault(Operation::Write, 1, FaultAction::ShortWrite(100)).unwrap();
+    assert!(barrier.write_for_test(vfs.as_ref()).is_err());
+    assert!(vfs.operation_fault_fired().unwrap());
+    assert!(barrier.wait_acknowledged(&pending, std::time::Instant::now()).is_err(),
+        "a torn batch is never acknowledged");
+    assert!(log.append(4, [0; 32], b"must refuse").is_err(), "the failed barrier fences appends");
+    std::mem::forget(log);
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    let recovered = reopened.recover_from(0, [0; 32], 1).unwrap();
+    assert_eq!(recovered.records.iter().map(|r| r.payload.clone()).collect::<Vec<_>>(),
+        vec![b"acknowledged prefix".to_vec()]);
+    assert!(recovered.truncated_bytes > 0, "recovery truncates the torn tail");
+}
+
+#[test]
+fn normal_inline_overflow_behind_queued_frames_waits_for_their_write() {
+    let (vfs, mut log, barrier) = log(1024);
+    log.set_durability(WalDurability::Normal);
+    let first = log.append(1, [0; 32], b"queued").unwrap();
+    log.append(2, first, &[9; 4096]).unwrap();
+    assert_eq!(barrier.write_buffer_metrics()["synchronousFallbacks"], 1);
+    let witness = barrier.witness(log.len()).unwrap();
+    assert_eq!(barrier.written_len_for_test(), 0,
+        "an inline write cannot cover a queued frame below it");
+    assert_eq!(barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap_err().kind(),
+        io::ErrorKind::TimedOut);
+    barrier.write_for_test(vfs.as_ref()).unwrap();
+    barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap();
+    std::mem::forget(log);
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    assert_eq!(reopened.recover_from(0, [0; 32], 2).unwrap().records.len(), 2);
+}
+
+#[test]
+fn strict_acknowledgement_still_requires_the_sync() {
+    let (vfs, mut log, barrier) = log(65536);
+    log.append(1, [0; 32], b"strict frame").unwrap();
+    let witness = barrier.witness(log.len()).unwrap();
+    barrier.write_for_test(vfs.as_ref()).unwrap();
+    assert_eq!(barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap_err().kind(),
+        io::ErrorKind::TimedOut);
+    barrier.sync_for_test(vfs.as_ref()).unwrap();
+    barrier.wait_acknowledged(&witness, std::time::Instant::now()).unwrap();
 }
 
 #[test]
@@ -255,4 +340,82 @@ fn publication_cover_preserves_normal_mode_bytes_after_one_silently_lost_sync() 
     let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
     assert_eq!(reopened.recover_from(0, [0; 32], 1).unwrap().records[0].payload,
         b"normal captured physical bytes");
+}
+
+/// A Normal log on its own buffered driver: the writer thread and the syncer.
+fn normal_driver_log(vfs: Arc<dyn Vfs>) -> (ActiveLog, WalBarrier, WalBarrierDriver) {
+    vfs.create_dir(Path::new("/data")).unwrap();
+    vfs.sync_directory(Path::new("/")).unwrap();
+    let mut log = ActiveLog::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+    log.set_durability(WalDurability::Normal);
+    let (barrier, driver) = WalBarrierDriver::start_buffered(vfs, log.path().to_path_buf(),
+        WalDurability::Normal, Duration::from_millis(1), 65536).unwrap();
+    log.attach_barrier(&barrier);
+    (log, barrier, driver)
+}
+
+#[test]
+fn normal_real_driver_acknowledges_after_the_write_while_its_sync_stalls() {
+    let inner = Arc::new(DeterministicVfs::new(None));
+    let vfs = Arc::new(crate::test_wal_gate_vfs::WalGateVfs::new(inner.clone()));
+    let (mut log, barrier, driver) = normal_driver_log(vfs.clone());
+    barrier.wait_synced(log.len(), std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    let (stalled, release) = vfs.block_next_wal_sync();
+    log.append(1, [0; 32], b"written while the sync stalls").unwrap();
+    stalled.recv_timeout(Duration::from_secs(10)).expect("the syncer reaches the volume");
+    let witness = barrier.witness(log.len()).unwrap();
+    barrier.wait_acknowledged(&witness, std::time::Instant::now() + Duration::from_secs(10))
+        .expect("a stalled fsync never delays a Normal acknowledgement");
+    assert_eq!(barrier.wait_witness(&witness, std::time::Instant::now() + Duration::from_millis(50))
+        .unwrap_err().kind(), io::ErrorKind::TimedOut, "durable dependents still wait for the sync");
+    release.send(()).unwrap();
+    barrier.wait_witness(&witness, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    driver.stop_and_join().unwrap();
+    drop(log);
+    inner.crash().unwrap();
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), inner).unwrap();
+    assert_eq!(reopened.recover_from(0, [0; 32], 1).unwrap().records[0].payload,
+        b"written while the sync stalls");
+}
+
+#[test]
+fn normal_real_driver_close_drains_written_frames_and_syncs_them() {
+    let vfs = Arc::new(DeterministicVfs::new(None));
+    let (mut log, barrier, driver) = normal_driver_log(vfs.clone());
+    let mut parent = [0; 32];
+    let mut expected = Vec::new();
+    for n in 1..=100 {
+        let bytes = format!("frame-{n}").into_bytes();
+        parent = log.append(n, parent, &bytes).unwrap();
+        expected.push(bytes);
+    }
+    driver.stop_and_join().unwrap();
+    assert_eq!(barrier.synced_len(), log.len());
+    assert_eq!(barrier.written_len_for_test(), log.len());
+    assert_eq!(barrier.write_buffer_metrics()["writtenFrames"], 100);
+    assert_eq!(barrier.write_buffer_metrics()["retainedFrameBytes"], 0);
+    log.detach_barrier();
+    drop(log);
+    vfs.crash().unwrap();
+    let mut recovered = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    assert_eq!(recovered.recover_from(0, [0; 32], 100).unwrap().records.iter()
+        .map(|r| r.payload.clone()).collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn normal_real_writer_failure_is_never_acknowledged_and_fences_later_appends() {
+    let vfs = Arc::new(DeterministicVfs::new(None));
+    let (mut log, barrier, driver) = normal_driver_log(vfs.clone());
+    barrier.wait_synced(log.len(), std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    vfs.arm_operation_fault(Operation::Write, 1,
+        FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied)).unwrap();
+    log.append(1, [0; 32], b"never acknowledged").unwrap();
+    let witness = barrier.witness(log.len()).unwrap();
+    assert!(barrier.wait_acknowledged(&witness, std::time::Instant::now() + Duration::from_secs(10)).is_err());
+    assert!(vfs.operation_fault_fired().unwrap());
+    assert!(log.append(2, [0; 32], b"must refuse").is_err(), "the failed writer fences appends");
+    assert!(driver.stop_and_join().is_err(), "close cannot certify the failed prefix");
+    std::mem::forget(log);
+    let mut reopened = ActiveLog::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    assert!(reopened.recover_from(0, [0; 32], 0).unwrap().records.is_empty());
 }

@@ -161,7 +161,7 @@ def _record_tool_result_cache_evictions(
     if total == 1 or total & (total - 1) == 0:
         logger.info(
             '[DedupCache] task=%s evicted=%d total_evictions=%d capacity=%d',
-            str(task.get('id') or '')[:12] or '?', evicted, total, capacity)
+            str(task.get('id') or '') or '?', evicted, total, capacity)
 
 
 def _trim_tool_result_cache(
@@ -185,7 +185,7 @@ def _ensure_tool_result_cache(task: dict[str, Any]) -> dict:
             if cache is not None:
                 logger.warning(
                     '[DedupCache] task=%s replaced invalid cache type=%s',
-                    str(task.get('id') or '')[:12] or '?',
+                    str(task.get('id') or '') or '?',
                     type(cache).__name__)
             cache = {}
             task['_tool_result_cache'] = cache
@@ -288,7 +288,7 @@ def _record_tool_call_id_receipt_evictions(
         logger.info(
             '[CallIdReceipts] task=%s evicted=%d total_evictions=%d '
             'capacity=%d',
-            str(task.get('id') or '')[:12] or '?', evicted, total, capacity)
+            str(task.get('id') or '') or '?', evicted, total, capacity)
 
 
 def _ensure_tool_call_id_receipts(task: dict[str, Any]) -> dict[str, dict]:
@@ -304,7 +304,7 @@ def _ensure_tool_call_id_receipts(task: dict[str, Any]) -> dict[str, dict]:
             if receipts is not None:
                 logger.warning(
                     '[CallIdReceipts] task=%s replaced invalid ledger type=%s',
-                    str(task.get('id') or '')[:12] or '?',
+                    str(task.get('id') or '') or '?',
                     type(receipts).__name__)
             receipts = {}
             task['_tool_call_id_receipts'] = receipts

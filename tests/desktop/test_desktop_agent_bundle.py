@@ -44,8 +44,8 @@ DIAG side (``/api/v1/desktop/client-diag`` + ``_probe.probe_server``):
  16. a pasted diagnostics bundle lands as ONE JSONL line bound to the
      caller; empty / oversize pastes are 400; GET replays newest-first
      with a truncated preview; no file ⇒ an empty list;
- 17. probe_server bypasses env/system proxies — the SAME transport the
-     poll loop uses, or probe and poll measure different routes.
+ 17. probe_server and the poll loop use the shared network policy so they
+     measure the same eligible routes.
 
 RESUME side (``lib.desktop_agent._pair.resume_attachment``):
  14. saved address dead ⇒ the persisted attach_candidates are walked
@@ -640,12 +640,9 @@ class TestClientDiagInbox:
 
 
 class TestProbeTransportAlignment:
-    def test_17_probe_bypasses_env_proxies_like_the_poll_loop(
+    def test_17_probe_uses_shared_network_policy_like_the_poll_loop(
             self, monkeypatch):
-        """requests honors system/env proxies by default; the poll loop
-        bypasses them ALL (no_proxy='*'). A probe on a different transport
-        measures a route the poll will never take — the two must agree."""
-        import requests
+        """Probe and poll inherit the same policy without a pinned override."""
         import lib.desktop_agent._probe as probe_mod
         captured = {}
 
@@ -658,11 +655,10 @@ class TestProbeTransportAlignment:
             captured.update(kw)
             return _Resp()
 
-        monkeypatch.setattr(requests, 'get', _get)
+        monkeypatch.setattr('lib.http_transport.client.http_get', _get)
         ok, reason = probe_mod.probe_server('http://10.0.0.1:15000')
         assert ok and reason == ''
-        # The probe deliberately honors the environment's proxy/NO_PROXY
-        # configuration — the same transport posture the poll loop uses in
-        # its default 'env' mode; requests passes no explicit proxies kwarg.
+        # The common transport owns proxy/NO_PROXY configuration for both
+        # probe and poll; neither pins an explicit route in default mode.
         assert 'proxies' not in captured, (
             'the probe must measure the SAME transport the poll loop uses')

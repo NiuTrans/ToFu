@@ -116,6 +116,11 @@
     <string name="auth_none_desc">For a Tofu exposed directly on a trusted network.</string>
     <string name="toast_bad_qr">That QR code isn\'t a Tofu server link</string>
     <string name="toast_no_link">No server link on the clipboard</string>
+    <string name="toast_invalid_connection">Use a server URL or tofu://connect link without credentials. Remove tokens; use the password field or interactive sign-in.</string>
+    <string name="prefill_confirm_title">Use this connection link?</string>
+    <string name="prefill_confirm_message">Replace the connection details, or keep your current form. Review changes before choosing Save &amp; connect.</string>
+    <string name="prefill_use_link">Replace form</string>
+    <string name="prefill_keep_form">Keep form</string>
 
     <!-- Onboarding -->
     <string name="onboard_welcome">Welcome to Tofu</string>

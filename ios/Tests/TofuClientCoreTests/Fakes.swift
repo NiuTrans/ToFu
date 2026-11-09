@@ -39,6 +39,8 @@ actor FakeCookieSink: CookieSink {
     private(set) var purgedHosts: [String] = []
     private(set) var purgedOrigins: [String] = []
     private var entries: [(url: URL, cookie: TofuCookie)] = []
+    private var purgeHook: (@Sendable () async -> Void)?
+    func onPurge(_ hook: @escaping @Sendable () async -> Void) { purgeHook = hook }
 
     func inject(origin: String, cookies: [TofuCookie]) async {
         injected.append((origin, cookies))
@@ -53,6 +55,7 @@ actor FakeCookieSink: CookieSink {
     func purgeOrigin(_ origin: String, appURL: String) async {
         guard let url = URL(string: appURL), let host = url.host else { return }
         purgedHosts.append(host); purgedOrigins.append(origin)
+        if let purgeHook { await purgeHook() }
         entries.removeAll { CookieScope.belongsToProfile(domain: $0.cookie.domain ?? $0.url.host ?? "", path: $0.cookie.path, appURL: url) }
     }
     func cookieHeader(_ target: String) async -> String? {
@@ -84,6 +87,20 @@ final class FakeSecretStore: SecretStore, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         map[alias] = nil
     }
+
+    func applyProfileEdit(
+        from oldAlias: String, to newAlias: String,
+        expectedOldSecret: String?, expectedNewSecret: String?, secret: String?
+    ) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard map[oldAlias] == expectedOldSecret, map[newAlias] == expectedNewSecret else { return false }
+        if let secret { map[newAlias] = secret }
+        if oldAlias != newAlias, expectedOldSecret != nil {
+            guard let secret, map[newAlias] == secret else { return false }
+            map[oldAlias] = nil
+        }
+        return true
+    }
 }
 
 actor FakeProfileStore: ProfileStore {
@@ -107,7 +124,10 @@ actor FakeProfileStore: ProfileStore {
         return id
     }
 
-    func update(_ profile: Profile) async { rows[profile.id] = profile }
+    func update(_ profile: Profile) async {
+        guard rows[profile.id] != nil else { return }
+        rows[profile.id] = profile
+    }
     func deleteById(_ id: Int64) async { rows[id] = nil }
 
     func touchLastUsed(_ id: Int64, _ at: Int64) async {

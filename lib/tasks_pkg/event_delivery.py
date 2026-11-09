@@ -30,7 +30,8 @@ from lib.log import get_logger
 from lib.agent_core.storage_errors import is_transient_storage_error
 
 from lib.agent_core.publication import accepted_publication_context
-from lib.storage.storage_event_policy import resolve_storage_event_budget
+from lib.agent_core.storage_event_policy import resolve_storage_event_budget
+from lib.agent_core.storage_waits import storage_wait_owner
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_EVENT_TYPES
 from lib.utils import retained_graph_bytes
 
@@ -112,6 +113,8 @@ class DeliveryLane:
     running: bool = False
     error: BaseException | None = None
     revoked: bool = False
+    # revoke() during an entered run: that run's pump completes it on return.
+    revoke_requested: bool = False
     accepted: int = 0
     completed: int = 0
     # When the head last became dispatchable: a batch settled or was repaired.
@@ -483,17 +486,19 @@ class EventDeliveryCoordinator:
     def revoke(self, lane):
         """An owner whose publication ended releases its never-acknowledged items.
 
-        Returns False while a persistence attempt is entered: that pump keeps
-        the head until it returns. Later submissions are refused as revoked.
+        An entered run stays with its pump until it returns. Requested during
+        one, this returns False, refuses later submissions at once and leaves
+        that pump to complete the revocation when the run returns.
         """
         with self.condition:
             if lane.running:
+                lane.revoke_requested = True
                 return False
             self._revoke_locked(lane)
             return True
 
     def _check_lane(self, lane):
-        if lane.revoked:
+        if lane.revoked or lane.revoke_requested:
             raise EventDeliveryRevoked('Task event publication authority was revoked')
         if self.closed:
             raise EventDeliveryCancelled('Task event delivery is shutting down')
@@ -653,13 +658,24 @@ class EventDeliveryCoordinator:
                     item.frozen_entry = item.context.run(item.batch_entry, item.progress_frames)
             return head.context.run(head.persist_batch, [item.frozen_entry for item in run])
 
+        def withhold(_error=None):
+            if public:
+                # Only a public frame is withheld from push; FIFO work
+                # without a sequence (child evidence, checkpoints) is not.
+                lane.task.setdefault('_pushWithheldAt', time.time())
+                lane.task['_pushWithheldCount'] = min((1 << 31) - 1,
+                    int(lane.task.get('_pushWithheldCount') or 0) + 1)
+
         def persist():
             head.timing.attempts += 1
             starts = [self.profiler.observe('attempt_start', item.profile) for item in profiled]
             failed = True
             outcome = 'interrupted'
             try:
-                result = operation()
+                # A slow in-call wait on a live authority withholds the push
+                # like a failed attempt, so the read side reports the wedge.
+                with storage_wait_owner(withhold):
+                    result = operation()
                 failed = False
                 outcome = 'ok'
                 return result
@@ -669,12 +685,7 @@ class EventDeliveryCoordinator:
             except Exception as error:
                 if profiled:
                     outcome = self.profiler.observe('failure_outcome', error)
-                if public:
-                    # Only a public frame is withheld from push; FIFO work
-                    # without a sequence (child evidence, checkpoints) is not.
-                    lane.task.setdefault('_pushWithheldAt', time.time())
-                    lane.task['_pushWithheldCount'] = min((1 << 31) - 1,
-                        int(lane.task.get('_pushWithheldCount') or 0) + 1)
+                withhold()
                 raise
             finally:
                 for item, start in zip(profiled, starts):
@@ -755,14 +766,21 @@ class EventDeliveryCoordinator:
                     with self.condition:
                         lane.running = False
                         self.active -= 1
-                        lane.error = exc
                         self.metrics['failures'] += 1
-                        lane.task['_eventDeliveryError'] = type(exc).__name__
-                        self._notify_lane(lane)
-                        self.condition.notify_all()
-                    logger.warning('[TaskEvents] retained failed delivery task=%s seq=%s run=%d error=%s',
-                                   str(lane.task.get('id') or '?')[:8], run[0].sequence, len(run),
-                                   type(exc).__name__)
+                        revoked = lane.revoke_requested
+                        if revoked:
+                            # Its owner revoked publication during this run:
+                            # release the lane instead of retaining a dead head.
+                            self._revoke_locked(lane)
+                        else:
+                            lane.error = exc
+                            lane.task['_eventDeliveryError'] = type(exc).__name__
+                            self._notify_lane(lane)
+                            self.condition.notify_all()
+                    if not revoked:
+                        logger.warning('[TaskEvents] retained failed delivery task=%s seq=%s run=%d error=%s',
+                                       str(lane.task.get('id') or '?'), run[0].sequence, len(run),
+                                       type(exc).__name__)
                     continue
                 # Publish/replay share one exclusive cursor. The memory
                 # buffer may contain accepted future frames, but consumers
@@ -802,7 +820,9 @@ class EventDeliveryCoordinator:
                         lane.head_ready_at = settled
                         self._notify_lane(lane)
                         lane.task.pop('_eventDeliveryError', None)
-                        if not lane.pending:
+                        if lane.revoke_requested:
+                            self._revoke_locked(lane)
+                        elif not lane.pending:
                             self.lanes.discard(lane)
                             lane.task.pop('_eventDeliveryPending', None)
                         # This pump claims the next ready lane itself: no wake-up.

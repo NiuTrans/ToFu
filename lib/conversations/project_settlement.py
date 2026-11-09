@@ -20,7 +20,7 @@ def on_project_task_settled(task: dict, project_path: str, *, user_id: int) -> N
     except Exception as exc:
         logger.debug(
             '[ProjectSettlement] work settlement failed conv=%s: %s',
-            conv_id[:8],
+            conv_id,
             exc,
         )
 

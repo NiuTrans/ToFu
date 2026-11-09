@@ -5,7 +5,7 @@ from lib.project_mod.write_tools import _ops
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'insert', 'diffs', 'inserts', 'edit'])
+@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'diffs', 'edit'])
 @pytest.mark.parametrize('fault', ['false', 'exception', 'missing-ack'])
 def test_applied_write_reports_failed_undo_without_repeating_or_rolling_back(tmp_path, monkeypatch, action, fault):
     target = tmp_path / 'file.txt'
@@ -27,10 +27,8 @@ def test_applied_write_reports_failed_undo_without_repeating_or_rolling_back(tmp
     if action == 'write': result = _ops.tool_write_file(base, 'file.txt', 'new\n')
     elif action == 'upload': result = _ops.save_uploaded_file(base, 'file.txt', b'new\n', on_conflict='overwrite')
     elif action == 'diff': result = _ops.tool_apply_diff(base, 'file.txt', 'old', 'new')
-    elif action == 'insert': result = _ops.tool_insert_content(base, 'file.txt', 'old', 'new\n')
     elif action == 'diffs': result = _ops.tool_apply_diffs(base, [{'path':'file.txt', 'search':'old', 'replace':'new'}])
-    elif action == 'edit': result = _ops.tool_edit_file(base, [{'path':'file.txt', 'operation':'replace', 'anchor':'old', 'content':'new'}])
-    else: result = _ops.tool_insert_contents(base, [{'path':'file.txt', 'anchor':'old', 'content':'new\n'}])
+    else: result = _ops.tool_edit_file(base, [{'path':'file.txt', 'anchor':'old', 'content':'new'}])
     assert target.read_text() == 'concurrent user edit\n'
     if isinstance(result, dict):
         assert result['ok'] is False
@@ -45,7 +43,7 @@ def test_applied_write_reports_failed_undo_without_repeating_or_rolling_back(tmp
     assert 'Do not retry' in message
 
 
-@pytest.mark.parametrize('name', ['apply_diffs', 'insert_contents', 'edit_file'])
+@pytest.mark.parametrize('name', ['apply_diffs', 'edit_file'])
 def test_partial_journal_outcome_metadata_does_not_claim_success(name):
     from lib.tools.meta import build_project_tool_meta
     result = build_project_tool_meta(name, {'edits': [{'path': 'file.txt'}]},

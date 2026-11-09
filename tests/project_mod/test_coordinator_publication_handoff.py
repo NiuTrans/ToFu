@@ -20,7 +20,8 @@ def completed_checkpoint(r):
     binding = r.c.repo.admission(row['id'])
     r.workspaces[task_id] = {
         'task_id': task_id, 'user_id': r.c.repo.owner, 'project_root': r.c.repo.project,
-        'checkpoint_sha': 'a' * 40, 'state': 'completed', 'origin': {KEY: binding},
+        'checkpoint_sha': 'a' * 40, 'state': 'completed',
+        'origin': {KEY: binding, 'delivery': {'state': 'delivered', 'taskOutcome': 'completed'}},
     }
     return row, task_id, binding
 

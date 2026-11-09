@@ -11,14 +11,14 @@ from lib.conversation_sync.settled_rows import (
     SettledDict, json_array_text, memo_get, memo_put, settle_unless_same,
 )
 from lib.error_envelope import to_json as _err_to_json
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from lib.observability import measure_task_completion, observe_task_completion
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager._events import snapshot_task_text
 from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD
 from lib.tool_results.tool_round_identity import tool_rounds_with_execution_identity
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
     sanitize_api_rounds_for_persist,
     sanitize_usage_for_persist,
@@ -511,18 +511,18 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
         if current_status == 'interrupted':
             if not is_conversation_attempt(task):
                 logger.warning('[Task %s] task result fenced after recovery',
-                               task['id'][:8])
+                               task_log_tag(task['id']))
                 return None
             # A reused task id (a resumed Worker) presents its Attempt; the
             # authority admits only its Turn's current Attempt bound to this
             # id, never the interrupted Attempt's own late writes.
             logger.info('[Task %s] attempt %s claims the task result recovery '
-                        'interrupted', task['id'][:8],
-                        str(task.get('_attemptId'))[:8])
+                        'interrupted', task_log_tag(task['id']),
+                        str(task.get('_attemptId')))
         elif status in ('pending', 'running') and current_status not in (
                 None, 'pending', 'running'):
             logger.warning('[Task %s] nonterminal checkpoint cannot regress %s',
-                           task['id'][:8], current_status)
+                           task_log_tag(task['id']), current_status)
             return None
         return int((current_record or {}).get('version') or 0), current_value
 
@@ -542,7 +542,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                     'derive_messages': False,
                 })):
             logger.info('[Task %s] conv=%s skipping task result: parent absent',
-                        task['id'][:8], conv_id[:8])
+                        task_log_tag(task['id']), conv_id)
             return False
         if fresh_birth:
             # No durable row can carry a just-minted id. The checkpoint
@@ -623,7 +623,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                 hwm_durable = False
                 logger.warning(
                     '[Task %s] legacy cache HWM fallback failed: %s',
-                    task['id'][:8], cache_error,
+                    task_log_tag(task['id']), cache_error,
                 )
             if hwm_durable:
                 clear_cache_candidate(
@@ -639,7 +639,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
                 last_read_durable = False
                 logger.warning(
                     '[Task %s] legacy cache last-read fallback failed: %s',
-                    task['id'][:8], cache_error,
+                    task_log_tag(task['id']), cache_error,
                 )
             if last_read_durable:
                 clear_cache_candidate(
@@ -776,7 +776,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             )
             logger.warning(
                 '[Task %s] task result write attempt %d/%d failed: %s',
-                task['id'][:8], transient_attempt, transient_limit, exc,
+                task_log_tag(task['id']), transient_attempt, transient_limit, exc,
             )
             if best_effort_checkpoint:
                 break
@@ -787,7 +787,7 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     if transient_error is not None:
         raise transient_error
     if conflict_error is not None:
-        logger.warning('[Task %s] task result CAS contention', task['id'][:8])
+        logger.warning('[Task %s] task result CAS contention', task_log_tag(task['id']))
         # False is reserved for a proven parent/owner/status fence because
         # terminal callers use it to suppress later durable side effects.
         # Contention is pressure, not evidence that this executor is stale.
@@ -898,11 +898,11 @@ def _release_heavy_task_state(task) -> int:
             except Exception as trim_error:
                 logger.debug(
                     '[Task %s] terminal heap-trim request skipped: %s',
-                    (task.get('id') or '')[:8], trim_error)
+                    (task.get('id') or ''), trim_error)
         return released
     except Exception as e:
         logger.debug('[Task %s] heavy-state release skipped: %s',
-                     (task.get('id') or '')[:8], e)
+                     (task.get('id') or ''), e)
         return 0
 
 
@@ -951,7 +951,7 @@ def _release_terminal_tool_state(task) -> int:
             request_released_task_heap_trim()
         except Exception as error:
             logger.debug('[Task %s] terminal tool heap-trim request skipped: %s',
-                         (task.get('id') or '')[:8], error)
+                         (task.get('id') or ''), error)
     return released
 
 
@@ -1001,7 +1001,7 @@ def _stamp_conv_provider_id(task):
     except Exception as e:
         logger.warning('[Task %s] conv=%s provider_id settings stamp failed '
                        '(non-fatal): %s',
-                       (task.get('id') or '')[:8], conv_id[:8], e)
+                       (task.get('id') or ''), conv_id, e)
 
 
 @observe_task_completion('persistence')
@@ -1020,7 +1020,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             task['_terminalPersistencePending'] = True
             task['_terminalPersistenceRetryReady'] = True
             logger.warning('[Task %s] required terminal delivery pending: %s',
-                           str(task.get('id') or '')[:8], type(exc).__name__)
+                           str(task.get('id') or ''), type(exc).__name__)
             return False
         task.pop('_terminalPersistencePending', None)
         task.pop('_terminalPersistenceRetryReady', None)
@@ -1036,7 +1036,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             task['_terminalPersistencePending'] = True
             task['_terminalPersistenceRetryReady'] = True
             logger.warning('[Task %s] event durability debt retained: %s',
-                           str(task.get('id') or '')[:8], type(exc).__name__)
+                           str(task.get('id') or ''), type(exc).__name__)
             return False
 
     if (task.get('_terminalTurnPending') is not None
@@ -1051,23 +1051,26 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         except Exception as exc:
             logger.warning(
                 '[Task %s] terminal Turn settlement remains pending: %s',
-                str(task.get('id') or '')[:8], type(exc).__name__)
+                str(task.get('id') or ''), type(exc).__name__)
             return False
 
     try:
-        from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_compaction
-        preserve_suspended_compaction(task)
+        from lib.tasks_pkg.compaction._resume_projection import (
+            preserve_suspended_working_view, retire_suspended_working_view,
+        )
+        preserve_suspended_working_view(task)
+        retire_suspended_working_view(task)
     except Exception as exc:
         from lib.agent_core.storage_errors import describe_storage_failure
         logger.warning('[Task %s] suspended working context not saved: %s',
-                       str(task.get('id') or '')[:8], describe_storage_failure(exc))
+                       str(task.get('id') or ''), describe_storage_failure(exc))
 
     content, thinking, content_epoch = snapshot_task_text(task)
     content_len = len(content)
     thinking_len = len(thinking)
     error = task.get('error')
     status = task.get('status')
-    task_id_short = task['id'][:8]
+    task_tag = task_log_tag(task['id'])
     conv_id_short = task.get('convId', '')
 
     finish_reason = task.get('finishReason') or 'unknown'
@@ -1079,16 +1082,16 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         logger.warning('[Task %s] conv=%s ⚠️ PERSISTING EMPTY RESULT — task completed with no content, no thinking, no error. '
                        'finishReason=%s model=%s provider=%s. '
                        'This likely indicates a stream that never received LLM tokens.',
-                       task_id_short, conv_id_short, finish_reason, model, provider)
+                       task_tag, conv_id_short, finish_reason, model, provider)
     elif status == 'done' and content_len == 0 and thinking_len > 0:
         logger.warning('[Task %s] conv=%s ⚠️ PERSISTING THINKING-ONLY result — content is empty but thinking has %d chars. '
                        'finishReason=%s model=%s provider=%s. '
                        'The LLM may have been interrupted after thinking but before generating content.',
-                       task_id_short, conv_id_short, thinking_len, finish_reason, model, provider)
+                       task_tag, conv_id_short, thinking_len, finish_reason, model, provider)
     else:
         logger.info('[Task %s] conv=%s Persisting result: status=%s content=%dchars thinking=%dchars '
                     'finishReason=%s model=%s provider=%s error=%s',
-                     task_id_short, conv_id_short, status, content_len, thinking_len,
+                     task_tag, conv_id_short, status, content_len, thinking_len,
                      finish_reason, model, provider, error or 'none')
 
     # Build metadata before the write so preparation/serialization failures
@@ -1109,12 +1112,12 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         task['_terminalPersistenceRetryReady'] = True
         logger.error(
             '[Task %s] conv=%s terminal persistence preparation failed: %s',
-            task_id_short, conv_id_short, type(_prep_error).__name__,
+            task_tag, conv_id_short, type(_prep_error).__name__,
             exc_info=True,
         )
         logger.error(
             '[Task %s] conv=%s terminal metadata not persisted: %s',
-            task_id_short, conv_id_short,
+            task_tag, conv_id_short,
             terminal_state_log_summary(task, persisted=False),
         )
         return False
@@ -1130,7 +1133,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         task['segments'] = assemble_segments(task, merged=_merged_tr)
     except Exception as _seg_e:
         logger.warning('[Task %s] segment assembly failed (non-fatal, dark): %s',
-                       task_id_short, _seg_e, exc_info=True)
+                       task_tag, _seg_e, exc_info=True)
 
     _task_row_owned = True
     try:
@@ -1151,7 +1154,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             segments_json = _task_result_segments_json(task)
         except Exception as _sj_e:
             logger.warning('[Task %s] segments serialize failed (non-fatal): %s',
-                           task_id_short, _sj_e, exc_info=True)
+                           task_tag, _sj_e, exc_info=True)
         # Error envelope is JSON-serialised at the wire — task_results.error
         # is TEXT, but every consumer (SSE and conversation projection)
         # round-trips through lib.error_envelope so the
@@ -1164,7 +1167,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             segments_json=segments_json)
         task.pop('_terminalPersistencePending', None)
         task.pop('_terminalPersistenceRetryReady', None)
-        logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
+        logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_tag, conv_id_short)
     except Exception as _pf_err:
         # This flag is an eviction fence and a retry receipt. Without it a
         # terminal task whose row write failed could be removed by TTL,
@@ -1182,10 +1185,10 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             _storage_stopping = False
         if _storage_stopping:
             logger.info('[Task %s] conv=%s persist aborted during shutdown (expected: %s)',
-                        task_id_short, conv_id_short, type(_pf_err).__name__)
+                        task_tag, conv_id_short, type(_pf_err).__name__)
         else:
             logger.error('[Task %s] conv=%s ❌ Persist FAILED — content (%d chars) and thinking (%d chars) may be lost!',
-                         task_id_short, conv_id_short, content_len, thinking_len, exc_info=True)
+                         task_tag, conv_id_short, content_len, thinking_len, exc_info=True)
             # P0 observability: the task_results row did NOT reach the DB
             #   (classic cause: connection pool exhausted). Emit the in-memory
             #   terminal metadata unconditionally so the finish-bar fields
@@ -1194,7 +1197,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             #   were NOT persisted. Without this, an empty finish-bar can only
             #   be explained by querying the DB after the fact.
             logger.error('[Task %s] conv=%s ⚠️ TERMINAL METADATA NOT PERSISTED — %s',
-                         task_id_short, conv_id_short,
+                         task_tag, conv_id_short,
                          terminal_state_log_summary(task, persisted=False))
         return False
 
@@ -1207,7 +1210,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         # clobber the recovered turn even though its task_results CAS lost.
         logger.warning('[Task %s] conv=%s stale terminal finalizer stopped at '
                        'recovery fence; downstream writes suppressed',
-                       task_id_short, conv_id_short)
+                       task_tag, conv_id_short)
         if not _defer_heavy_release:
             _release_heavy_task_state(task)
         return False
@@ -1229,7 +1232,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         task['_terminalPersistencePending'] = True
         task['_terminalPersistenceRetryReady'] = True
         logger.warning('[Task %s] required terminal delivery pending after durable write: %s',
-                       str(task.get('id') or '')[:8], type(exc).__name__)
+                       str(task.get('id') or ''), type(exc).__name__)
         return False
     task.pop('_terminalPersistencePending', None)
     task.pop('_terminalPersistenceRetryReady', None)
@@ -1255,5 +1258,5 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
     _released = _release_heavy_task_state(task)
     if _released:
         logger.debug('[Task %s] released %d heavy terminal field(s) to bound RSS',
-                     task['id'][:8], _released)
+                     task_log_tag(task['id']), _released)
     return True

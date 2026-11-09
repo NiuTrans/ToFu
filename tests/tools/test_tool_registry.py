@@ -50,6 +50,91 @@ def _ctx(**overrides):
     return ToolContext(**base)
 
 
+@pytest.mark.parametrize('exposure', ['full', 'routed'])
+def test_swarm_result_recovery_is_searchable_without_changing_execution(exposure):
+    from lib.llm._sse_core import prepare_request
+    from lib.tools.contracts import validate_tool_arguments_from_documents
+    from lib.tools.gateway import normalize_execute_request, search_executable_catalog
+
+    ctx = _ctx(
+        cfg={'tools.nativeExposure': exposure},
+        project_path='/workspace', project_enabled=True,
+        messages=[{'role': 'user', 'content': 'inspect the code'}],
+    )
+    assembled, _ = assemble_tool_list(ctx)
+    catalog = ctx.executable_tool_catalog
+    request = {
+        'model': 'glm-5.3-flash', 'messages': ctx.messages,
+        'tools': assembled, '_tool_wire_catalog': assembled,
+        '_executable_tool_catalog': catalog,
+        '_tool_discovery_policy_by_name': ctx.discovery_policy_by_name,
+        '_tool_search_catalog_size': len(catalog),
+        '_tool_searchable_count': sum(
+            value == 'searchable' for value in ctx.discovery_policy_by_name.values()),
+        '_required_direct_tool_names': sorted(ctx.direct_wire_tool_names),
+        '_tool_search_mode': 'local', '_multi_agent_mode': 'full',
+    }
+
+    def project():
+        return prepare_request(
+            request, api_protocol='openai',
+            base_url='https://compatible.example/v1').body['tools']
+
+    visible = project()
+    names = set(_names(visible))
+    assert 'get_agent_result' not in names
+    assert {'spawn_agents', 'poll', 'kill', 'read_files', 'search_files',
+            'find_files', 'edit_file', 'run_command', 'search_tools',
+            'execute_tools'} <= names
+    spawn = next(tool for tool in visible
+                 if tool['function']['name'] == 'spawn_agents')
+    assert 'discover it with search_tools' in spawn['function']['description']
+
+    for query in ('get_agent_result', 'recover completed subagent results',
+                  '重新读取子代理结果'):
+        found = search_executable_catalog(
+            catalog, query, visible_names=names,
+            namespace_by_name=ctx.tool_namespace_by_name,
+            search_text_by_name=ctx.search_text_by_name,
+            contract_documents_by_name=ctx.tool_contract_documents_by_name)
+        assert found['items'][0]['name'] == 'get_agent_result'
+        assert found['execute_with'] == 'execute_tools'
+        properties = found['items'][0]['arguments_schema']['properties']
+        assert {'swarm_run_id', 'agent_id', 'agent_ids'} <= properties.keys()
+
+    args = {'swarm_run_id': 'earlier-wave', 'agent_ids': ['agent-a', 'agent-b']}
+    assert validate_tool_arguments_from_documents(
+        ctx.tool_contract_documents_by_name, 'get_agent_result', args) == args
+    recovered = normalize_execute_request(
+        {'calls': [{'tool': 'get_agent_result', 'args': args}]},
+        catalog=catalog, namespace_by_name=ctx.tool_namespace_by_name,
+        gateway_call_id='recovery')
+    assert recovered['errors'] == []
+    assert recovered['calls'][0]['_normalized_arguments'] == args
+    assert visible == project(), 'discovery must not rewrite the cached schema prefix'
+
+    revoked = [tool for tool in catalog
+               if tool['function']['name'] != 'get_agent_result']
+    assert search_executable_catalog(revoked, 'get_agent_result')['items'] == []
+    assert normalize_execute_request(
+        {'calls': [{'tool': 'get_agent_result', 'args': args}]},
+        catalog=revoked, namespace_by_name=ctx.tool_namespace_by_name,
+        gateway_call_id='revoked')['errors']
+
+
+def test_swarm_result_recovery_stays_direct_without_local_discovery():
+    from lib.tools.gateway import full_wire_tools, local_wire_tools
+
+    ctx = _ctx()
+    assemble_tool_list(ctx)
+    pair = [tool for tool in ctx.executable_tool_catalog
+            if tool['function']['name'] in {'spawn_agents', 'get_agent_result'}]
+    assert set(_names(pair)) == {'spawn_agents', 'get_agent_result'}
+    assert full_wire_tools(pair) == pair
+    assert local_wire_tools(
+        pair, discovery_policy_by_name=ctx.discovery_policy_by_name) == pair
+
+
 def test_content_search_is_search_files_with_retired_grep_search_dispatchable():
     from lib.tools.project import PROJECT_TOOL_NAMES, project_tools_for_runtime
 

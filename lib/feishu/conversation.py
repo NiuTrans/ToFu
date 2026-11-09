@@ -103,7 +103,7 @@ def persist_exchange(sender, user_message: dict, assistant_message: dict) -> boo
     except LifecycleConflict as exc:
         logger.warning(
             "[Feishu] conversation %s rejected exchange: %s",
-            conversation_id[:12],
+            conversation_id,
             exc.code,
         )
         return False
@@ -117,7 +117,7 @@ def persist_exchange(sender, user_message: dict, assistant_message: dict) -> boo
             logger.warning(
                 "[Feishu] exchange attempt is not claimable "
                 "attempt=%s status=%s",
-                attempt_id[:12],
+                attempt_id,
                 attempt.get("status"),
             )
             return False
@@ -125,7 +125,7 @@ def persist_exchange(sender, user_message: dict, assistant_message: dict) -> boo
         synthetic_task_id = f"feishu:{attempt_id}"
         if bind_task(attempt_id, synthetic_task_id, user_id=owner_id) is None:
             logger.error(
-                "[Feishu] could not bind exchange attempt=%s", attempt_id[:12]
+                "[Feishu] could not bind exchange attempt=%s", attempt_id
             )
             return False
         task = {
@@ -149,7 +149,7 @@ def persist_exchange(sender, user_message: dict, assistant_message: dict) -> boo
         if not applied:
             logger.error(
                 "[Feishu] terminal exchange write was rejected attempt=%s",
-                attempt_id[:12],
+                attempt_id,
             )
             return False
     try:

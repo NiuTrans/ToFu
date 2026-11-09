@@ -10,7 +10,7 @@ import re
 import time
 
 from copy import deepcopy
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.compaction._summary_budget import summary_failure_reason
 from lib.tasks_pkg.compaction._archive import _archive_transcript, summary_dispatch_calls
 from lib.tasks_pkg.compaction._constants import (
@@ -259,6 +259,7 @@ def _projected_summary_usage_tokens(
     task: dict | None,
     anchor_text: str = '',
     source_messages: list | None = None,
+    continuity_fold: frozenset = frozenset(),
 ) -> int:
     """Pre-dispatch usage projection for proactive ROI gating.
 
@@ -274,6 +275,7 @@ def _projected_summary_usage_tokens(
         return max(1, _summary_request_input_tokens(
             messages, current_query, task=task,
             source_messages=source_messages, anchor_text=anchor_text,
+            continuity_fold=continuity_fold,
         ) + _SUMMARY_MAX_TOKENS)
     except Exception as exc:
         logger.debug('[Compact] summary-cost projection failed: %s', exc)
@@ -605,8 +607,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     """
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
-    log_id = conv_id[:8] if conv_id else '?'
-    task_id = task.get('id', '')[:8] if task else '?'
+    log_id = conv_id if conv_id else '?'
+    task_id = task_log_tag(task.get('id', '')) if task else '?'
     pfx = f'[Task {task_id}]'
 
     # Optional out-param: caller passes a mutable dict to learn whether
@@ -754,12 +756,11 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     try:
         summary_text = _generate_query_aware_summary(
             sources.summary_input, current_query, pfx, conv_id=conv_id, task=task,
-            usage_out=_summary_usage,
-            anchor_text=anchor_text,
-            source_messages=messages,
+            usage_out=_summary_usage, anchor_text=anchor_text, source_messages=messages,
             **({'output_budget_tokens': sources.summary_output_budget}
                if sources.summary_output_budget is not None else {}),
             **({'expected_route': policy.summary_route} if policy.active else {}),
+            **({'continuity_fold': sources.continuity_fold} if sources.continuity_fold else {}),
         )
     except Exception as exc:
         if not kwargs.get('_allow_deterministic_summary_fallback'):
@@ -800,8 +801,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 from lib.log import audit_log
                 audit_log(
                     'compaction_summary_fallback',
-                    conv=str(conv_id or '')[:16],
-                    task=str((task or {}).get('id') or '')[:16],
+                    conv=str(conv_id or ''),
+                    task=str((task or {}).get('id') or ''),
                     reason=_summary_fallback_reason,
                     implementation='deterministic_recovery_receipt',
                 )
@@ -838,6 +839,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         turn_diff_included=_turn_diff_included, result_meta=_result_meta,
         log_prefix=pfx,
         recovery_max_chars=_DETERMINISTIC_RECOVERY_MAX_CHARS,
+        continuity_fold=sources.continuity_fold,
     )
     if isinstance(accepted_summary, str):
         return accepted_summary
@@ -1143,12 +1145,12 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
 
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
-    task_id = task.get('id', '')[:8] if task else '?'
+    task_id = task_log_tag(task.get('id', '')) if task else '?'
     pfx = f'[Task {task_id}]'
 
     logger.info('%s [ForceCompact] Preparing continuation handoff for conv=%s '
                 'preserve_budget=%s', pfx,
-                conv_id[:8] if conv_id else '?', preserve_budget_tokens)
+                conv_id if conv_id else '?', preserve_budget_tokens)
 
     _explicit_trigger = (kwargs.get('_compaction_trigger')
                          if isinstance(kwargs, dict) else None)
@@ -1425,7 +1427,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
 
     logger.info('%s [Compact] Complete  conv=%s  '
                 'tokens: %d → %d (%.0f%% reduction)  messages: %d → %d',
-                pfx, conv_id[:8] if conv_id else '?',
+                pfx, conv_id if conv_id else '?',
                 tokens_before, tokens_after, reduction_pct,
                 msgs_before, msgs_after)
 

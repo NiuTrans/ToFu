@@ -20,7 +20,7 @@ import time
 import uuid
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from lib.goal_runs.run_pins import (
     clear_run_id,
@@ -170,23 +170,23 @@ def store_run_record(conv_id: str, run_id: str, *,
                 summaries = dict(kept)
                 logger.info('[Autopilot] conv=%s pruned autopilotSummaries: '
                             'evicted %d oldest run record(s), kept %d (cap=%d)',
-                            conv_id[:8], evicted, len(summaries), retain)
+                            conv_id, evicted, len(summaries), retain)
             settings['autopilotSummaries'] = summaries
             out['record'] = record
             logger.info('[Autopilot] conv=%s ✅ Stored concluded run record in sidecar '
                         '(reason=%s, %d report chars, run=%s, NOT a message)',
-                        conv_id[:8], reason_final, len(content), run_id)
+                        conv_id, reason_final, len(content), run_id)
             return None
 
         res = update_conversation_settings(
             conv_id, _mut, user_id=user_id)
         if res is None:
-            logger.warning('[Autopilot] run record: conv=%s not found', conv_id[:8])
+            logger.warning('[Autopilot] run record: conv=%s not found', conv_id)
             return None
         return out['record']
     except Exception as e:
         logger.error('[Autopilot] conv=%s run record sidecar store failed: %s',
-                     conv_id[:8], e, exc_info=True)
+                     conv_id, e, exc_info=True)
         return None
 
 
@@ -254,7 +254,7 @@ def conclude_run(
         run_id = resolve_recent_run_id(conv_id, user_id=user_id)
     if not run_id:
         logger.debug('[Autopilot] conclude_run: conv=%s no run id — nothing to '
-                     'conclude', conv_id[:8])
+                     'conclude', conv_id)
         return None
     record = store_run_record(
         conv_id, run_id, user_id=user_id, reason=reason)
@@ -290,7 +290,7 @@ def emit_run_concluded_event(task: dict, conv_id: str, run_id: str,
     from lib.tasks_pkg.manager import append_event
     from lib.tasks_pkg.manager import task_user_id
 
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     owner_user_id = int(task_user_id(task))
     record = store_run_record(
         conv_id, run_id, user_id=owner_user_id, reason=reason, text=report,

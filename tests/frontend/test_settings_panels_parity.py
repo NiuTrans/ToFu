@@ -38,9 +38,12 @@ PANELS_DIR = os.path.join(PROJECT_ROOT, 'static', 'settings_panels')
 # tests/mcp_protocol/test_mcp_catalog_internal_only.py).
 _EXPECTED_TABS = frozenset({
     'general', 'api', 'models', 'preset', 'knowledge', 'search', 'translate', 'speech',
-    'network', 'devices', 'feishu', 'dx', 'github', 'oauth', 'mcp', 'skills', 'tools',
+    'network', 'devices', 'messaging', 'oauth', 'mcp', 'skills', 'tools',
     'preferences', 'database', 'advanced', 'experiments',
 })
+# Chat platforms have no nav button: each is a collapsible section of the
+# 消息平台 (messaging) tab, but keeps its own panel fragment and marker.
+_MESSAGING_PLATFORM_PANELS = frozenset({'feishu', 'dx', 'github', 'wecom', 'qq', 'wechat'})
 
 
 def _hidden_tabs():
@@ -88,7 +91,7 @@ def test_all_panels_present_in_assembled_html():
     render-time strip removes them on purpose)."""
     html = _assembled_html()
     missing = [
-        tab for tab in (_EXPECTED_TABS - _hidden_tabs())
+        tab for tab in ((_EXPECTED_TABS | _MESSAGING_PLATFORM_PANELS) - _hidden_tabs())
         if f'id="settingsTab_{tab}"' not in html
     ]
     assert not missing, (
@@ -228,7 +231,7 @@ def test_all_panels_decoupled_not_inline():
     )
     # Every expected tab has its marker present.
     missing_markers = [
-        tab for tab in _EXPECTED_TABS
+        tab for tab in _EXPECTED_TABS | _MESSAGING_PLATFORM_PANELS
         if f'<!-- SETTINGS_PANEL:{tab} -->' not in html
     ]
     assert not missing_markers, (

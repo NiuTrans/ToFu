@@ -11,8 +11,9 @@ import { createProjectConversationNavigation } from './project-conversation-navi
 vi.mock('../i18n', () => ({ t: (key: string) => key }));
 const passiveReads = { coordinatorReports: async () => undefined, coordinatorBudget: async () => null, coordinatorProgress: async () => null,
   workerConversations: async () => ({ conversations: [], nextCursor: null, coverage: 'complete' }) };
-// presence.js also bridges the Global Router and Watchdog entries; these coordination specs stub them.
-const routerStub = 'const createGlobalRouterEntry = () => ({ refresh() {}, destroy() {}, home() { return \'\'; }, conversationId() { return \'\'; } });\n'
+// presence.js also bridges the Global Router, its owner delegation and the Watchdog entries; these coordination specs stub them.
+const ownerDelegationStub = 'const createRouterOwnerDelegation = () => ({ settings: document.createElement(\'details\'), destroy() {} });\n';
+const routerStub = ownerDelegationStub + 'const createGlobalRouterEntry = () => ({ refresh() {}, destroy() {}, home() { return \'\'; }, conversationId() { return \'\'; } });\n'
   + 'const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return \'\'; }, conversationId() { return \'\'; } });\n';
 
 it('mounts the leader above date groups using explicit binding without promoting a chat', async () => {
@@ -154,7 +155,7 @@ it('bridges the main coordinator card and health checks to their typed owners an
   const configureRouterWatchdogReview = vi.fn(async () => watchdog);
   new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface', 'createSameTaskReadJoin',
     'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId', 'loadConversation',
-    '_projectConversationNavigation', 'createGlobalRouterEntry', 'createRouterWatchdogEntry', 'createCoordinatorConversationGroups', 'const conversations = [];\n' + 'const mergeConversationCatalogRows = () => 0; const renderConversationList = () => {};\n' + source)(
+    '_projectConversationNavigation', 'createGlobalRouterEntry', 'createRouterWatchdogEntry', 'createCoordinatorConversationGroups', 'const conversations = [];\n' + ownerDelegationStub + 'const mergeConversationCatalogRows = () => 0; const renderConversationList = () => {};\n' + source)(
     runtime, vi.fn(), vi.fn(), createProjectCoordinationSurface, createSameTaskReadJoin, vi.fn(), () => active,
     { project: { ...passiveReads, coordination: async () => ({ conversationId: '', availability: 'unbound', revision: 0 }),
       board: async () => null, coordinationAssignments: async () => ({ assignments: [] }),
@@ -331,7 +332,8 @@ it.each([
   const routerWorkerModel = vi.fn(async () => ({ ...facts.coordination, workerModel: 'strong-model' }));
   const subscribe = vi.fn();
   const stub = `const createGlobalRouterEntry = () => ({ refresh() {}, destroy() {}, home() { return ${JSON.stringify(home)}; }, conversationId() { return ${JSON.stringify(home ? 'leader' : '')}; } });\n`
-    + `const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return ${JSON.stringify(watchdog)}; }, conversationId() { return ${JSON.stringify(watchdog ? 'leader' : '')}; } });\n`;
+    + `const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return ${JSON.stringify(watchdog)}; }, conversationId() { return ${JSON.stringify(watchdog ? 'leader' : '')}; } });\n`
+    + ownerDelegationStub;
   new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface', 'createSameTaskReadJoin',
     'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId',
     'loadConversation', '_projectConversationNavigation', 'createCoordinatorConversationGroups', 'const conversations = [];\n' + stub + 'const mergeConversationCatalogRows = () => 0; const renderConversationList = () => {};\n' + source)(
@@ -388,7 +390,8 @@ it.each([
   reads.coordination.mockResolvedValue({ ...facts.coordination, projectPath: path, conversationId: id });
   reads.coordinatorProgress.mockResolvedValue({ ...facts.coordinatorProgress, projectPath: path, conversationId: id });
   const stub = 'const createGlobalRouterEntry = () => ({ refresh() {}, destroy() {}, home() { return "/data/router/1"; }, conversationId() { return "coordinator-router"; } });\n'
-    + 'const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return "/data/router/1/.tofu-watchdog"; }, conversationId() { return "coordinator-watchdog"; } });\n';
+    + 'const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return "/data/router/1/.tofu-watchdog"; }, conversationId() { return "coordinator-watchdog"; } });\n'
+    + ownerDelegationStub;
   new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface', 'createSameTaskReadJoin',
     'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId',
     'loadConversation', '_projectConversationNavigation', 'createCoordinatorConversationGroups', 'const conversations = [];\n' + stub + 'const mergeConversationCatalogRows = () => 0; const renderConversationList = () => {};\n' + source)(
@@ -406,6 +409,79 @@ it.each([
     expect(document.getElementById('globalRouterEntry')!.hidden).toBe(row);
   } finally { window.dispatchEvent(new Event('pagehide')); }
 });
+
+/** presence.js over a mutable folder list, with the main coordinator card and the folder settings opener. */
+function mountFolderView(folders: { id: string; name: string; projectPaths: string[] }[], selected: () => string,
+  reads: Record<string, unknown>, conversations: unknown[] = []) {
+  document.body.innerHTML = '<div id="convList"></div><div id="presenceStrip"></div>';
+  const runtime: Record<string, any> = {}, settings = vi.fn();
+  const stub = 'const createGlobalRouterEntry = () => ({ refresh() {}, destroy() {}, home() { return "/data/router/1"; }, conversationId() { return "coordinator-router"; } });\n'
+    + 'const createRouterWatchdogEntry = () => ({ refresh() {}, destroy() {}, location() { return ""; }, conversationId() { return ""; } });\n'
+    + 'const _convStatusFlags = () => ({});\n' + ownerDelegationStub;
+  new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface', 'createSameTaskReadJoin',
+    'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId',
+    'loadConversation', '_projectConversationNavigation', 'createCoordinatorConversationGroups', '_promptRenameFolder', 'conversations',
+    stub + 'const mergeConversationCatalogRows = () => 0; const renderConversationList = () => {};\n' + source)(
+    runtime, vi.fn(), vi.fn(), createProjectCoordinationSurface, createSameTaskReadJoin, vi.fn(), () => null, { project: reads },
+    () => folders, selected, vi.fn(), createProjectConversationNavigation(), createCoordinatorConversationGroups, settings, conversations,
+  );
+  return { runtime, settings };
+}
+
+// A folder's name never decides the leader slot. One that names no directory has no project to bind
+// yet, but it is still the folder's slot, not the main coordinator's.
+it.each(['面试', 'Interview', '日本語の会議', '🚀 launch notes'])(
+  'a selected folder without a project directory (%s) keeps the project Coordinator slot', async (name) => {
+    const reads = coordinatorReads();
+    reads.coordination.mockResolvedValue({ ...facts.coordination, conversationId: '', availability: 'unbound', revision: 0 });
+    const folders = [{ id: 'folder', name, projectPaths: [] as string[] }];
+    let selected = 'folder';
+    const { runtime, settings } = mountFolderView(folders, () => selected, reads);
+    const slot = document.getElementById('globalRouterEntry')!;
+    try {
+      const row = document.querySelector<HTMLElement>('#projectCoordinatorEntry .coordination-leader');
+      expect(row).not.toBeNull();
+      expect(slot.hidden).toBe(true);
+      expect(row!.dataset.coordinatorId).toBe('');
+      expect(row!.querySelector('.coordination-leader-label')!.textContent).toBe('projectCoordination.coordinator');
+      expect(row!.querySelector('.coordination-leader-meta')!.textContent).toBe('projectCoordination.noDirectory');
+      // Without a directory there is no binding to read; the row opens the folder's settings to add one.
+      expect(reads.coordination).not.toHaveBeenCalled();
+      const actions = [...row!.querySelectorAll('button')];
+      expect(actions.map(button => button.textContent)).toEqual(['folder.settings.title']);
+      actions[0].click();
+      expect(settings).toHaveBeenCalledWith('folder');
+      // The uncategorized view keeps the main coordinator's card in that slot.
+      selected = ''; runtime.presenceRefresh();
+      expect(slot.hidden).toBe(false);
+      expect(document.querySelector('#projectCoordinatorEntry .coordination-leader')).toBeNull();
+      // Once the folder names a directory, its row reads that exact project's binding.
+      const root = `/srv/${name}`;
+      folders[0].projectPaths = [root]; selected = 'folder'; runtime.presenceRefresh();
+      await vi.waitFor(() => expect(document.querySelector('#projectCoordinatorEntry button')?.textContent)
+        .toBe('projectCoordination.create'));
+      expect(reads.coordination).toHaveBeenCalledWith(root, expect.any(AbortSignal));
+      expect(slot.hidden).toBe(true);
+    } finally { window.dispatchEvent(new Event('pagehide')); }
+  });
+
+it.each(['/srv/测试项目', '/srv/プロジェクト'.normalize('NFD'), '/srv/emoji 🚀 proj'])(
+  'groups the Workers of a Coordinator whose project directory is %s beneath its row', async (root) => {
+    const reads = coordinatorReads();
+    reads.coordination.mockResolvedValue({ ...facts.coordination, projectPath: root });
+    const worker = { id: 'worker', title: 'Worker', projectPath: root, folderId: 'folder', _coordinatorSource: 'leader', updatedAt: 2 };
+    const { runtime } = mountFolderView([{ id: 'folder', name: '项目', projectPaths: [root] }], () => 'folder', reads, [worker]);
+    try {
+      await vi.waitFor(() => expect(document.querySelector('#projectCoordinatorEntry [data-coordinator-id="leader"]')).not.toBeNull());
+      runtime.presenceRefresh();
+      await vi.waitFor(() => expect(reads.workerConversations).toHaveBeenCalledWith(root, undefined, expect.any(AbortSignal)));
+      const group = document.querySelector<HTMLElement>('#projectCoordinatorEntry + .coordinator-conversations-host .coordinator-conversations');
+      await vi.waitFor(() => expect(group?.hidden).toBe(false));
+      expect(group!.dataset.coordinatorId).toBe('leader');
+      expect(group!.querySelector('.coordinator-conversations-count')!.textContent).toBe('1');
+      expect(reads.coordination).toHaveBeenCalledWith(root, expect.any(AbortSignal));
+    } finally { window.dispatchEvent(new Event('pagehide')); }
+  });
 
 it('issues each coordination read once per push frame for the canvas and sidebar together', async () => {
   const info = vi.spyOn(console, 'info').mockImplementation(() => {});

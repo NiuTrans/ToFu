@@ -11,6 +11,8 @@ import json
 
 import pytest
 
+from tests.support.conversation_replay import ScriptedConversationRepository
+
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode("open")]
 
@@ -31,21 +33,6 @@ def _change(sequence: int, note_bytes: int) -> dict:
 
 def _page(head: int, events: list[dict], *, has_more: bool = False) -> dict:
     return {"head": head, "events": events, "resetRequired": False, "hasMore": has_more}
-
-
-class _ScriptedChanges:
-    """Change pages in script order; an exhausted script expires the cursor."""
-
-    def __init__(self, pages: list[dict]):
-        self.pages = list(pages)
-
-    def changes(self, _conversation_id, _user_id, *, after_sequence, limit):
-        if limit == 1:
-            return _page(after_sequence, [])
-        if self.pages:
-            return self.pages.pop(0)
-        return {"head": 0, "events": [], "resetRequired": True,
-                "resetReason": "cursor_expired"}
 
 
 def _frames(body: bytes) -> list[dict]:
@@ -72,10 +59,11 @@ def stream(flask_client, monkeypatch):
         heartbeat_interval_ms = 1
 
     def open_stream(pages, *, query=None, last_event_id=None):
+        broker = ConversationWakeBroker(owner_history_capacity=16)
+        repository = ScriptedConversationRepository({CONVERSATION: pages}, broker)
         monkeypatch.setattr(
-            sync_routes, "_service", FastHeartbeatService(_ScriptedChanges(pages)))
-        monkeypatch.setattr(
-            sync_routes, "broker", ConversationWakeBroker(owner_history_capacity=16))
+            sync_routes, "_service", FastHeartbeatService(repository))
+        monkeypatch.setattr(sync_routes, "broker", broker)
         response = flask_client.get(
             f"/api/v4/conversations/{CONVERSATION}/events",
             query_string={"streamClientId": "page-a", "streamGeneration": "1",
@@ -159,6 +147,27 @@ def test_heartbeats_carry_their_cursor_as_the_event_id(stream):
 
     heartbeat = next(frame for frame in frames if frame["event"] == "sync.heartbeat")
     assert heartbeat["id"] == heartbeat["data"]["cursor"] == _cursor(0)
+
+
+@pytest.mark.parametrize("initial_change", [False, True])
+def test_invalidations_reveal_later_pages_after_quiet_or_caught_up_state(stream, initial_change):
+    next_sequence = 1 + int(initial_change)
+    frames = stream([
+        _page(int(initial_change), [_change(1, 100)] if initial_change else []),
+        _page(next_sequence, [_change(next_sequence, 100)]),
+        _page(next_sequence, []),
+        _page(next_sequence + 1, [_change(next_sequence + 1, 100)]),
+    ], query={"windowBytes": str(WINDOW_BYTES)})
+
+    changes = [frame for frame in frames if frame["event"] == "conversation.activity"]
+    sequences = list(range(1, next_sequence + 2))
+    assert [frame["data"]["syncSeq"] for frame in changes] == sequences
+    assert [frame["id"] for frame in changes] == [_cursor(value) for value in sequences]
+    if not initial_change:
+        assert frames[0]["event"] == "sync.heartbeat"
+        assert frames[0]["id"] == frames[0]["data"]["cursor"] == _cursor(0)
+    assert frames[-1]["event"] == "sync.reset_required"
+    assert frames[-1]["data"]["reason"] == "cursor_expired"
 
 
 @pytest.mark.parametrize("query", [

@@ -8,7 +8,7 @@ import time
 
 from lib.conversation_sync.settled_rows import is_settled, settle
 from lib.cost import normalize_usage
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -105,5 +105,5 @@ def observe_completion(task, done_event, *, model, finish_reason):
         )
     except Exception as _se:
         logger.debug('[Task:%s] completion summary log failed: %s',
-                     task['id'][:8], _se)
+                     task_log_tag(task['id']), _se)
 

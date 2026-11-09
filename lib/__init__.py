@@ -16,7 +16,7 @@ __all__ = [
     'OPTIMIZER_ENABLED',
     'SCHEDULER_ALLOW_CODE_EXEC',
     'ARTIFACTS_ENABLED',
-    'SKIP_DOMAINS', 'MODEL_PRICING',
+    'SKIP_DOMAINS', 'FETCH_SKIP_DOMAINS', 'MODEL_PRICING',
     'QWEN_PRICING_CNY', 'DEFAULT_USD_CNY_RATE',
     'PROVIDER_PRICING', 'lookup_pricing',
     'set_provider_pricing', 'clear_provider_pricing',
@@ -81,7 +81,9 @@ def _cfg(env_key, saved_key, default, *, empty_env_is_unset=False):
 # requests and Settings-managed providers route through owner-scoped v2.
 # Preferred: LLM_API_KEYS=key1,key2,key3  (comma-separated, any number)
 # Legacy single-var: LLM_API_KEY still works (for 1 key only)
-_DEFAULT_KEYS = []  # No hardcoded or persisted-provider fallback.
+_DEFAULT_KEYS = [
+    # Add your API keys here, or set LLM_API_KEYS env var
+]  # No hardcoded or persisted-provider fallback.
 
 def _parse_api_keys():
     """Build legacy direct-call keys strictly from explicit environment."""
@@ -230,23 +232,14 @@ def _load_plugin_flags():
 
 _load_plugin_flags()
 
-# ── Search fetch blocklist ──
+# ── Saved search URL lists ──
 # Search and fetch limits are tofu-search's own defaults (SearchConfig); the
-# only saved search behaviour is the set of hosts the fetcher never visits.
-_DEFAULT_SKIP_DOMAINS = frozenset({
-    'youtube.com','youtu.be','twitter.com','x.com',
-    'facebook.com','instagram.com','tiktok.com',
-    'linkedin.com','discord.com',
-})
+# only saved search behaviour is operator bans and fetch-quality skips.
+from lib.search.saved_domain_lists import saved_fetch_skip_domains as _saved_fetch_skips
+from lib.search.saved_domain_lists import saved_skip_domains as _saved_bans
 
-
-def _saved_skip_domains(saved_config):
-    search = saved_config.get('search')
-    domains = search.get('skip_domains') if isinstance(search, dict) else None
-    return set(domains) if isinstance(domains, list) else set(_DEFAULT_SKIP_DOMAINS)
-
-
-SKIP_DOMAINS = _saved_skip_domains(_SAVED_CONFIG)
+SKIP_DOMAINS = _saved_bans(_SAVED_CONFIG.get('search'))
+FETCH_SKIP_DOMAINS = _saved_fetch_skips(_SAVED_CONFIG.get('search'))
 
 # ── Model pricing compatibility ──
 # Keep the historical ``from lib import MODEL_PRICING`` surface without making
@@ -288,7 +281,7 @@ def reload_config():
     This makes Settings UI changes take effect immediately for:
       - Model names (LLM_MODEL, QWEN_MODEL, GEMINI_MODEL, etc.)
       - Explicit environment API keys/base URL for direct-library callers
-      - The search fetch blocklist (SKIP_DOMAINS)
+      - The search URL lists (SKIP_DOMAINS bans, FETCH_SKIP_DOMAINS skips)
       - Feature flags (TRADING_ENABLED)
 
     The dispatcher (lib/llm_dispatch) is reset separately by the caller.
@@ -316,7 +309,8 @@ def reload_config():
     _mod.CLAUDE_SONNET_MODEL = os.environ.get('CLAUDE_SONNET_MODEL', '')
     _mod.IMAGE_GEN_MODEL = _cfg('IMAGE_GEN_MODEL', 'IMAGE_GEN_MODEL', '')
 
-    _mod.SKIP_DOMAINS = _saved_skip_domains(_SAVED_CONFIG)
+    _mod.SKIP_DOMAINS = _saved_bans(_SAVED_CONFIG.get('search'))
+    _mod.FETCH_SKIP_DOMAINS = _saved_fetch_skips(_SAVED_CONFIG.get('search'))
     # Push refreshed settings only when tofu-search is already resident. A
     # model/provider-only update must not cold-import the optional search graph;
     # first later activation reads these newest module values.

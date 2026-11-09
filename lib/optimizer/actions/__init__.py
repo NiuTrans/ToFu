@@ -4,7 +4,7 @@ Each handler module exports:
     ACTION = {
         'name': 'block_search_domain',
         'auto_apply': True,
-        'description': 'Add a domain to server_config.search.skip_domains for N days',
+        'description': 'Stop fetching a domain (search.fetch_skip_domains) for N days',
         'apply': apply_fn,      # (args: dict) -> dict  (raises on failure)
         'revert': revert_fn,    # (args: dict) -> None   (must be idempotent)
     }

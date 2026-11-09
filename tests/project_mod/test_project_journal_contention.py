@@ -144,7 +144,7 @@ def test_cached_history_reloads_external_replacement_and_rejects_corruption(proj
     assert journal.read_text() == '{corrupt'
 
 
-@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'insert', 'diffs', 'inserts', 'edit'])
+@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'diffs', 'edit'])
 def test_busy_is_typed_retryable_and_never_mutates(project, monkeypatch, action):
     session = mods._get_session_dir(project)
     monkeypatch.setattr(locks, '_wait_seconds', lambda: 0)
@@ -156,13 +156,9 @@ def test_busy_is_typed_retryable_and_never_mutates(project, monkeypatch, action)
             return _ops.save_uploaded_file(project, 'first.txt', b'new', on_conflict='overwrite')
         if action == 'diff':
             return _ops.tool_apply_diff(project, 'first.txt', 'old', 'new')
-        if action == 'insert':
-            return _ops.tool_insert_content(project, 'first.txt', 'old', 'new')
         if action == 'diffs':
             return _ops.tool_apply_diffs(project, [{'path': 'first.txt', 'search': 'old', 'replace': 'new'}])
-        if action == 'inserts':
-            return _ops.tool_insert_contents(project, [{'path': 'first.txt', 'anchor': 'old', 'content': 'new'}])
-        return _ops.tool_edit_file(project, [{'path': 'first.txt', 'operation': 'replace', 'anchor': 'old', 'content': 'new'}])
+        return _ops.tool_edit_file(project, [{'path': 'first.txt', 'anchor': 'old', 'content': 'new'}])
 
     with locks.locked_session(session), ThreadPoolExecutor(max_workers=1) as pool:
         result = pool.submit(attempt).result(timeout=5)
@@ -183,8 +179,7 @@ def test_busy_is_typed_retryable_and_never_mutates(project, monkeypatch, action)
 
 
 def edit(base, name, anchor='old', content='new'):
-    return _ops.tool_edit_file(base, [{'path': name, 'operation': 'replace',
-                                      'anchor': anchor, 'content': content}],
+    return _ops.tool_edit_file(base, [{'path': name, 'anchor': anchor, 'content': content}],
                                conv_id='conv', task_id=name)
 
 
@@ -227,8 +222,8 @@ def test_rejected_atomic_batch_reports_without_waiting_for_the_journal(project, 
     """A batch that will write nothing never queues behind the project journal."""
     session = mods._get_session_dir(project)
     monkeypatch.setattr(locks, '_wait_seconds', lambda: 30)
-    batch = [{'path': 'first.txt', 'operation': 'replace', 'anchor': 'old', 'content': 'new'},
-             {'path': 'second.txt', 'operation': 'replace', 'anchor': 'absent', 'content': 'x'}]
+    batch = [{'path': 'first.txt', 'anchor': 'old', 'content': 'new'},
+             {'path': 'second.txt', 'anchor': 'absent', 'content': 'x'}]
     with ThreadPoolExecutor(max_workers=1) as pool:
         with locks.locked_session(session):
             result = pool.submit(_ops.tool_edit_file, project, batch).result(timeout=5)

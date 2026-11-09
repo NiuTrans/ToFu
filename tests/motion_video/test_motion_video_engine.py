@@ -163,7 +163,20 @@ def _fake_narration(monkeypatch, tmp_path):
 
 def _fake_media(monkeypatch, *, render_ok=True):
     """Fake render/concat/mux; probe reads the REAL composed data-duration
-    so the REAL verify_spec gate runs against real timings."""
+    so the REAL verify_spec gate runs against real timings. Browser runtime
+    bytes are a scene-local fixture for this synthetic renderer; pin validation
+    belongs to test_motion_video_runtime_assets.py."""
+    from lib.motion_video import _runtime_assets as runtime
+
+    def fake_runtime(scene_dir, **kwargs):
+        path = os.path.join(scene_dir, runtime.GSAP_REL_PATH)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as stream:
+            stream.write('// Synthetic-renderer runtime fixture; no browser executes it.\n')
+        return runtime.GSAP_REL_PATH
+
+    monkeypatch.setattr(runtime, 'ensure_gsap', fake_runtime)
+
     def fake_render(project_dir, output, **kw):
         if not render_ok:
             return {'ok': False, 'category': 'chrome', 'detail': 'boom'}

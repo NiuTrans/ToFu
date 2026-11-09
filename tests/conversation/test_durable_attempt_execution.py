@@ -15,18 +15,14 @@ pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api
 
 
-@pytest.fixture
-def claimed(semantic_authority, monkeypatch, request):
-    from lib import storage, turn_lifecycle as turns
+def claim_attempt(factory, owner, extra_config=None):
+    """Admit one new conversation and claim its job through real storage."""
+    from lib import turn_lifecycle as turns
     from lib.conversation_sync.execution_identity import capture_execution_identity
-    from lib.tasks_pkg.manager.runtime import chat_task_runtime
-    factory, owner, _engine = semantic_authority
-    monkeypatch.setattr(turns, '_turn_client', lambda **kw: factory(**kw))
-    monkeypatch.setattr(storage, 'get_storage_client', lambda **kw: factory(**kw))
     identity = uuid.uuid4().hex
     principal = PrincipalContext.user(subject_id=f'user:{owner}', owner_user_id=owner)
     config = capture_execution_identity({'model': 'controlled'}, owner, principal)
-    config.update(getattr(request, 'param', {}))
+    config.update(extra_config or {})
     pair = turns.create_turn_pair(identity, command_id=identity,
         input_projection={'content': 'accepted input'}, config=config, user_id=owner,
         conversation_defaults={'allowCreate': True, 'title': 'Claimed', 'settings': {}})
@@ -35,6 +31,18 @@ def claimed(semantic_authority, monkeypatch, request):
         'worker_id': identity, 'task_kinds': ['conversation-attempt'],
         'now_ms': 1, 'lease_ms': 300_000}, uuid.uuid4().hex)
     context = WorkerExecutionContext(WorkerJobClaim.from_document(document, expected_worker_id=identity))
+    assert context.claim.task_id == 'conversation-attempt:' + pair['attempt']['attemptId']
+    return context, pair
+
+
+@pytest.fixture
+def claimed(semantic_authority, monkeypatch, request):
+    from lib import storage, turn_lifecycle as turns
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    factory, owner, _engine = semantic_authority
+    monkeypatch.setattr(turns, '_turn_client', lambda **kw: factory(**kw))
+    monkeypatch.setattr(storage, 'get_storage_client', lambda **kw: factory(**kw))
+    context, pair = claim_attempt(factory, owner, getattr(request, 'param', {}))
     yield context, pair, factory, owner
     from lib.tasks_pkg.event_log import flush_pending
     flush_pending(context.claim.task_id)
@@ -74,6 +82,8 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(
         append_event(task, {'type': 'delta', 'content': task['content']})
         stamp_chat_task_terminal(task, status='done', finish_reason='stop')
         append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        task['_cachePrefixHWMCandidate'] = 17
+        task['_lastTurnCacheReadCandidate'] = 23
         assert persist_task_result(task)
 
     monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', run)
@@ -81,6 +91,8 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(
     assert outcome.status == 'succeeded'
     task = chat_task_runtime.get(context.claim.task_id)
     assert not task.get('_terminalPersistencePending')
+    # Joined completion recorded the exit receipt, so ordinary TTL applies again.
+    assert '_exitReceiptPending' not in task
     assert task['_invocationAbortCheck'].observer_count == 0
     assert entered == [context.claim.task_id]
     assert turns.get_turn(pair['turn']['conversationId'], pair['turn']['turnId'],
@@ -89,6 +101,55 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(
     chat_task_runtime.discard(context.claim.task_id)
     assert execute_claimed_attempt(context, context.claim.payload) == outcome
     assert entered == [context.claim.task_id]
+
+
+def test_claimed_attempt_never_waits_for_an_unrelated_running_attempt(claimed, monkeypatch):
+    """Each claimed attempt executes under its own attempt's dispatch lock only."""
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync import task_start
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt
+    from lib.tasks_pkg.event_log import flush_pending
+    from lib.tasks_pkg.manager import append_event, persist_task_result, stamp_chat_task_terminal
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    running, _pair, factory, owner = claimed
+    other, _other_pair = claim_attempt(factory, owner)
+    monkeypatch.setattr(task_start, '_throttled_cleanup_old_tasks', lambda: None)
+    monkeypatch.setattr(turns, 'build_api_messages',
+                        lambda *a, **kw: [{'role': 'user', 'content': 'accepted input'}])
+    entered, release = threading.Event(), threading.Event()
+
+    def run(task):
+        if task['id'] == running.claim.task_id:
+            entered.set()
+            assert release.wait(120)
+        task['content'] = 'completed by the shared executor'
+        append_event(task, {'type': 'delta', 'content': task['content']})
+        stamp_chat_task_terminal(task, status='done', finish_reason='stop')
+        append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        assert persist_task_result(task)
+
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', run)
+    outcomes = {}
+
+    def execute(context):
+        outcomes[context.claim.task_id] = execute_claimed_attempt(context, context.claim.payload)
+
+    first = threading.Thread(target=execute, args=(running,), daemon=True)
+    first.start()
+    try:
+        assert entered.wait(120)
+        second = threading.Thread(target=execute, args=(other,), daemon=True)
+        second.start()
+        second.join(120)
+        assert not second.is_alive(), 'an unrelated attempt waited for a running attempt'
+        assert outcomes[other.claim.task_id].status == 'succeeded'
+    finally:
+        release.set()
+        first.join(120)
+        flush_pending(other.claim.task_id)
+        chat_task_runtime.discard(other.claim.task_id)
+    assert not first.is_alive()
+    assert outcomes[running.claim.task_id].status == 'succeeded'
 
 
 @pytest.mark.parametrize('claimed', [{'_projectDispatchWorkspaceTaskId': 'project-worker:assignment'}],
@@ -377,6 +438,73 @@ def test_stop_without_local_task_is_durable_and_cancel_handler_never_starts_work
     assert settled['status'] == ('failed' if internal else 'interrupted')
     assert settled['startedAt'] is None
     assert cancel_claimed_attempt(context, context.claim.payload) == outcome
+
+
+def test_queued_stop_outranks_later_lease_expiries_and_settles_without_running(
+        semantic_authority, monkeypatch):
+    """Live 2026-11-07: a Stopped queued attempt waited 21+ minutes behind expiring leases."""
+    from lib import storage, turn_lifecycle as turns
+    from lib.conversation_sync.execution_identity import capture_execution_identity
+    from lib.conversation_sync.worker_execution import conversation_registration
+    from lib.durable_worker import (StorageWorkerJobStore, SynchronousWorkerRunner,
+                                    WorkerJobOutcome, WorkerKindRegistration, WorkerKindSafety)
+    from lib.tasks_pkg.event_log import flush_pending
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from tests.support.worker_job_time import wall_ms, wait_until_ms
+    factory, owner, _engine = semantic_authority
+    monkeypatch.setattr(turns, '_turn_client', lambda **kw: factory(**kw))
+    monkeypatch.setattr(storage, 'get_storage_client', lambda **kw: factory(**kw))
+    monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor',
+                        lambda *a, **kw: pytest.fail('a Stopped queued attempt entered execution'))
+    identity = uuid.uuid4().hex
+    principal = PrincipalContext.user(subject_id=f'user:{owner}', owner_user_id=owner)
+    config = capture_execution_identity({'model': 'controlled'}, owner, principal)
+    pair = turns.create_turn_pair(identity, command_id=identity,
+        input_projection={'content': 'accepted input'}, config=config, user_id=owner,
+        conversation_defaults={'allowCreate': True, 'title': 'Queued Stop', 'settings': {}})
+    attempt_id = pair['attempt']['attemptId']
+    task_id = f'conversation-attempt:{attempt_id}'
+    turns.dispatch_attempt_to_worker(principal, attempt_id)
+    receipt = turns.abort_attempt(attempt_id, user_id=owner, withdraw_dispatch=False)
+    assert receipt['status'] == 'abort_signaled'
+    # Dead holders of another kind: their leases expire after the Stop above.
+    storm, held = 'claim-fairness-storm', []
+    for ordinal in range(2):
+        factory(write=True).command('worker_job.enqueue', {
+            'task_id': f'{storm}:{identity}:{ordinal}', 'user_id': owner, 'tenant_id': '',
+            'task_kind': storm, 'idempotency_key': f'{storm}:{identity}:{ordinal}',
+            'payload': {'contract': f'{storm}/v1', 'principal': principal.to_payload()},
+            'now_ms': wall_ms()}, uuid.uuid4().hex)
+        held.append(factory(write=True).command('worker_job.claim_next', {
+            'worker_id': 'dead-holder', 'task_kinds': [storm], 'now_ms': wall_ms(),
+            'lease_ms': 10_000}, None))
+    wait_until_ms(max(job['leaseDeadlineMs'] for job in held))
+    assert factory().query('worker_job.claim_horizon', {'task_kinds': [storm]})['claimableInMs'] == 0
+    ran = []
+
+    def storm_handler(context, _payload):
+        ran.append(context.claim.task_id)
+        return WorkerJobOutcome(status='succeeded', result_ref=context.claim.task_id)
+
+    runner = SynchronousWorkerRunner(worker_id='fair-worker:' + identity,
+        store=StorageWorkerJobStore(client_factory=factory),
+        registrations=[conversation_registration(), WorkerKindRegistration(
+            storm, storm_handler, WorkerKindSafety(True, True, True, True))])
+    try:
+        settled = runner.run_once()
+        assert (settled.state, settled.task_id) == ('cancelled', task_id), settled
+        assert ran == []
+        attempt = turns.get_attempt(attempt_id, user_id=owner)
+        assert (attempt['status'], attempt['startedAt']) == ('interrupted', None)
+        job = factory().query('worker_job.get', {'task_id': task_id, 'user_id': owner})
+        assert job['status'] == 'cancelled'
+        # Takeover still serves the expired holders, each under a new fence.
+        taken = [runner.run_once() for _ in held]
+        assert [(result.state, result.fencing_token) for result in taken] == [('succeeded', 2)] * 2
+        assert sorted(ran) == sorted(job['taskId'] for job in held)
+    finally:
+        flush_pending(task_id)
+        chat_task_runtime.discard(task_id)
 
 
 def test_child_inspector_evidence_borrows_current_root_worker_claim(claimed):

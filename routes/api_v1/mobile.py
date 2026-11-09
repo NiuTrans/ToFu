@@ -1,29 +1,27 @@
-"""Serve the repo-built Android APK over the LAN.
+"""Authenticated local APK delivery and credential-free phone connection QR.
 
-The release APK produced by ``./gradlew assembleRelease`` (same signing
-config as the GitHub-published artifact) is exposed directly by this server,
-so a phone on the same network installs the exact build the operator just
-compiled — no GitHub round-trip and no remote/local divergence.
+The operator's configured local APK is exposed directly without per-request
+certificate/manifest validation. Verify it with the SDK release validator
+before delivery. This adapter does not certify CI publication or uploaded
+bytes; local URLs retain a configured trusted ASGI root_path only.
 
 Endpoints:
-  * ``GET /api/v1/mobile/android/apk``  — the APK attachment itself.
-  * ``GET /api/v1/mobile/android/link`` — JSON: absolute URL (with the
-    caller's credential embedded via the ``?token=`` first-link transport
-    when one was presented) + a QR ``data:`` URI of that URL. ``?base=``
-    carries the caller's own server root when a reverse proxy hides it.
-  * ``GET /api/v1/mobile/android``      — minimal scan-me page; it asks
-    ``link`` for the QR with its own root, computed from ``location``.
-  * ``GET /api/v1/mobile/connect/link`` — JSON: a ``tofu://connect`` deep link
+  * ``GET /api/v4/mobile/android/apk``  — the APK attachment itself.
+  * ``GET /api/v4/mobile/android/link`` — credential-free absolute URL and
+    QR; ``?base=`` retains the caller's same-host reverse-proxy root.
+  * ``GET /api/v4/mobile/android``      — minimal scan-me page; it asks
+    ``link`` under its own root, computed from ``location``.
+  * ``GET /api/v4/mobile/connect/link`` — JSON: a ``tofu://connect`` deep link
     (and its QR ``data:`` URI) for THIS server's address, so the phone's
     built-in scanner adds the server without typing a UUID URL.
-  * ``GET /api/v1/mobile/connect``      — scan-to-connect page for the server
+  * ``GET /api/v4/mobile/connect``      — scan-to-connect page for the server
     address, computed from ``location`` so it stays correct behind any
     reverse-proxy prefix.
 
 The APK location defaults to the in-repo Gradle output and can be pointed
 elsewhere with ``TOFU_ANDROID_APK_PATH``. All endpoints sit behind the
-normal auth gate; the phone authenticates through the query-token redirect
-the first link carries.
+normal auth gate. Never reflect a browser's bearer credential into links/QRs.
+Declarations retain the v1 adapter namespace; production mounts their v4 twins.
 """
 
 from __future__ import annotations
@@ -38,6 +36,7 @@ from lib.api_v4 import raw_success_response
 from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.file_serving import send_file_conditional
 from lib.log import get_logger
+from lib.mobile_distribution import credential_free_http_url
 from lib.openapi import media_responses, api_meta
 
 from .auth import require_auth
@@ -54,14 +53,15 @@ _APK_MIME = 'application/vnd.android.package-archive'
 #: projection of ``mobile_android_apk_v1`` (``/api/v1/*`` answers 426).
 _APK_DOWNLOAD_PATH = 'api/v4/mobile/android/apk'
 
-#: Both scan pages are served at ``<tofu-root>/api/v4/mobile/...``. The
-#: browser's address up to the first ``/api/`` is the root a phone must dial:
-#: it keeps the reverse-proxy prefix (code-server ``/proxy/<port>/``, cloud
-#: IDEs) and the edge's https, both lost before the request reaches us.
-_PAGE_ROOT_JS = """\
-  var path = location.pathname;
-  var at = path.indexOf('/api/');
-  var root = location.origin + (at >= 0 ? path.slice(0, at + 1) : '/');
+# Recover only the actual scan-page suffix: a deployment prefix may contain
+# /api/. Keep the browser's prefix and scheme, which a stripping proxy hides.
+_PAGE_ROOT_JS = r"""
+  var match = location.pathname.match(/^(.*)\/api\/v(?:1|4)\/mobile\/(?:android|connect)\/?$/);
+  if (!match) {
+    document.getElementById('err').textContent = 'Could not determine this server address';
+    return;
+  }
+  var root = location.origin + match[1] + '/';
 """
 
 
@@ -70,40 +70,21 @@ def _apk_path() -> Path:
     return Path(override) if override else _DEFAULT_APK
 
 
-def _presented_token() -> str:
-    """Raw credential the current request arrived with ('' when none).
-
-    The session cookie stores the raw token, so a normal browser session
-    yields its credential here without any keystore lookup.
-    """
-    from .auth import presented_credential
-    return presented_credential().token
-
-
 def _caller_root(base: str) -> str | None:
-    """The server root this caller reaches, ending in ``/``; None if invalid.
-
-    Without ``base`` it is this request's root, right on a direct connection.
-    The APK URL embeds the caller's credential, so ``base`` must name the Host
-    this request arrived on (the pin ``/api/browser/download?base=`` uses).
-    """
-    if not base:
-        return request.url_root
-    if not _is_absolute_http_url(base):
+    """Retain the caller's same-host deployment prefix, without credentials."""
+    root = base or request.url_root
+    if not _is_absolute_http_url(root):
         return None
-    parsed = urlparse(base)
+    parsed = urlparse(root)
     if (parsed.netloc.lower() != (request.host or '').lower()
-            or parsed.query or parsed.fragment):
+            or '?' in root or '#' in root):
         return None
-    return base.rstrip('/') + '/'
+    return root.rstrip('/') + '/'
 
 
 def _download_url(root: str) -> str:
-    url = root + _APK_DOWNLOAD_PATH
-    token = _presented_token()
-    if token:
-        url = f'{url}?token={token}'
-    return url
+    # Only the production-mounted route is emitted. The phone signs in itself.
+    return root + _APK_DOWNLOAD_PATH
 
 
 @api_v1_mobile_bp.route('/api/v1/mobile/android/apk', methods=['GET'])
@@ -116,8 +97,8 @@ def mobile_android_apk_v1():
     path = _apk_path()
     if not path.is_file():
         return api_not_found(
-            'No local APK build found. Run ./gradlew assembleRelease in '
-            'android/ first (or set TOFU_ANDROID_APK_PATH).')
+            'No local APK build found. Configure private release signing and '
+            'run ./gradlew assembleRelease in android/ (or set TOFU_ANDROID_APK_PATH).')
     response = send_file_conditional(
         path, mimetype=_APK_MIME,
         download_name='tofu-android.apk', as_attachment=True)
@@ -130,34 +111,25 @@ def mobile_android_apk_v1():
 @require_auth
 @api_meta(
     summary='Absolute download URL + QR for the local Android APK',
-    description=(
-        'By default the URL is built on this request\'s own root, which is '
-        'right on a direct connection. Behind a reverse-proxy prefix, pass the '
-        'root the client actually reaches as `base` (the scan page sends its '
-        'own `location`). Because the URL carries the caller\'s credential, '
-        '`base` must name this request\'s Host.'),
-    tags=['mobile'],
-    request_body=False,
-    parameters=[
-        {'name': 'base', 'in': 'query', 'required': False,
-         'schema': {'type': 'string'},
-         'description': 'Absolute http(s) root of this server as the client '
-                        'reaches it, e.g. https://host/proxy/15000/.'},
-    ],
+    description='Credential-free local APK URL. Behind a stripping reverse proxy, '
+                'pass the same-host root the phone reaches as base.',
+    tags=['mobile'], request_body=False,
+    parameters=[{'name': 'base', 'in': 'query', 'required': False,
+                 'schema': {'type': 'string'},
+                 'description': 'Absolute same-host HTTP(S) deployment root without credentials.'}],
 )
 def mobile_android_link_v1():
     from lib.qr import qr_png_data_uri
 
     root = _caller_root((request.args.get('base') or '').strip())
     if root is None:
-        return api_bad_request(
-            'base must be this server\'s own absolute http(s) root, '
-            'without query or fragment')
+        return api_bad_request('base must be this server\'s own absolute http(s) root, '
+                               'without credentials, query or fragment')
     url = _download_url(root)
     payload = {
         'available': _apk_path().is_file(),
         'url': url,
-        'tokenEmbedded': bool(_presented_token()),
+        'tokenEmbedded': False,
         'qr': qr_png_data_uri(url),
     }
     path = _apk_path()
@@ -171,17 +143,13 @@ def mobile_android_link_v1():
 _ANDROID_PAGE_SCRIPT = '<script>\n(function () {\n' + _PAGE_ROOT_JS + """\
   var err = document.getElementById('err');
   fetch(root + 'api/v4/mobile/android/link?base=' + encodeURIComponent(root),
-        {headers: {'Accept': 'application/json'}})
+        {headers: {'Accept': 'application/json'}, credentials: 'same-origin', redirect: 'error'})
     .then(function (r) {
-      return r.json().then(function (body) {
-        if (!r.ok) {
-          throw new Error((body && (body.detail || body.title)) ||
-                          ('HTTP ' + r.status));
-        }
-        return body && body.data ? body.data : body;
-      });
+      if (!r.ok) { throw new Error('Server refused the download link'); }
+      return r.json();
     })
-    .then(function (d) {
+    .then(function (body) {
+      var d = body && body.data ? body.data : body;
       var link = document.getElementById('link');
       link.href = d.url;
       link.textContent = d.url;
@@ -190,13 +158,10 @@ _ANDROID_PAGE_SCRIPT = '<script>\n(function () {\n' + _PAGE_ROOT_JS + """\
         qr.src = d.qr;
         qr.hidden = false;
       } else {
-        err.textContent =
-          'QR unavailable (qrcode package missing) — use the link below.';
+        err.textContent = 'QR unavailable — use the link below.';
       }
     })
-    .catch(function (e) {
-      err.textContent = 'Could not build the download link: ' + e.message;
-    });
+    .catch(function () { err.textContent = 'Could not build the download link'; });
 })();
 </script>
 """
@@ -219,7 +184,7 @@ def mobile_android_page_v1():
         status = (f'APK ready — {stat.st_size / (1024 * 1024):.1f} MiB, '
                   f'built {built}')
     else:
-        status = ('No local build yet — run '
+        status = ('No local build yet — configure private release signing, then run '
                   '<code>./gradlew assembleRelease</code> in android/.')
     html = (
         '<!doctype html><meta charset="utf-8">'
@@ -229,15 +194,18 @@ def mobile_android_page_v1():
         'max-width:26em;padding:0 1.2em;color:#222;text-align:center}'
         'h1{font-size:1.3rem}code{background:#f3f3f3;padding:.1em .4em;'
         'border-radius:3px;word-break:break-all}'
+        'a{overflow-wrap:anywhere}'
         'p.hint{color:#666;font-size:.85rem}</style>'
         '<h1>Tofu Android — local build</h1>'
         f'<p>{status}</p>'
         '<img id="qr" width="264" height="264" alt="APK download QR" hidden>'
         '<p id="err" class="hint"></p>'
-        '<p class="hint">Same Wi-Fi as this server, scan to download.<br>'
-        '<a id="link"></a></p>'
-        + _ANDROID_PAGE_SCRIPT)
-    return Response(html, content_type='text/html; charset=utf-8')
+        '<p class="hint">Use a network that reaches this server and sign in independently.<br>'
+        '<a id="link"></a></p>' + _ANDROID_PAGE_SCRIPT)
+    response = Response(html, content_type='text/html; charset=utf-8')
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -251,13 +219,7 @@ _MAX_CONNECT_NAME = 64
 
 
 def _is_absolute_http_url(value: str) -> bool:
-    if not value or len(value) > _MAX_CONNECT_URL:
-        return False
-    try:
-        parsed = urlparse(value)
-    except ValueError:  # e.g. an unbalanced IPv6 bracket in the host
-        return False
-    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+    return bool(credential_free_http_url(value, max_length=_MAX_CONNECT_URL))
 
 
 def _connect_deep_link(url: str, name: str) -> str:
@@ -274,8 +236,8 @@ def _connect_deep_link(url: str, name: str) -> str:
     summary='Build a Tofu connect deep link and QR for a server address',
     description=(
         'Encodes a `tofu://connect` deep link (the address, plus an optional '
-        'display name) that the Android shell\'s QR scanner turns into a saved '
-        'server. `url` defaults to this request\'s root, but callers behind a '
+        'display name) that a native client opens as a review-only server '
+        'draft. `url` defaults to this request\'s root, but callers behind a '
         'reverse-proxy prefix should pass their own absolute address so the '
         'link matches what the client actually reaches.'),
     tags=['mobile'],
@@ -294,7 +256,7 @@ def mobile_connect_link_v1():
     if not url:
         url = request.url_root
     if not _is_absolute_http_url(url):
-        return api_bad_request('url must be an absolute http(s) URL')
+        return api_bad_request('url must be an absolute http(s) server address without credentials')
     name = (request.args.get('name') or '').strip()[:_MAX_CONNECT_NAME]
     if not name:
         name = urlparse(url).netloc
@@ -310,7 +272,7 @@ def mobile_connect_link_v1():
 # under any reverse-proxy prefix (code-server `/proxy/<port>/`, cloud IDE, …).
 # The address only ever needs percent-encoding, so a small JS replace suffices
 # and the page needs no server-side templating.
-_CONNECT_PAGE_HTML = """<!doctype html>
+_CONNECT_PAGE_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect a phone to this Tofu</title>
@@ -326,7 +288,7 @@ _CONNECT_PAGE_HTML = """<!doctype html>
 </style>
 <h1>Connect a phone</h1>
 <p>Open <strong>Tofu</strong> on your phone and scan this code, or tap
-   <strong>Scan QR</strong> in the app. It adds this server in one step.</p>
+   <strong>Scan QR</strong> in the Android app. Review the address before saving.</p>
 <img id="qr" alt="Tofu connect QR">
 <p id="err" class="hint"></p>
 <p class="hint">Address: <code id="u">…</code></p>
@@ -335,8 +297,11 @@ _CONNECT_PAGE_HTML = """<!doctype html>
 (function () {
 """ + _PAGE_ROOT_JS + """\
   var q = root + 'api/v4/mobile/connect/link?url=' + encodeURIComponent(root);
-  fetch(q, {headers: {'Accept': 'application/json'}})
-    .then(function (r) { return r.json(); })
+  fetch(q, {headers: {'Accept': 'application/json'}, credentials: 'same-origin', redirect: 'error'})
+    .then(function (r) {
+      if (!r.ok) { throw new Error('Server refused the connection link'); }
+      return r.json();
+    })
     .then(function (body) {
       var d = body && body.data ? body.data : body;
       if (!d || !d.qr) { throw new Error('QR unavailable on this server'); }
@@ -361,7 +326,7 @@ _CONNECT_PAGE_HTML = """<!doctype html>
     summary='Scan-to-connect page for this Tofu server',
     description=(
         'Renders a QR encoding a `tofu://connect` link for this server\'s own '
-        'address, so a phone adds the server with one scan. The address is '
+        'address, so a phone opens a review draft with one scan. The address is '
         'resolved from `location` in the browser, so the page stays correct '
         'behind any reverse-proxy prefix.'),
     tags=['mobile'],
@@ -369,4 +334,7 @@ _CONNECT_PAGE_HTML = """<!doctype html>
 )
 @raw_success_response
 def mobile_connect_page_v1():
-    return Response(_CONNECT_PAGE_HTML, content_type='text/html; charset=utf-8')
+    response = Response(_CONNECT_PAGE_HTML, content_type='text/html; charset=utf-8')
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response

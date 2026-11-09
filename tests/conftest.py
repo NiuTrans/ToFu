@@ -24,6 +24,14 @@ import time
 
 import pytest
 
+from tests.support.process_priority import lower_own_priority
+
+# Every pytest controller and xdist worker yields CPU and I/O to the live
+# server before this module imports the application, probes engines or lets
+# xdist start workers; workers, engines and browsers inherit it
+# (docs/TESTING_STRATEGY.md, "Test processes yield to the live server").
+lower_own_priority()
+
 _conftest_logger = logging.getLogger('tests.conftest')
 
 # Never borrow the developer's real Codex login during tests.
@@ -32,7 +40,12 @@ os.environ['TOFU_CODEX_SHARED_LOGIN'] = '0'
 # local runtime-replica cache; replica tests pass explicit environments.
 os.environ['TOFU_RUNTIME_REPLICA'] = 'off'
 os.environ.pop('TOFU_LOCAL_WORKSPACES', None)
-os.environ.pop('TOFU_LOCAL_DIR', None)
+# Lanes place themselves on a local volume by default, and task checkouts do
+# once TOFU_LOCAL_WORKSPACES opts in. A temporary directory is never a
+# placement root, so naming one as the only candidate keeps both on the
+# disposable data root and out of the developer's home; placement tests pass
+# their own environments.
+os.environ['TOFU_LOCAL_DIR'] = os.path.join(tempfile.gettempdir(), 'tofu-tests-placement')
 
 
 # Pytest is frequently launched from a terminal created by the running Tofu
@@ -189,7 +202,7 @@ def _retire_pytest_root(kind: str, root: Path) -> bool:
     """Release what a dead owner's root still holds; True once it may be removed."""
     if kind != 'postgres':
         return True
-    from tests.support.postgres_cluster import retire_cluster_root
+    from tests.support.postgres_cleanup import retire_cluster_root
     return retire_cluster_root(root)
 
 
@@ -249,9 +262,7 @@ def _reclaim_stale_pytest_roots(
     }
 
 
-# Retiring a PostgreSQL root imports that pytest plugin before pytest itself
-# registers it; mark it first so its assertions are still rewritten.
-pytest.register_assert_rewrite('tests.support.postgres_cluster')
+# Startup reclamation imports only the process/IPC cleanup owner.
 _startup_root_reclaim = _reclaim_stale_pytest_roots()
 if _startup_root_reclaim['removed']:
     _conftest_logger.info(
@@ -1168,6 +1179,10 @@ def pytest_configure(config):
     )
 
 
+# Lowered priority (tests/support/process_priority.py) cannot order requests to
+# the shared volume holding the interpreter, checkout and live server data; a
+# measured 16-worker run coincided with a 4.8 s live-server stall
+# (docs/TESTING_STRATEGY.md, "The four-worker default stays").
 _PYTEST_XDIST_DEFAULT_CEILING = 4
 
 
@@ -1383,6 +1398,121 @@ def _auth_mode_override(request):
 # a response object exposing sync ``.status_code / .headers / .data /
 # .get_json()``. This IS the "sync-adapted test client" the suite was always
 # documented to use.
+def _run_coro_with_alarm(loop, task):
+    """Retain the existing test deadline outside asyncio's exception handlers."""
+    import asyncio
+    import signal
+
+    previous = None
+    if threading.current_thread() is threading.main_thread() and hasattr(signal, 'SIGALRM'):
+        previous = signal.getsignal(signal.SIGALRM)
+    interrupted = []
+    active = [task]
+    settling = False
+
+    def consume_failure(finished):
+        if not finished.cancelled():
+            finished.exception()
+
+    task.add_done_callback(consume_failure)
+
+    def expire(signum, frame):
+        try:
+            previous(signum, frame)
+        except BaseException as error:
+            # asyncio can retain Failed in a child Task or log it from a
+            # callback. Wake our own request and preserve the original failure
+            # even if its cancellation cleanup returns normally.
+            interrupted.append(error)
+            if settling:
+                # Cancellation must not revoke the awaitable that physically
+                # joins our workers. Deliver this failure after settlement.
+                return
+            interrupted_task = asyncio.current_task(loop)
+            if interrupted_task is not None and interrupted_task is not task:
+                interrupted_task.add_done_callback(consume_failure)
+            active[0].cancel()
+            raise
+
+    def drive(awaitable):
+        future = asyncio.ensure_future(awaitable, loop=loop)
+        active[0] = future
+        while True:
+            try:
+                return loop.run_until_complete(future)
+            except BaseException as error:
+                if not future.done() and any(error is failure for failure in interrupted):
+                    # A signal can interrupt select itself. The cancellation
+                    # still needs to run before this barrier is joined.
+                    continue
+                raise
+
+    failure = None
+    try:
+        try:
+            if callable(previous):
+                signal.signal(signal.SIGALRM, expire)
+            result = drive(task)
+        finally:
+            settling = True
+            if task.done():
+                consume_failure(task)
+            if interrupted:
+                _close_coro_loop(loop, drive)
+            else:
+                # Ordinary outcomes retain the original handoff: the
+                # request does not own accepted application background work.
+                loop.close()
+    except BaseException as error:
+        failure = error
+    finally:
+        if callable(previous):
+            signal.signal(signal.SIGALRM, previous)
+    if interrupted:
+        raise interrupted[0]
+    if failure is not None:
+        raise failure
+    return result
+
+
+def _close_coro_loop(loop, drive):
+    """Join owned tasks, async generators and executor calls before closing."""
+    import asyncio
+
+    pending = asyncio.all_tasks(loop)
+    for task in pending:
+        task.cancel()
+    try:
+        if pending:
+            drive(asyncio.gather(*pending, return_exceptions=True))
+            for task in pending:
+                if not task.cancelled() and task.exception() is not None:
+                    loop.call_exception_handler({
+                        'message': 'Exception during sync test-client shutdown',
+                        'exception': task.exception(), 'task': task,
+                    })
+    finally:
+        try:
+            drive(loop.shutdown_asyncgens())
+        finally:
+            try:
+                drive(loop.shutdown_default_executor())
+            finally:
+                loop.close()
+
+
+def _run_coro_on_private_loop(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        task = asyncio.ensure_future(coro, loop=loop)
+        return _run_coro_with_alarm(loop, task)
+    finally:
+        if not loop.is_closed():
+            loop.close()
+
+
 def _run_coro(coro):
     import asyncio
     try:
@@ -1394,27 +1524,57 @@ def _run_coro(coro):
         # thread.  Quart's legacy sync adapter must not try to nest another
         # loop there (``Cannot run the event loop while another loop is
         # running``); drive this one request on a private helper thread.
-        import threading
         result = []
         error = []
+        owned = []
+        ready = threading.Event()
+        finished = threading.Event()
+
+        def _started(loop, task):
+            owned.extend((loop, task))
+            ready.set()
+
+        async def _owned_request():
+            _started(asyncio.get_running_loop(), asyncio.current_task())
+            return await coro
 
         def _drive():
             try:
-                result.append(asyncio.run(coro))
+                result.append(asyncio.run(_owned_request()))
             except BaseException as exc:  # preserve the original traceback
                 error.append(exc)
+            finally:
+                ready.set()
+                finished.set()
 
         thread = threading.Thread(target=_drive, name='pytest-quart-sync-bridge')
-        thread.start()
-        thread.join()
+        try:
+            thread.start()
+            # A signal-interrupted Thread.join can mark a still-running Python
+            # thread stopped. Its completion event owns the cleanup receipt.
+            finished.wait()
+        except BaseException:
+            if thread.ident is None:
+                if asyncio.iscoroutine(coro):
+                    coro.close()
+                raise
+            ready.wait()
+            if owned:
+                loop, task = owned
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    if not loop.is_closed():
+                        raise
+            finished.wait()
+            raise
+        finally:
+            if thread.ident is not None:
+                thread.join()
         if error:
             raise error[0]
         return result[0]
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    return _run_coro_on_private_loop(coro)
 
 
 class _SyncResponse:

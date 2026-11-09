@@ -11,7 +11,7 @@ import json
 
 from lib.agent_core.native_process import _joined
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -76,7 +76,7 @@ class NativeToolProjection:
         from lib.llm.tool_wire import project_tool_wire
         body = dict(template, tools=self.request.tool_list or [])
         attach_tool_request_metadata(task, body, self.request.messages if messages is None else messages, self.request.tool_list or [],
-            model=metadata['logical_model'], round_num=round_num, tid=self.task_id[:8])
+            model=metadata['logical_model'], round_num=round_num, tid=task_log_tag(self.task_id))
         project_tool_wire(body, api_protocol=metadata['protocol'], base_url=metadata['base_url'],
             oauth='codex' if metadata.get('credential_kind')=='oauth' else '',
             responses_profile=metadata.get('responses_profile') or 'compatible',

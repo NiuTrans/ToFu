@@ -30,7 +30,7 @@ export type Tone = 'ok' | 'busy' | 'idle' | 'bad';
 
 const STATE_TONE: Record<AccountState, Tone> = {
   connected: 'ok', starting: 'busy', authorizing: 'busy', disconnected: 'busy', disabled: 'idle',
-  needs_login: 'bad', kicked: 'bad', error: 'bad',
+  needs_login: 'bad', runtime_unavailable: 'bad', kicked: 'bad', error: 'bad',
 };
 // States an enabled account leaves by itself, so the tab keeps re-reading it.
 const CONNECTING_STATES = new Set<AccountState>(['starting', 'authorizing', 'disconnected']);
@@ -248,9 +248,9 @@ export async function runCommand(view: CommandView, control: HTMLButtonElement |
 export function refreshWhileConnecting<T extends StatusAccount>(
   scope: LifecycleScope, account: T, read: (signal: AbortSignal) => Promise<T>,
   isCurrent: () => boolean, reload: () => Promise<void>,
+  key: (value: T) => string = (value) => `${value.enabled}\n${value.status.state}\n${value.status.detail}`,
 ): void {
   if (!isConnecting(account)) return;
-  const key = (value: StatusAccount) => `${value.enabled}\n${value.status.state}\n${value.status.detail}`;
   const seen = key(account);
   const tick = (): void => {
     void read(scope.signal).then((fresh) => {

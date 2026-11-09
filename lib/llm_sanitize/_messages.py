@@ -164,7 +164,17 @@ def _strip_empty_text_blocks(messages: list) -> list:
             continue
         if not isinstance(content, list) or not content:
             continue
-        kept = normalize_text_blocks(content)
+        spans = msg.get('_contextLineageSpans', ())
+        positions = {} if spans else None
+        kept = normalize_text_blocks(content, positions=positions)
+        for span in spans:
+            position = positions.get(span['part'])
+            if position is None:
+                span['spanHash'] = ''
+            else:
+                span['part'], offset = position
+                span['start'] += offset
+                span['end'] += offset
         for j, block in enumerate(content):
             if is_blank_text_block(block):
                 stripped += 1
@@ -418,6 +428,7 @@ def _merge_consecutive_same_role(messages: list) -> list:
             # Merge content by concatenation
             prev_content = merged[-1].get('content', '') or ''
             new_content = msg.get('content', '') or ''
+            lineage_left, lineage_right = prev_content, new_content
             # Handle multimodal content (list of blocks)
             if isinstance(prev_content, list) or isinstance(new_content, list):
                 # Convert both to list form and concatenate
@@ -431,6 +442,8 @@ def _merge_consecutive_same_role(messages: list) -> list:
                 separator = '\n\n' if prev_content and new_content else ''
                 merged[-1] = dict(merged[-1])
                 merged[-1]['content'] = prev_content + separator + new_content
+            from lib.llm_sanitize.lineage import merge_spans
+            merge_spans(merged[-1], msg, lineage_left, lineage_right)
             merge_count += 1
             curr_synthetic = _is_synthetic_context_msg(msg)
             if previous_original_synthetic or curr_synthetic:

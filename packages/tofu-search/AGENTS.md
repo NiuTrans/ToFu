@@ -55,6 +55,11 @@ proxy, security and import/concurrent-import contracts when changing this seam.
   subpackage's names through that package. Verify `tests/test_import_graph.py`
   and `tests/test_concurrent_import.py`.
 
+`network_transport.py` owns prepared-Requests delegation; optional SearchConfig
+HTTPX and anonymous-browser ports preserve standalone transports. Host bindings
+live in `lib/search/network_transport.py`. Verify network transport, browser proxy,
+HTTP/2, budgets, SSRF and import graph before changing these public ports.
+
 ## Verification
 
 `tofu_search/lexical.py` owns subject parsing/tokenization shared by fetch

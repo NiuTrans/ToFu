@@ -159,6 +159,13 @@ human interaction and real stream cuts retain their own existing policies.
 
 ### Harness compatibility defaults
 
+`tofu-agent run --thinking low|medium|high|xhigh|max|ultra` forwards the public
+`thinking` alias into the run config (the same key `/api/v4/chat/completions`
+accepts); omitted leaves the route/model default. `TOFU_AGENT_RUN_THINKING`
+supplies the same value. The depth resolves through the selected Model's
+declared effort ladder, so `max` reaches GLM-5.3-Flash as
+`reasoning_effort: max` instead of the provider default.
+
 `tofu-agent run|serve|doctor --harness-profile auto|off|longcat_flash` defaults to
 `auto`. Auto defaults to registry-backed full native exposure, preserving explicit
 exposure, Tool Search and programmatic-calling settings. LongCat marker recovery
@@ -484,6 +491,12 @@ same aggregate and may supply request `routing` policy. Each admitted run gets
 a request-owned slot group and keeps it until terminal settlement; a setup
 change affects only later runs.
 
+Delegated workers (`spawn_agents`, follow-up waves and every other child
+invocation) belong to their run's authority. Each re-resolves the run's
+selection, including its `routing` preference, against that same envelope and
+mints and disposes its own slot group. A worker never reads a durable owner
+repository, even in a process where one runs.
+
 ### Authority order
 
 The sidecar resolves configuration in this order:
@@ -548,6 +561,33 @@ schema paths. Decision: preserve one schema authority and its relative paths at
 build time. Alternatives: handwritten fallbacks duplicate wire authority;
 patching each eager import leaves later optional domains with the same defect.
 Schemas are loaded by their owning domains, not by the packaging layer.
+
+`tests/tofu_agent/test_tofu_agent_run_installed.py` builds the wheel from the
+working tree with an isolated setuptools `build_base`, extracts it as the only
+application path beside the test interpreter's installed dependencies, and runs
+the declared `tofu-agent` console entry point under `-S` outside the checkout.
+A scripted loopback provider requests one `run_command` round and then answers.
+The run must exit 0 with `ok: true` and write its marker, every loaded
+application module must come from the wheel, and the only unshipped application
+import it may attempt is the optional tool-result-artifact storage handler.
+Never verify an installed artifact with the checkout on `PYTHONPATH`; that path,
+the editable-install finder and the working directory all restore excluded
+packages. Problem: the wheel excludes `lib.storage` and `frontend/`, yet
+`tofu-agent run` imported storage-hosted pure helpers and the frontend UI
+language manifest at import time and died before its first model request.
+Decision: helpers that storage-free runs share with storage owners live outside
+`lib/storage` (`lib.task_replay.persistence_projection`,
+`lib.agent_core.storage_event_policy`, `lib.agent_core.storage_errors`, the
+in-call wait port `lib.agent_core.storage_waits` and the round drain's
+`lib.tasks_pkg.inbox_delivery` flag); modules a run imports catch
+`StorageError` from `lib.agent_core.storage_errors`, never `lib.storage.errors`;
+Project Brain resolves its storage client on use; storage-free runs skip
+Coordinator presence; title generation reads the manifest only while building
+its prompt. The stdlib-only root module `chromium_env`, which the environment
+capability probe imports, ships beside `runtime_guards`.
+Alternatives: shipping `lib.storage` or `frontend/` makes full-application
+authorities public wheel contents, which the artifact check forbids; re-export
+shims keep two import paths; catching each import error hides a broken artifact.
 
 The clean-wheel smoke installs only the wheel outside the repository, checks
 that database drivers and full-app assets are absent while setup assets are

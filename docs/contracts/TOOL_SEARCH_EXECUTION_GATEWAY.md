@@ -9,6 +9,14 @@ Decision: 使用现有 searchable 策略和固定网关，协调入口保留 dir
 Alternative: 删除执行工具或缩小权限目录会损失长期研究能力，故不采用。
 Schema 缩减本身不证明任务完成率、模型轮数或实际总成本改善。
 
+`get_agent_result` 作为历史子代理结果回读工具使用 searchable 策略；正常完成通知
+已经携带完整结果，首轮无需预载回读参数。`spawn_agents` 保留直接入口，并说明
+回读工具不可见时先用 `search_tools` 发现，再通过 `execute_tools` 执行。
+当前任务仍保存完整 schema 和执行权限；小目录、关闭 Tool Search、检索失败后恢复
+完整目录，以及显式指定工具时仍可直接展示。`poll`/`kill` 保持可见以控制运行中工作。
+不延后技能读取入口：其定义很小，额外搜索会拖慢技能首次加载。
+规格：`tests/tools/test_tool_registry.py` 的 swarm result recovery 用例。
+
 ## 三个集合
 
 - `executable_tool_catalog`：当前任务真实可执行的完整服务端目录。默认包含环境、连接、租户和 MCP 策略允许的全部工具；Composer 开关只控制曝光，不从这里删工具。兼容模式 `selected_only` 才沿用“显式开启即授权”。
@@ -20,6 +28,13 @@ wire tools 只描述“模型当前看见什么”；执行权限始终由任务
 每一轮都会从当前配置重新生成 wire catalog、direct/deferred policy、namespace、目录规模和 Tool Search 模式。Provider 转换使用本轮投影生成最终 tools 数组；工具开关、MCP 目录和项目状态在下一轮直接生效。`executable_tool_catalog` 同样按本轮环境生成并用于本地搜索和执行准入；组装器从已有 authority 一次建立名称索引并随追加更新，动态大目录不会为每个工具重新扫描正在增长的列表。request-owned ToolContract 文档仍逐轮隔离复制；普通 JSON 字典/列表走带 memo 的专用克隆，非标准扩展类型回退 `deepcopy`，不会因提速而共享可变 schema 或引入进程级权限缓存。本地检索异常后的 fail-open 会恢复更完整的 schema，此时可用性优先。
 
 ## 对模型公开的本地搜索
+
+**Named tool choice:** 显式 `tool_choice.function.name` 使用当前执行目录中的
+原始 schema 作为直接调用声明，优先于 routed/local discovery 投影，并受到现有
+预算保护。只在预算阶段标记名称不足以保留已在发现阶段隐藏的 schema；现在统一
+复用 direct-wire 的权限交集、恢复和去重机制。已撤销或未授权的名称不会被恢复，
+搜索结果也不能改变权限。规格：
+`tests/tasks_pkg/test_unified_tool_gateway.py::test_named_tool_choice_restores_only_its_live_authorized_schema`。
 
 **Namespace alias decision:** Models can confuse MCP wire-name prefixes with server IDs. The schema recommends a bare server/category (for example `llm`) or omitting an uncertain filter. Search accepts `mcp_llm` and `mcp__llm` as aliases for `llm`, generically for any server present in the task catalog. An exact catalog namespace wins before prefix stripping; an alias must resolve to a matching MCP tool and canonical server namespace. Case/outer whitespace normalization, visibility/disclosure exclusions, ranking and pagination remain unchanged. Unknown prefixes/names retain the empty-result recovery hint. Fuzzy namespace matching or silently dropping an unknown filter was rejected because it can return a different server's tools instead of the requested scope.
 
@@ -418,6 +433,13 @@ gateway frames from replay. A later round/world that reuses a provider call ID
 creates a distinct program ledger row and generated child IDs; an exact frame
 duplicate returns its original receipt without creating another trajectory.
 There is no syntax-based engine fallback.
+
+Guest strings are UTF-16, so a slice can split a surrogate pair. The bridge
+repairs every guest string it decodes (values, object keys and error messages)
+with `lib.tools.result_value.well_formed_text` before host code sees it:
+`tools.keep` values, returned values and child-call arguments stay encodable,
+and a thrown message holding a split pair is an ordinary `javascript_error`.
+Verify `tests/tools/test_well_formed_result_text.py`.
 
 New runs declare `backend=local_javascript`; historical ledgers without this
 field preserve `local_toolscript`. `program_backend` is the shared projection

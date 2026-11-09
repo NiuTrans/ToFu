@@ -13,8 +13,9 @@ router observation) or, without subscribers, to the Global Router; owner
 context goes to subscribers only.
 
 Entry points: ``ingest(owner, event)`` and ``ingest_batch(owner, events)``
-(catch-up replays deliver one batch per target). A routing failure raises
-before the watermark moves, so the adapter's next session replays the gap and
+(catch-up replays deliver one batch per target); ``apply_change(owner,
+change)`` records an edit or recall on the message it changes. A routing failure raises
+before the watermark moves, so the adapter's next catch-up replays the gap and
 dedup turns it into duplicates, never losses.
 Dependencies: ``ChannelStore``, ``policy``, ``media``, ``delivery``, ``outbox``.
 """
@@ -26,7 +27,7 @@ from typing import Any
 
 from lib.channels import delivery, policy
 from lib.channels.media import MediaPort, resolve_event_media
-from lib.channels.model import ChannelEvent, ThreadKey, external_id_after
+from lib.channels.model import ChannelChange, ChannelEvent, ThreadKey, external_id_after
 from lib.channels.store import ChannelStore
 from lib.log import get_logger
 
@@ -62,24 +63,54 @@ class _Unit:
 
 
 def ingest(owner: int, event: ChannelEvent, *, store: ChannelStore | None = None,
-           media: MediaPort | None = None) -> IngestResult:
-    return ingest_batch(owner, [event], store=store, media=media)[0]
+           media: MediaPort | None = None, advance_watermark: bool = True) -> IngestResult:
+    return ingest_batch(owner, [event], store=store, media=media, advance_watermark=advance_watermark)[0]
 
 
 def ingest_batch(owner: int, events: list[ChannelEvent], *,
                  store: ChannelStore | None = None,
-                 media: MediaPort | None = None) -> list[IngestResult]:
-    """``media`` is the adapter's download port for the events' originals (C9)."""
+                 media: MediaPort | None = None,
+                 advance_watermark: bool = True) -> list[IngestResult]:
+    """``media`` is the adapter's download port for the events' originals (C9).
+
+    ``advance_watermark=False`` is for events that may follow an unreplayed gap
+    (the adapter owes a catch-up): they are recorded and routed, but the
+    watermark stays where that catch-up's replay must start.
+    """
     store = store or ChannelStore(owner)
     with _owner_lock(store.owner):
-        return _ingest_locked(store, events, media)
+        return _ingest_locked(store, events, media, advance_watermark)
+
+
+def apply_change(owner: int, change: ChannelChange, *, store: ChannelStore | None = None) -> IngestResult:
+    """Record an edit or recall on the message it changes; never routed (channel protocol P2).
+
+    An edit is a revision of the recorded event, never a new message and never
+    a second command (an edited owner command is not re-executed); a recall
+    marks the event recalled and removes its text from Tofu's records (text
+    already delivered into a conversation stays in its transcript). Ignored
+    threads keep no events, so nothing there changes.
+    """
+    store = store or ChannelStore(owner)
+    with _owner_lock(store.owner):
+        account = store.account(change.thread.channel)
+        if not account or not account.get('enabled'):
+            return IngestResult(change.change_id, 'disabled')
+        if policy.effective_mode(change.thread, store.thread(change.thread), account) == 'ignore':
+            return IngestResult(change.change_id, 'ignored')
+        outcome = store.record_change(change)
+    if outcome == 'dropped':
+        logger.info('[Channels] %s %s of %s changes no recorded message: dropped', change.thread, change.kind,
+                    change.target or '(unresolved target)')
+    return IngestResult(change.change_id, outcome)
 
 
 def _ingest_locked(store: ChannelStore, events: list[ChannelEvent],
-                   media: MediaPort | None) -> list[IngestResult]:
+                   media: MediaPort | None, advance_watermark: bool) -> list[IngestResult]:
     from lib.channels import outbox
     results: list[IngestResult] = []
     routable: list[tuple[ChannelEvent, str]] = []
+    delivered: dict[str, list[dict[str, Any]]] = {}
     threads: dict[str, dict[str, Any]] = {}
     advance: dict[str, list[ChannelEvent]] = {}
     accounts: dict[str, dict[str, Any] | None] = {}
@@ -110,7 +141,13 @@ def _ingest_locked(store: ChannelStore, events: list[ChannelEvent],
             continue
         # No watermark short-circuit: a push can arrive after a newer one of
         # the same thread, and only the CAS record proves it was seen.
-        disposition = policy.classify(event, mode, owner_uid)
+        robot_chat = policy.robot_thread(account) == key
+        disposition = policy.classify(event, mode, owner_uid, robot_chat=robot_chat)
+        if disposition == 'command' and robot_chat:
+            # The owner's own message, seen by this server's session, binds the robot's
+            # chat to this account before its receipt goes out (C6).
+            from lib.channels.dx.robot import bind_owner_message
+            account = accounts[event.channel] = bind_owner_message(store, account, event)
         advance.setdefault(key, []).append(event)
         if disposition == 'drop':
             results.append(IngestResult(event.event_id, 'dropped'))
@@ -120,26 +157,35 @@ def _ingest_locked(store: ChannelStore, events: list[ChannelEvent],
             # Routed in an earlier session; the watermark may lag a crash.
             results.append(IngestResult(event.event_id, 'duplicate', claimed.get('disposition', '')))
             continue
-        # A recorded but unrouted event is a previous session's failed route.
+        # A recorded but unrouted event is a previous session's failed route;
+        # the deliveries it recorded were accepted and are never repeated.
         disposition = claimed.get('disposition') or disposition
         # Only events that are routed fetch their media, once (C9).
         routable.append((resolve_event_media(store, event, claimed, media), disposition))
+        delivered[event.event_id] = list(claimed.get('deliveries') or [])
         results.append(IngestResult(event.event_id, 'recorded', disposition))
     if routable:
-        deliveries = _route(store, accounts, routable, threads)
+        _route(store, accounts, routable, threads, delivered)
         for result in results:
-            result.deliveries = deliveries.get(result.event_id, result.deliveries)
+            result.deliveries = delivered.get(result.event_id, result.deliveries)
     for key, processed in advance.items():
-        _advance_watermark(store, processed)
+        _advance_watermark(store, processed, move=advance_watermark)
     return results
 
 
 def _echo_item(store: ChannelStore, event: ChannelEvent, owner_uid: str,
                account: dict[str, Any] | None) -> str | None:
-    """Outbox echoes are the account's own sends (C2/C7: never input).
+    """Echoes are the account's own sends, whatever path sent them (C2/C7: never input).
 
-    The owner's account, and in its thread the notification robot (C6),
-    which posts under another sender and is matched by ``outbox.robot_echo``.
+    Only an identity bound to the account can echo: the owner's account, and
+    in its thread the notification robot (C6), which posts under another
+    sender and is matched by ``outbox.robot_echo``. For the owner's account
+    the first match of the channel protocol's ``x-selfEcho`` steps wins: the
+    marker names an outbox item or part of this account; the provider or
+    client ID is in the echo registry; the marker carries any other value
+    (only an API sets the platform's marker field, so another Tofu send path
+    stamped it); the host recorded another local client sending it; this
+    session sent it.
     """
     from lib.channels import outbox
     if not owner_uid:
@@ -158,6 +204,20 @@ def _echo_item(store: ChannelStore, event: ChannelEvent, owner_uid: str,
                             client_id=event.client_id)
     if found:
         return found
+    if event.outbox_marker:
+        logger.info('[Channels] %s %s carries the Tofu marker %r of no outbox item: sent by another Tofu '
+                    'path as the account, not by the owner: echo', event.thread, event.external_id,
+                    event.outbox_marker)
+        return '-'
+    # host_sent before own_connection (both mean echo): a host record is bounded, so its IDs are
+    # remembered whenever it is the evidence.
+    if event.host_sent:
+        # Only the engine's bounded sent-message record proves this; remember it, so
+        # a later replay of the same message stays an echo after that record forgets it.
+        logger.info('[Channels] %s %s was sent as the account by another engine process of this '
+                    'server, not by the owner: echo', event.thread, event.external_id)
+        store.remember_echo(event.channel, '-', external_id=event.external_id, client_id=event.client_id)
+        return '-'
     if event.own_connection:
         return '-'
     return None
@@ -176,12 +236,12 @@ def _touch_ignored(store: ChannelStore, event: ChannelEvent, record: dict[str, A
     record.update(store.update_thread(event.thread, change))
 
 
-def _advance_watermark(store: ChannelStore, processed: list[ChannelEvent]) -> None:
+def _advance_watermark(store: ChannelStore, processed: list[ChannelEvent], *, move: bool) -> None:
     newest = max(processed, key=lambda item: int(item.external_id))
     title = next((e.thread_title for e in reversed(processed) if e.thread_title), '')
 
     def change(value):
-        if external_id_after(newest.external_id, value.get('watermark')):
+        if move and external_id_after(newest.external_id, value.get('watermark')):
             value['watermark'] = newest.external_id
         value['lastEventAtMs'] = max(int(value.get('lastEventAtMs') or 0),
                                      max(e.sent_at_ms for e in processed))
@@ -191,9 +251,27 @@ def _advance_watermark(store: ChannelStore, processed: list[ChannelEvent]) -> No
     store.update_thread(newest.thread, change)
 
 
+def _has_delivery(delivered: dict[str, list[dict[str, Any]]], event: ChannelEvent,
+                  conversation_id: str, kind: str) -> bool:
+    """A target is a conversation and a delivery kind (human, turn or observation)."""
+    return any(isinstance(item, dict) and item.get('conversationId') == conversation_id
+               and item.get('kind') == kind for item in delivered.get(event.event_id, ()))
+
+
+def _accept(store: ChannelStore, delivered: dict[str, list[dict[str, Any]]],
+            events: list[tuple[ChannelEvent, str]], conversation_id: str, kind: str,
+            dispatch: str | None = None) -> None:
+    """Record each accepted ``(event, target)`` before another target is dispatched."""
+    for event, disposition in events:
+        entry = {'conversationId': conversation_id, 'kind': kind, 'disposition': disposition}
+        if dispatch is not None:
+            entry['dispatch'] = dispatch
+        delivered[event.event_id] = store.record_delivery(event, entry)
+
+
 def _route(store: ChannelStore, accounts: dict[str, dict[str, Any] | None],
-           routable: list[tuple[ChannelEvent, str]],
-           threads: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+           routable: list[tuple[ChannelEvent, str]], threads: dict[str, dict[str, Any]],
+           delivered: dict[str, list[dict[str, Any]]]) -> None:
     owner = store.owner
     router = delivery.global_router_binding(owner, create=True)
     router_id = router['conversationId']
@@ -208,32 +286,32 @@ def _route(store: ChannelStore, accounts: dict[str, dict[str, Any] | None],
 
     for event, disposition in routable:
         if disposition == 'command':
-            units.append(_Unit(router_id, human=True, events=[(event, disposition)]))
+            if not _has_delivery(delivered, event, router_id, 'human'):
+                units.append(_Unit(router_id, human=True, events=[(event, disposition)]))
             continue
         subscribers = [c for c in (threads[str(event.thread)].get('subscribers') or [])
                        if c != router_id]
         if subscribers:
             for conversation_id in subscribers:
-                unit_for(conversation_id).events.append((event, disposition))
-            observation = by_target.get('\0observe:' + str(event.thread))
-            if observation is None:
-                observation = _Unit(router_id, human=False, observe=(str(event.thread), subscribers))
-                by_target['\0observe:' + str(event.thread)] = observation
-                units.append(observation)
-            observation.events.append((event, disposition))
-        elif disposition == 'candidate':
+                if not _has_delivery(delivered, event, conversation_id, 'turn'):
+                    unit_for(conversation_id).events.append((event, disposition))
+            if not _has_delivery(delivered, event, router_id, 'observation'):
+                observation = by_target.get('\0observe:' + str(event.thread))
+                if observation is None:
+                    observation = _Unit(router_id, human=False,
+                                        observe=(str(event.thread), subscribers))
+                    by_target['\0observe:' + str(event.thread)] = observation
+                    units.append(observation)
+                observation.events.append((event, disposition))
+        elif disposition == 'candidate' and not _has_delivery(delivered, event, router_id, 'turn'):
             unit_for(router_id).events.append((event, disposition))
         # Owner context without subscribers is recorded for channel_read only.
 
-    deliveries: dict[str, list[dict[str, Any]]] = {}
     owner_uids = {channel: policy.owner_uid(account) for channel, account in accounts.items()}
     for unit in units:
         if unit.observe is not None:
             if delivery.observe_router(owner, router, unit.observe[0], unit.events, unit.observe[1]):
-                for event, disposition in unit.events:
-                    deliveries.setdefault(event.event_id, []).append(
-                        {'conversationId': router_id, 'kind': 'observation',
-                         'disposition': disposition})
+                _accept(store, delivered, unit.events, router_id, 'observation')
             continue
         if not unit.events:
             continue
@@ -249,36 +327,32 @@ def _route(store: ChannelStore, accounts: dict[str, dict[str, Any] | None],
                                        review_account=review, store=store)
         if not outcome.accepted:
             if outcome.disposition == 'target_missing' and unit.conversation_id != router_id:
-                _drop_missing_subscriber(store, unit, router, threads, owner_uids, deliveries, accounts)
+                _drop_missing_subscriber(store, unit, router, threads, owner_uids, delivered, accounts)
                 continue
             raise delivery.DeliveryFailed(unit.conversation_id, outcome.disposition)
-        for event, disposition in unit.events:
-            deliveries.setdefault(event.event_id, []).append(
-                {'conversationId': unit.conversation_id, 'kind': 'human' if unit.human else 'turn',
-                 'disposition': disposition, 'dispatch': outcome.disposition})
+        _accept(store, delivered, unit.events, unit.conversation_id,
+                'human' if unit.human else 'turn', outcome.disposition)
     for event, _ in routable:
-        store.mark_routed(event, deliveries.get(event.event_id, []))
-    return deliveries
+        store.mark_routed(event)
 
 
-def _drop_missing_subscriber(store, unit, router, threads, owner_uids, deliveries, accounts) -> None:
+def _drop_missing_subscriber(store, unit, router, threads, owner_uids, delivered, accounts) -> None:
     """A deleted subscriber loses its edges; its candidates return to the router."""
     logger.warning('[Channels] subscriber %s is gone; unsubscribing', unit.conversation_id)
     for thread in {str(event.thread) for event, _ in unit.events}:
         threads[thread] = store.unsubscribe(ThreadKey.parse(thread), unit.conversation_id)
-    candidates = [(e, d) for e, d in unit.events if d == 'candidate']
+    router_id = router['conversationId']
+    candidates = [(e, d) for e, d in unit.events
+                  if d == 'candidate' and not _has_delivery(delivered, e, router_id, 'turn')]
     if not candidates:
         return
     first = candidates[0][0]
-    outcome = delivery.deliver(store.owner, router['conversationId'], candidates, threads=threads,
+    outcome = delivery.deliver(store.owner, router_id, candidates, threads=threads,
                                owner_uid=owner_uids.get(first.channel, ''),
                                review_account=accounts.get(first.channel) or {}, store=store)
     if not outcome.accepted:
-        raise delivery.DeliveryFailed(router['conversationId'], outcome.disposition)
-    for event, disposition in candidates:
-        deliveries.setdefault(event.event_id, []).append(
-            {'conversationId': router['conversationId'], 'kind': 'turn',
-             'disposition': disposition, 'dispatch': outcome.disposition})
+        raise delivery.DeliveryFailed(router_id, outcome.disposition)
+    _accept(store, delivered, candidates, router_id, 'turn', outcome.disposition)
 
 
-__all__ = ['IngestResult', 'ingest', 'ingest_batch']
+__all__ = ['IngestResult', 'apply_change', 'ingest', 'ingest_batch']

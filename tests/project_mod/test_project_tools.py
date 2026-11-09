@@ -774,18 +774,6 @@ class TestUnicodeEscapeNormalization:
         with open(self._os.path.join(d, 'b.py')) as f:
             assert f.read() == "x = 1\nmsg = '[ok]'\ny = 2\n"
 
-    def test_insert_content_glyph_anchor_escape_file(self):
-        from lib.project_mod.write_tools import _insert_one
-        d = self._setup()
-        self._write(d, 'c.py', "a = 1\nmsg = '\\u2014 dash'\nb = 2\n")
-        r = _insert_one(d, 'c.py', "msg = '\u2014 dash'", "inserted = True", position='after')
-        assert r['ok'], r.get('error')
-        with open(self._os.path.join(d, 'c.py')) as f:
-            body = f.read()
-        assert 'inserted = True' in body
-        # The literal-escape line is preserved verbatim, not rewritten.
-        assert "msg = '\\u2014 dash'" in body
-
     def test_absent_text_still_fails(self):
         from lib.project_mod.write_tools import _apply_one_diff
         d = self._setup()

@@ -6,11 +6,13 @@ to ``<repo>/.tofu/worktrees`` and nothing touches the developer's home.
 """
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -194,12 +196,54 @@ def test_settlement_saves_only_the_lanes_a_task_wrote_in(repo):
     assert saved[0]['wip'] == git(repo, 'rev-parse', 'refs/tofu/lanes/feat/task').strip()
 
 
+def _wait_for_prepared_spare(repo: Path) -> bool:
+    root = repo / '.tofu' / 'worktrees'
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if lanes.spare_count(lanes.repository(repo)) and not lanes._preparation_in_progress(root):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def test_the_next_lane_recycles_a_checkout_prepared_in_advance(repo):
+    assert lanes.prepare_spare(repo) == 'ready'
+    assert lanes.prepare_spare(repo) == 'present'
+
+    path, recycled = lanes.create_lane(repo, 'feat/prepared')
+
+    assert recycled
+    assert git(path, 'symbolic-ref', '--short', 'HEAD').strip() == 'feat/prepared'
+    assert git(path, 'status', '--porcelain', '--untracked-files=normal') == ''
+    assert not list((repo / '.tofu' / 'worktrees').glob('.preparing-*'))
+
+
+def test_an_abandoned_preparation_is_cleared_and_a_live_one_is_not_duplicated(repo):
+    root = repo / '.tofu' / 'worktrees'
+    root.mkdir(parents=True, exist_ok=True)
+    abandoned = root / '.preparing-dead'
+    git(repo, 'worktree', 'add', '-q', '--detach', str(abandoned), 'HEAD')
+    (root / '.preparing-dead.lock').write_text('')
+
+    assert lanes.prepare_spare(repo) == 'ready'
+
+    assert not abandoned.exists() and not (root / '.preparing-dead.lock').exists()
+    assert str(abandoned) not in git(repo, 'worktree', 'list', '--porcelain')
+    git(repo, 'worktree', 'remove', '--force', str(next(root.glob('.spare-*'))))
+    with open(root / '.preparing-live.lock', 'w') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert lanes.ensure_next_spare(repo) is False, 'a live preparation is not duplicated'
+    (root / '.preparing-live.lock').unlink()
+
+
 def test_the_command_line_creates_lists_and_restores_lanes(repo):
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
     script = [sys.executable, str(ROOT / 'scripts' / 'lane.py')]
 
     created = subprocess.run([*script, 'new', 'feat/cli'], cwd=repo, env=env,
                              capture_output=True, text=True, timeout=120)
+    assert _wait_for_prepared_spare(repo), (
+        repo / '.tofu' / 'worktrees' / '.preparation.log').read_text()
     listed = subprocess.run([*script, 'list'], cwd=repo, env=env,
                             capture_output=True, text=True, timeout=120)
     again = subprocess.run([*script, 'new', 'feat/cli'], cwd=repo, env=env,
@@ -208,5 +252,5 @@ def test_the_command_line_creates_lists_and_restores_lanes(repo):
     assert created.returncode == 0, created.stdout + created.stderr
     assert created.stdout.startswith('Lane feat/cli ready in ')
     assert 'git_land.py feat/cli' in created.stdout
-    assert 'feat/cli: ' in listed.stdout and '1 lanes;' in listed.stdout
+    assert 'feat/cli: ' in listed.stdout and '1 lanes; 1 recycled checkouts' in listed.stdout
     assert again.returncode == 1 and again.stdout.startswith('Refused: branch feat/cli already exists')

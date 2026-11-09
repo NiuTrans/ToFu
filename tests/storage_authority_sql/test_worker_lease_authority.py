@@ -128,6 +128,53 @@ def test_utc_rollback_keeps_future_availability_separate_from_advancing_lease_ti
     assert claim(session, observed=250_000) is None
 
 
+def advance_to(source, wall_ms):
+    """Advance UTC and elapsed time together, so lease time equals UTC."""
+    source.elapsed += wall_ms - source.wall
+    source.wall = wall_ms
+
+
+def enqueue_available_at(session, task, available_at_ms):
+    return jobs._worker_job_enqueue(session, dict(task_id=task, user_id=41, tenant_id='owned',
+        task_kind='owned-kind', idempotency_key=task, payload={}, now_ms=1,
+        available_at_ms=available_at_ms))
+
+
+def test_steady_lease_expiry_cannot_starve_queued_work(session):
+    session, source = session
+    # Holders that die in turn: one 10 s lease expires every 2.5 s, so an
+    # expired lease is due at every claim below.
+    for ordinal in range(4):
+        advance_to(source, 100_000 + 2_500 * ordinal)
+        enqueue(session, task=f'storm-{ordinal}')
+        assert claim(session, worker='storm')['taskId'] == f'storm-{ordinal}'
+    # Claimable after storm-0's lease expired (110_000), before the others.
+    enqueue_available_at(session, 'waiting', 111_000)
+    claimed = []
+    for step in range(8):
+        advance_to(source, 120_000 + 2_500 * step)
+        job = claim(session, worker='storm')
+        claimed.append((job['taskId'], job['fencingToken']))
+    # It waits only for the one lease that expired before it was claimable;
+    # the storm keeps its deadline order and every takeover advances the fence.
+    assert claimed == [('storm-0', 2), ('waiting', 1), ('storm-1', 2), ('storm-2', 2),
+                       ('storm-3', 2), ('storm-0', 3), ('waiting', 2), ('storm-1', 3)]
+
+
+def test_claim_order_measures_each_wait_on_its_own_clock_after_utc_rollback(session):
+    session, source = session
+    enqueue(session, task='held')
+    assert claim(session)['leaseDeadlineMs'] == 110_000
+    enqueue_available_at(session, 'queued', 95_000)
+    # UTC fell 20 s behind the advancing lease clock: the lease has been
+    # claimable for 10 s, the queued job for 5 s though its raw time is earlier.
+    source.elapsed = 20_000
+    assert session.worker_lease_clock.snapshot() == (120_000, 100_000)
+    first = claim(session, worker='successor')
+    assert (first['taskId'], first['fencingToken']) == ('held', 2)
+    assert claim(session, worker='successor')['taskId'] == 'queued'
+
+
 def test_backend_restart_recovers_future_deadline_by_index(session):
     session, source = session
     enqueue(session)

@@ -13,7 +13,6 @@ every interception shape:
   * FreshGate partial skip (batch)          → kind 'partial_stale' + counts
   * ReadGate full refusal (single edit)     → kind 'read_first' + paths
   * ReadGate partial skip (batch)           → kind 'partial_read_first' + counts
-  * write_file content_ref resolution fail  → kind 'content_ref'
 
 Plus the meta-builder badge fix: a batch-edit error WITHOUT the
 "Applied/Inserted X/Y" header (hard failure) must badge 'failed', never
@@ -22,6 +21,7 @@ the gibberish '?/N edits'.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -173,16 +173,14 @@ def test_read_gate_partial_refusal_carries_counts(workspace, _isolate):
 
 
 @pytest.mark.unit
-def test_content_ref_failure_carries_refusal(workspace, _isolate):
+def test_write_without_content_is_refused_not_emptied(workspace, _isolate):
     a = _task('convA')
+    (Path(workspace) / 'a.py').write_text('keep\n')
     tc_id, content, _ = _drive(
-        'write_file',
-        {'path': 'a.py', 'content_ref': {'tool_round': 99}},
+        'write_file', {'path': 'a.py', 'content_ref': {'tool_round': 99}},
         a, workspace)
-    assert 'content_ref resolution failed' in content
-    meta = _last_meta(_isolate, 'task-convA')
-    assert meta['badge'] == 'ref failed'
-    assert meta['refusal'] == {'kind': 'content_ref'}
+    assert content.startswith('Write failed: content is required')
+    assert (Path(workspace) / 'a.py').read_text() == 'keep\n'
 
 
 @pytest.mark.unit

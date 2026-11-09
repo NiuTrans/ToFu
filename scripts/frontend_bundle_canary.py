@@ -14,6 +14,7 @@ import json
 import mimetypes
 from pathlib import Path
 import sys
+import time
 from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,8 +24,44 @@ import chromium_env  # noqa: E402
 
 
 CANARY_ORIGIN = 'http://tofu-frontend-canary.test'
+# No-progress window, not a total deadline: a healthy slow boot renews it on
+# every request, console line or document mutation (2026-11-06: the shared
+# tree's own build needed about 124 s on a loaded host).
 BOOT_TIMEOUT_MS = 20_000
+_BOOT_POLL_MS = 1_000
 MAX_ASSET_BYTES = 16 * 1024 * 1024
+
+
+class BootNoProgress(TimeoutError):
+    """The page stopped progressing for a whole window."""
+
+
+def _await_boot_ready(page, progress, page_errors, fatal_console, *,
+                      ready_flag=None) -> None:
+    """Wait for readiness and the sidebar while the page keeps progressing.
+
+    Each slice is bounded by the driver, so a busy page cannot extend it. Real
+    errors fail at once. The window renews on every routed request, console
+    line or document mutation, never on elapsed time alone.
+    """
+    deadline = time.monotonic() + BOOT_TIMEOUT_MS / 1000
+    seen = 0
+    while True:
+        if page_errors or fatal_console:
+            break  # A real boot error: fail at once, not after the window.
+        # The page reports readiness through the exposed binding; no driver
+        # command needs its event loop, so a busy page still times out here.
+        if ready_flag is not None and ready_flag['ready']:
+            return
+        if progress['count'] != seen:
+            seen = progress['count']
+            deadline = time.monotonic() + BOOT_TIMEOUT_MS / 1000
+        elif time.monotonic() >= deadline:
+            raise BootNoProgress(
+                f'frontend bundle canary made no progress for '
+                f'{BOOT_TIMEOUT_MS // 1000}s; page errors={page_errors[:3]}, '
+                f'console errors={fatal_console[:3]}')
+        page.wait_for_timeout(_BOOT_POLL_MS)
 
 
 def _safe_file(root: Path, relative: str) -> Path:
@@ -117,6 +154,7 @@ def run_canary(artifact_dir: Path, manifest_path: Path | None = None) -> None:
     observed = {'conversations': False, 'folders': False}
     page_errors: list[str] = []
     fatal_console: list[str] = []
+    progress = {'count': 0}
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -133,10 +171,19 @@ def run_canary(artifact_dir: Path, manifest_path: Path | None = None) -> None:
                 '[boot]' in message.text or '[main.js]' in message.text
             ) else None
         ))
+        page.on('console', lambda message: progress.__setitem__(
+            'count', progress['count'] + 1))
+        # The page reports activity to the driver, so the driver never has to
+        # evaluate into a busy page to learn that it is still working.
+        ready_flag = {'ready': False}
+        page.expose_function('__tofuCanaryProgress', lambda: progress.__setitem__(
+            'count', progress['count'] + 1))
+        page.expose_function('__tofuCanaryReady', lambda: ready_flag.__setitem__('ready', True))
         page.add_init_script("""
           window.__tofuCanary = { ready: false, unhandled: [] };
           window.addEventListener('tofu:app-ready', () => {
             window.__tofuCanary.ready = true;
+            if (window.__tofuCanaryReady) window.__tofuCanaryReady();
           });
           window.addEventListener('error', (event) => {
             window.__tofuCanary.unhandled.push(String(event.error || event.message));
@@ -144,12 +191,38 @@ def run_canary(artifact_dir: Path, manifest_path: Path | None = None) -> None:
           window.addEventListener('unhandledrejection', (event) => {
             window.__tofuCanary.unhandled.push(String(event.reason));
           });
+          if (window.MutationObserver) {
+            const observer = new MutationObserver(() => {
+              window.__tofuCanaryProgress();
+            });
+            const observeDocument = () => {
+              // documentElement does not exist yet on an empty initial document.
+              if (document.documentElement) {
+                observer.observe(document.documentElement, {
+                  childList: true, subtree: true, attributes: true, characterData: true
+                });
+              } else if (!window.__tofuCanary.ready) {
+                setTimeout(observeDocument, 25);
+              }
+            };
+            observeDocument();
+          }
+          if (window.fetch) {
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = (...args) => {
+              window.__tofuCanaryProgress();
+              return originalFetch(...args).then(
+                response => { window.__tofuCanaryProgress(); return response; },
+                error => { window.__tofuCanaryProgress(); throw error; });
+            };
+          }
         """)
 
         def route_request(route) -> None:
             parsed = urlparse(route.request.url)
             path = parsed.path
             try:
+                progress['count'] += 1
                 if path == '/':
                     route.fulfill(status=200, body=shell, content_type='text/html; charset=utf-8')
                     return
@@ -186,14 +259,11 @@ def run_canary(artifact_dir: Path, manifest_path: Path | None = None) -> None:
 
         page.route('**/*', route_request)
         try:
-            page.goto(f'{CANARY_ORIGIN}/', wait_until='domcontentloaded', timeout=BOOT_TIMEOUT_MS)
-            page.wait_for_function(
-                'window.__tofuCanary && window.__tofuCanary.ready === true',
-                timeout=BOOT_TIMEOUT_MS,
-            )
-            page.wait_for_function(
-                'document.querySelector("#sidebar") !== null', timeout=2_000,
-            )
+            # commit, not DOMContentLoaded: a page busy parsing its modules has
+            # not rendered yet, so a fixed navigation budget would fail it.
+            page.goto(f'{CANARY_ORIGIN}/', wait_until='commit', timeout=BOOT_TIMEOUT_MS)
+            _await_boot_ready(page, progress, page_errors, fatal_console,
+                              ready_flag=ready_flag)
             page.wait_for_timeout(250)
             unhandled = page.evaluate('window.__tofuCanary.unhandled')
         finally:

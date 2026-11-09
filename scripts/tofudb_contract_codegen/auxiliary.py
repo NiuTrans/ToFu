@@ -28,7 +28,7 @@ def load_worker(inputs: ContractInputs) -> dict:
             or witness.get('processFields') != ['host', 'boot', 'pid_namespace', 'pid', 'started']):
         raise ValueError('invalid conversation execution witness contract')
     if (not isinstance(lease, dict) or lease.get('leaseIndexMarker') != 255
-            or lease.get('epochCharacters') != 32 or lease.get('maximumLeaseProbesPerKind') != 4
+            or lease.get('epochCharacters') != 32 or lease.get('epochRangesPerKind') != 4
             or any(not isinstance(lease.get(key), str) or not lease[key]
                    for key in ('clock', 'lifetime', 'callerTime', 'restart', 'legacy'))):
         raise ValueError('invalid worker lease authority contract')

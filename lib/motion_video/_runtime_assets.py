@@ -6,9 +6,10 @@ browser's proxy configuration (measured here as HTTP 407): the first frame
 still looks valid, but ``gsap`` is undefined and the whole timeline is static.
 
 GSAP is therefore a managed dependency, just like the renderer and scene
-fonts: verify the pinned bytes once in the motion cache, copy them into every
-scene, and rewrite authored HTML to the scene-local path before any gate or
-render sees it.
+fonts: the pinned bytes ship with the package, are verified before use, then
+copied into every scene, and authored HTML is rewritten to the scene-local
+path before any gate or render sees it. The motion cache and the CDN remain
+fallbacks for an older installed package without the vendored file.
 """
 
 from __future__ import annotations
@@ -63,8 +64,11 @@ def ensure_gsap(scene_dir: str, *, download: bool = True,
     if _valid(target):
         return GSAP_REL_PATH
 
-    from lib.motion_video._env import motion_root
-    cached = os.path.join(motion_root(), 'vendor', GSAP_FILENAME)
+    vendored = os.path.join(os.path.dirname(__file__), 'vendor', GSAP_FILENAME)
+    cached = vendored
+    if not _valid(vendored):
+        from lib.motion_video._env import motion_root
+        cached = os.path.join(motion_root(), 'vendor', GSAP_FILENAME)
     if not _valid(cached):
         if not download:
             return ''

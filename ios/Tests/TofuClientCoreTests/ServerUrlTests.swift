@@ -40,6 +40,6 @@ final class ServerUrlTests: XCTestCase {
     func test_displayLabel_falls_back_for_plain_hosts() {
         XCTAssertEqual(ServerUrl.displayLabel("https://example.com/proxy/15000/"), "example.com : 15000")
         XCTAssertEqual(ServerUrl.displayLabel("http://127.0.0.1:15000"), "127.0.0.1:15000")
-        XCTAssertEqual(ServerUrl.displayLabel("junk"), "junk")
+        XCTAssertEqual(ServerUrl.displayLabel("junk"), "Invalid server URL")
     }
 }

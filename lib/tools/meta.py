@@ -282,20 +282,20 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
 
 
 def _build_edit_file(meta, fn_name, fn_args, tool_content, path):
-    """Build mixed replace/insert batch metadata for ``edit_file``."""
+    """Build batch metadata for ``edit_file`` (stored rounds may hold inserts)."""
     _build_apply_diff(meta, fn_name, fn_args, tool_content, path)
     edits = fn_args.get('edits')
     if not isinstance(edits, list):
         return
     operations = [
-        e.get('operation', '?') for e in edits if isinstance(e, dict)
+        e.get('operation', 'replace') for e in edits if isinstance(e, dict)
     ]
     meta['editOperations'] = operations
     summaries = meta.get('editSummaries')
     if isinstance(summaries, list):
         valid_edits = [e for e in edits if isinstance(e, dict)]
         for summary, edit in zip(summaries, valid_edits):
-            summary['operation'] = edit.get('operation', '?')
+            summary['operation'] = edit.get('operation', 'replace')
 
 
 def _build_run_command(meta, fn_name, fn_args, tool_content, path):
@@ -393,6 +393,7 @@ def _classify_not_run_badge(reason):
 
 
 def _build_insert_content(meta, fn_name, fn_args, tool_content, path):
+    # The insert tools are retired; this renders their stored rounds.
     edits = fn_args.get('edits')
     if edits and isinstance(edits, list):
         paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))

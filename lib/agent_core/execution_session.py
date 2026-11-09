@@ -359,7 +359,7 @@ class ExecutionSession:
                     logger.error(
                         "[ExecutionSession] resource cleanup failed "
                         "execution=%s kind=%s resource=%s recoverable=%s type=%s",
-                        self.execution_id[:20], self.kind, resource.name,
+                        self.execution_id, self.kind, resource.name,
                         resource.recoverable, type(exc).__name__,
                     )
                 finally:
@@ -394,7 +394,7 @@ class ExecutionSession:
                 # Deferred: the FAILED receipt freezes before this re-raises.
                 logger.debug(
                     "[ExecutionSession] completion failed execution=%s kind=%s type=%s",
-                    self.execution_id[:20], self.kind, type(exc).__name__,
+                    self.execution_id, self.kind, type(exc).__name__,
                 )
                 completion_error = exc
                 final_outcome = ExecutionPhase.FAILED
@@ -588,7 +588,7 @@ def _bind_acquired_resource(
                 logger.error(
                     "[ExecutionSession] unbound resource rollback failed "
                     "execution=%s kind=%s resource=%s type=%s",
-                    session.execution_id[:20], session.kind, name,
+                    session.execution_id, session.kind, name,
                     type(exc).__name__,
                 )
             finally:

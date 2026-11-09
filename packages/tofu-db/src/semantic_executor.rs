@@ -2485,6 +2485,12 @@ fn compile_turn(
             let attempt_id = required_text(&payload, "attempt_id", 128)?.to_owned();
             let command_id = required_text(&payload, "command_id", 256)?.to_owned();
             let text = required_text(&payload, "text", 1024 * 1024)?.to_owned();
+            // Same rule as the SQL authority (_turns_write._turn_steer_commit):
+            // anything but a list carries no images.
+            let images = match payload.get("images") {
+                Some(Value::Array(images)) => images.clone(),
+                _ => Vec::new(),
+            };
             let author = match payload.get("author") {
                 None | Some(Value::Null) => None,
                 Some(value @ Value::Object(_)) => Some(value.clone()),
@@ -2497,6 +2503,7 @@ fn compile_turn(
                         attempt_id,
                         command_id,
                         text,
+                        images,
                         author,
                         updated_at_ms: now_unix_ms,
                         committed_at_ms: now_unix_ms,
@@ -2734,6 +2741,37 @@ fn compile_turn(
                     turn_id,
                     projection_revision,
                     image_index,
+                    slot: 0,
+                }],
+                TransactionIrResult::SlotOrLiteral {
+                    slot: 0,
+                    missing: b"null".to_vec(),
+                },
+                None,
+            )
+        }
+        "turn.projection.page" => {
+            let turn_id = required_text(&payload, "turn_id", 128)?.to_owned();
+            let page = payload
+                .get("page")
+                .and_then(Value::as_u64)
+                .filter(|value| *value <= i64::MAX as u64)
+                .ok_or(SemanticExecutionError::InvalidPayload)?;
+            let projection_revision = match payload.get("projection_revision") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_u64()
+                        .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+                        .ok_or(SemanticExecutionError::InvalidPayload)?,
+                ),
+            };
+            (
+                vec![TransactionIrStep::TurnProjectionPage {
+                    conversation_id,
+                    turn_id,
+                    projection_revision,
+                    page,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -7305,6 +7343,35 @@ fn compile_conversation(
                 None,
             )
         }
+        "conversation.turn_usage" => {
+            let conversation_id = required_text(&payload, "conv_id", 256)?.to_owned();
+            let bound = |field: &str| {
+                payload
+                    .get(field)
+                    .and_then(Value::as_i64)
+                    .ok_or(SemanticExecutionError::InvalidPayload)
+            };
+            let (timestamp_gte, timestamp_lt) = (bound("timestamp_gte")?, bound("timestamp_lt")?);
+            let title_fallback_characters =
+                optional_nonnegative_integer(&payload, "title_fallback_characters", 0)?;
+            if timestamp_gte >= timestamp_lt || title_fallback_characters > 256 {
+                return Err(SemanticExecutionError::InvalidPayload);
+            }
+            (
+                vec![TransactionIrStep::ConversationTurnUsage {
+                    conversation_id,
+                    timestamp_gte,
+                    timestamp_lt,
+                    title_fallback_characters: title_fallback_characters as usize,
+                    slot: 0,
+                }],
+                TransactionIrResult::SlotOrLiteral {
+                    slot: 0,
+                    missing: b"null".to_vec(),
+                },
+                None,
+            )
+        }
         "conversation.count" => (
             vec![TransactionIrStep::ConversationCount { slot: 0 }],
             TransactionIrResult::SlotOrLiteral {
@@ -10659,6 +10726,8 @@ pub(crate) fn compile_parallel_transaction(
                 | TransactionIrStep::TurnProjectionUpdate { .. }
                 | TransactionIrStep::TurnSyncPrune { .. }
                 | TransactionIrStep::TurnEventsPrune { .. }
+                | TransactionIrStep::WorkerJobHeartbeat { .. }
+                | TransactionIrStep::WorkerJobComplete { .. }
                 | TransactionIrStep::StreamAppend { .. }
                 | TransactionIrStep::IndexedStreamAppend { .. }
                 | TransactionIrStep::IndexedStreamAppendBatch { .. }
@@ -10668,7 +10737,8 @@ pub(crate) fn compile_parallel_transaction(
                     request: crate::raw_archive::Request::Put { .. },
                     ..
                 }
-        )
+        ) || matches!(step, TransactionIrStep::IntegrationWorkspace { request, .. }
+            if request.operation == "integration.workspace.set_meta")
     });
     Ok(safe.then_some(ir))
 }

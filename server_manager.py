@@ -43,7 +43,7 @@ from runtime_guards import (
     proc_stat_fields,
 )
 from tofu_dotenv import read_dotenv_values
-from serverctl_pkg.restart_budget import ARTIFACT_PREPARATION_SECONDS, NATIVE_SERVICE_STOP_SECONDS
+from serverctl_pkg.restart_budget import ARTIFACT_PREPARATION_SECONDS
 
 
 STATE_VERSION = 1
@@ -187,6 +187,23 @@ def _read_json(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+MANAGER_STATE_FILE = 'server-manager-state.json'
+RESTART_IN_PROGRESS = frozenset({'started', 'retrying', 'deferred'})
+
+
+def read_restart_outcome(project_path: str) -> dict[str, Any]:
+    """The manager's last restart outcome (``lastRestart``) for application views.
+
+    Written by ``LifecycleManager._settle_restart``: ``outcome`` is ``started``,
+    ``refused`` (decided before the old worker stopped; it keeps serving),
+    ``retrying``, ``deferred``, ``spawned`` or ``paused`` (crash budget
+    exhausted); ``uncleanCloses`` names resident hosts whose close the
+    replacement could not confirm. ``{}`` when no manager recorded one.
+    """
+    outcome = _read_json(Path(project_path) / 'data' / MANAGER_STATE_FILE).get('lastRestart')
+    return dict(outcome) if isinstance(outcome, dict) else {}
 
 
 def _boot_heartbeat_grace_seconds() -> float:
@@ -1325,7 +1342,7 @@ class LifecycleManager:
             python_exe or os.environ.get('TOFU_SUPERVISOR_PYTHON') or sys.executable)
         self.data_dir = Path(self.project) / 'data'
         self.logs_dir = Path(self.project) / 'logs'
-        self.state_path = self.data_dir / 'server-manager-state.json'
+        self.state_path = self.data_dir / MANAGER_STATE_FILE
         self.worker_log = self.logs_dir / 'server-console.log'
         from serverctl_pkg.native_storage_service import NativeStorageService
         self._native_storage = NativeStorageService(self.project, self.python)
@@ -1345,6 +1362,9 @@ class LifecycleManager:
         # subprocess._active, where the next Popen (``ss``, a preflight) reaps
         # the exited worker before its exit status is read.
         self._worker_process: subprocess.Popen | None = None
+        # The prepared launch of a replacement that failed after its old
+        # worker stopped; its retry reuses it instead of rebuilding.
+        self._replacement_inputs: tuple[dict[str, str], dict | None, dict | None] | None = None
         self._state_needs_save = False
         self._project_env = project_server_env(self.project)
         loaded = _read_json(self.state_path)
@@ -1535,6 +1555,8 @@ class LifecycleManager:
         self._state['activeFailureAt'] = 0.0
         self._state['nextRetryAt'] = 0.0
         self._state['executionRecovery'] = {}
+        self._state['replacementRetry'] = {}
+        self._replacement_inputs = None
 
     def _storage_data_dir(self) -> Path:
         """Resolve the worker's declared authority root without app imports."""
@@ -1592,60 +1614,25 @@ class LifecycleManager:
         return False
 
     def _recover_execution_service(self) -> bool:
-        """Recover the same execution generation without retiring the live API."""
-        record = self._execution.record()
-        if not record:
-            return True  # Explicit/legacy topology has its own execution owner.
-        if self._execution.host_matches(record):
-            if record.get('state') == 'ready':
-                self._state['executionRecovery'] = {}
-                return True
-            self._set_observed('degraded', str(record.get('error') or 'execution service is starting'))
-            return False
-        recovery = self._state.get('executionRecovery') or {}
-        if recovery.get('serviceId') != record.get('serviceId'):
-            now, recent, consecutive = self._account_failure()
-            exhausted = recent >= self.max_failures
-            recovery = {
-                'serviceId': record.get('serviceId'),
-                'retryAt': now + self._failure_retry_delay(consecutive, recent),
-                'requiresRestart': exhausted,
-                'error': ('execution recovery paused; explicit restart required' if exhausted
-                          else 'execution service exited; waiting for recovery'),
-            }
-            self._state['executionRecovery'] = recovery
-            self._state['lastFailureReason'] = recovery['error']
-            self._state['lastExitCause'] = 'execution_exit'
-        if recovery.get('requiresRestart') or _now() < recovery['retryAt']:
-            self._set_observed('crashloop' if recovery.get('requiresRestart') else 'degraded',
-                               recovery['error'])
-            return False
-        from serverctl_pkg.resident_service import ServiceOwnerDraining
-        try:
-            environment = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
-            environment.setdefault('TOFU_STORAGE_CONNECTION_FILE', self._native_storage.result_path())
-            plan = self._execution.prepare(environment)
-            if record.get('plan') != plan:
-                raise RuntimeError('execution configuration or code changed; explicit restart required')
-            self._execution.stop()
-            self._execution.ensure(plan, environment)
-        except ServiceOwnerDraining as exc:
-            # A killed host's cmdline vanishes before its descriptors close, so
-            # its lease can outlive the departure briefly. That is the same
-            # failure still exiting, retried within the host stop budget.
-            draining_since = recovery.setdefault('drainingSince', _now())
-            if _now() - draining_since < NATIVE_SERVICE_STOP_SECONDS:
-                self._set_observed('degraded', f'execution service is still exiting: {exc}')
-                return False
-            recovery.update(requiresRestart=True, error=f'execution recovery failed: {exc}')
-            self._set_observed('degraded', recovery['error'])
-            return False
-        except Exception as exc:
-            recovery.update(requiresRestart=True, error=f'execution recovery failed: {exc}')
-            self._set_observed('degraded', recovery['error'])
-            return False
-        self._set_observed('degraded', 'execution service is starting')
-        return False
+        """Supply the manager's shared failure budget to the execution owner."""
+        def environment():
+            env = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
+            env.setdefault('TOFU_STORAGE_CONNECTION_FILE', self._native_storage.result_path())
+            return env
+
+        def validate_source_refresh():
+            # The executor may change source before boot, but cannot upgrade
+            # the storage generation beneath the API that is still serving.
+            env = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
+            storage_plan = self._native_storage.prepare(env)
+            if self._native_storage.needs_replacement(storage_plan):
+                raise RuntimeError('storage generation changed; explicit restart required')
+
+        return self._execution.recover(
+            state=self._state, max_failures=self.max_failures, clock=_now,
+            account_failure=self._account_failure, retry_delay=self._failure_retry_delay,
+            observe=self._set_observed, environment_factory=environment,
+            validate_source_refresh=validate_source_refresh)
 
     def _clean_exit_marker_for_remembered_worker(self) -> dict[str, Any]:
         """Return a fresh PID-bound clean-exit certificate, or an empty dict.
@@ -2609,13 +2596,10 @@ class LifecycleManager:
                     probe.get('readinessError') if liveness
                     else probe.get('livenessError') or last_error)
             execution_record = self._execution.record()
-            execution_error = ''
-            if (desired == 'running' and execution_record and
-                    (execution_record.get('state') != 'ready'
-                     or not self._execution.host_matches(execution_record))):
-                execution_error = str((self._state.get('executionRecovery') or {}).get('error')
-                                      or execution_record.get('error')
-                                      or 'execution service is not ready')
+            execution_error = (self._execution.readiness_error(
+                execution_record, self._state.get('executionRecovery') or {})
+                if desired == 'running' else '')
+            if execution_error:
                 ready = False
                 last_error = execution_error
                 if observed not in {'conflict', 'stopping', 'crashloop'}:
@@ -2687,6 +2671,7 @@ class LifecycleManager:
                 'lastRecoveredAt': float(self._state.get('lastRecoveredAt') or 0),
                 'lastRecoverySeconds': self._state.get('lastRecoverySeconds'),
                 'nextRetryAt': float(self._state.get('nextRetryAt') or 0),
+                'lastRestart': dict(self._state.get('lastRestart') or {}),
                 'lastError': last_error,
                 'environmentQuarantine': dict(
                     self._state.get('environmentQuarantine') or {}),
@@ -2781,8 +2766,18 @@ class LifecycleManager:
                 logger.warning(
                     'explicit restart replaced an execution host that exited '
                     'after an unclean close: %s', retired)
+                self._note_unclean_close('execution', retired)
         if storage_changes:
-            self._native_storage.stop()
+            # Likewise for storage: the engine's crash recovery is the normal
+            # path after any unclean close, and its authority lease (below)
+            # still fences a daemon that outlived its host.
+            retired = self._native_storage.stop(retire_failed_close=reset_failed)
+            if retired:
+                logger.warning(
+                    'explicit restart replaced a native storage host whose close '
+                    'was not confirmed: %s; its successor opens the storage '
+                    'authority through crash recovery', retired)
+                self._note_unclean_close('native storage', retired)
             # The host process is gone, but an unreapable daemon can outlive
             # it and still hold the authority lease. Waiting here reuses the
             # existing orphan-reap policy; a lease that survives it defers the
@@ -2802,6 +2797,86 @@ class LifecycleManager:
         self._execution.stop()
         self._native_storage.stop()
 
+    def _resident_replacement_refusal(self, storage_plan, execution_plan) -> str:
+        """What ``_ensure_resident_services`` would refuse once the API stopped, or ''."""
+        storage_changes = self._native_storage.needs_replacement(storage_plan, reset_failed=True)
+        execution_changes = self._execution.needs_replacement(execution_plan, reset_failed=True)
+        return (self._execution.replacement_refusal(
+                    execution_plan, replace=storage_changes or execution_changes)
+                or self._native_storage.replacement_refusal(storage_plan, replace=storage_changes))
+
+    def _note_unclean_close(self, service: str, detail: str) -> None:
+        outcome = self._state.get('lastRestart') or {}
+        if outcome.get('outcome') in RESTART_IN_PROGRESS:
+            outcome.setdefault('uncleanCloses', []).append(
+                {'service': service, 'detail': detail, 'at': _now()})
+
+    def _settle_restart(self, outcome: str, message: str = '', **fields: Any) -> None:
+        """Record the outcome of the restart in progress; other spawns leave it alone.
+
+        ``read_restart_outcome`` serves it to the application, whose restart
+        views otherwise learn only that a newer server booted.
+        """
+        record = self._state.get('lastRestart') or {}
+        if record.get('outcome') not in RESTART_IN_PROGRESS:
+            return
+        record.update(outcome=outcome, message=message[:2000], settledAt=_now(), **fields)
+
+    def _refuse_restart(self, stage: str, message: str) -> dict[str, Any]:
+        """A refusal decided while the old worker still serves; it keeps serving."""
+        with self._lock:
+            self._settle_restart('refused', message, stage=stage)
+            self._save()
+        logger.error(
+            'worker restart refused at %s stage%s; the serving worker is '
+            'retained: %s', stage, self._trace_total_suffix(), message)
+        return {'ok': False, 'message': message}
+
+    def _replacement_failed(self, source: str, message: str, *,
+                            inputs: tuple | None, reset_failed: bool) -> dict[str, Any]:
+        """A generation that failed before its worker ran is retried, never latched at once.
+
+        No worker serves here: an immediate ``crashloop`` latch left the
+        server down until a human restarted it (2026-11-06, 42 and 69 min).
+        The failure is charged to the existing windowed failure budget and
+        reconciliation retries it with the existing backoff, reusing this
+        attempt's prepared launch and explicitness; only an exhausted budget
+        latches ``crashloop``, which an explicit start/restart resets.
+        """
+        now, recent, consecutive = self._account_failure()
+        self._state['lastFailureReason'] = message
+        self._state['lastExitCause'] = 'replacement_start_failed'
+        if recent >= self.max_failures:
+            self._state['replacementRetry'] = {}
+            self._replacement_inputs = None
+            self._state['nextRetryAt'] = 0.0
+            paused = (f'{message}; worker failed {recent} times in '
+                      f'{self.failure_window:.0f}s; recovery paused')
+            self._set_observed('crashloop', paused)
+            self._settle_restart('paused', paused)
+            self._save()
+            logger.error(
+                'worker recovery paused after %d failures in %.0fs; explicit '
+                'start/restart is required to reset the crash-loop budget: %s',
+                recent, self.failure_window, message)
+            return {'ok': False, 'message': paused}
+        delay = self._failure_retry_delay(consecutive, recent)
+        self._state['nextRetryAt'] = now + delay
+        self._state['replacementRetry'] = {
+            'source': source, 'resetFailed': bool(reset_failed),
+            'failedAt': now, 'error': message[:2000]}
+        self._replacement_inputs = inputs
+        retrying = f'{message}; retrying in {delay:.0f}s'
+        self._set_observed('starting', retrying)
+        self._settle_restart('retrying', retrying, nextRetryAt=now + delay)
+        self._save()
+        logger.error(
+            'worker replacement failed to start (failure %d/%d in %.0fs window, '
+            'source=%s): %s; retrying in %.0fs', recent, self.max_failures,
+            self.failure_window, source, message, delay)
+        return {'ok': True, 'retrying': True, 'alreadyRunning': False, 'launcherPid': None,
+                'message': f'replacement start failed; the manager retries in {delay:.0f}s: {message}'}
+
     def _restart_configuration(self) -> str:
         """Detect another lifecycle operation while preparation releases the lock."""
         worker = self._state.get('worker') or {}
@@ -2820,10 +2895,20 @@ class LifecycleManager:
                prepared_execution_plan: dict | None = None,
                reset_failed_storage: bool = False) -> dict[str, Any]:
         # A persisted planned-recovery intent is consumed by this exact spawn
-        # attempt.  If process creation itself fails, _spawn latches a real
-        # crashloop instead of replaying the old clean marker forever.
+        # attempt.  If process creation itself fails, the failure is charged
+        # to the windowed budget (_replacement_failed) instead of replaying
+        # the old clean marker forever.
         self._state['pendingRecoverySource'] = ''
         self._state['pendingWorkerExitIntent'] = {}
+        retry = self._state.get('replacementRetry') or {}
+        if retry and prepared_environment is None:
+            # Continue a replacement that failed after its old worker stopped,
+            # with its explicitness and, unless the manager re-exec'd since,
+            # its prepared launch.
+            reset_failed_storage = reset_failed_storage or bool(retry.get('resetFailed'))
+            if self._replacement_inputs is not None:
+                (prepared_environment, prepared_storage_plan,
+                 prepared_execution_plan) = self._replacement_inputs
         env = (dict(prepared_environment) if prepared_environment is not None
                else self._worker_environment(self._state.get('serverEnv') or {}, self.port))
         environment_error = production_server_environment_error(
@@ -2859,11 +2944,12 @@ class LifecycleManager:
             self._save()
             logger.error('%s', message)
             return {'ok': False, 'message': message}
+        storage_plan, execution_plan = prepared_storage_plan, prepared_execution_plan
+        retry_inputs = (None if prepared_environment is None else
+                        (dict(prepared_environment), storage_plan, execution_plan))
         try:
             if prepared_environment is None:
                 env, storage_plan, execution_plan = self._prepare_resident_services(env)
-            else:
-                storage_plan, execution_plan = prepared_storage_plan, prepared_execution_plan
             env = self._ensure_resident_services(env, storage_plan, execution_plan,
                                                 reset_failed=reset_failed_storage)
         except _StorageLeaseStillHeld as exc:
@@ -2872,6 +2958,13 @@ class LifecycleManager:
             # soon as the OS lease disappears, without spending the crash
             # budget or requiring another human restart.
             maintenance = exc.lease.get('kind') == 'offline_maintenance'
+            if retry_inputs is not None:
+                # The resumed spawn keeps this restart's prepared launch.
+                self._state['replacementRetry'] = {
+                    'source': source, 'resetFailed': bool(reset_failed_storage),
+                    'failedAt': _now(), 'error': str(exc)}
+                self._replacement_inputs = retry_inputs
+            self._settle_restart('deferred', self._storage_blocker_message(exc.lease))
             self._defer_for_storage_lease(exc.lease, resume_source=source)
             self._save()
             return {
@@ -2882,10 +2975,9 @@ class LifecycleManager:
                 **self.status(),
             }
         except Exception as exc:
-            message = f'resident service preparation failed: {exc}'
-            self._set_observed('crashloop', message)
-            self._save()
-            return {'ok': False, 'message': message}
+            return self._replacement_failed(
+                source, f'resident service preparation failed: {exc}',
+                inputs=retry_inputs, reset_failed=reset_failed_storage)
         runtime = None
         worker_python = self.python
         runtime_status: dict[str, object] = {
@@ -2943,9 +3035,9 @@ class LifecycleManager:
                 bytecode_activation.close_parent_lock()
             if runtime is not None:
                 runtime.close_parent_lock()
-            self._set_observed('crashloop', f'cannot open worker log: {exc}')
-            self._save()
-            return {'ok': False, 'message': str(exc)}
+            return self._replacement_failed(
+                source, f'cannot open worker log: {exc}',
+                inputs=retry_inputs, reset_failed=reset_failed_storage)
         try:
             proc = subprocess.Popen(
                 [worker_python, 'server.py', *args], cwd=self.project, env=env,
@@ -2957,9 +3049,9 @@ class LifecycleManager:
                 bytecode_activation.close_parent_lock()
             if runtime is not None:
                 runtime.close_parent_lock()
-            self._set_observed('crashloop', f'spawn failed: {exc}')
-            self._save()
-            return {'ok': False, 'message': f'spawn failed: {exc}'}
+            return self._replacement_failed(
+                source, f'spawn failed: {exc}',
+                inputs=retry_inputs, reset_failed=reset_failed_storage)
         finally:
             log_fh.close()
         if bytecode_activation is not None:
@@ -2988,6 +3080,10 @@ class LifecycleManager:
         self._state['launchSource'] = source
         self._state['lastError'] = ''
         self._state['storageBlocker'] = {}
+        self._state['replacementRetry'] = {}
+        self._replacement_inputs = None
+        self._settle_restart('spawned', f'worker pid={proc.pid} spawned (source={source})',
+                             workerPid=proc.pid)
         self._set_observed('starting')
         self._save()
         logger.info(
@@ -3207,6 +3303,8 @@ class LifecycleManager:
             } if was_running else {})
             if not keep_desired_running:
                 self._state['storageBlocker'] = {}
+                self._state['replacementRetry'] = {}
+                self._replacement_inputs = None
             self._set_observed('stopping' if was_running else 'stopped')
             self._disable_legacy_guard()
             self._save()  # desired=stopped must win before the signal is sent
@@ -3252,11 +3350,17 @@ class LifecycleManager:
         started = time.monotonic()
         # Validate and snapshot launch policy while the old worker serves.
         # Builds run outside the mutex so status/stop remain available.
+        # Every refusal is decided here, before stop; once the old worker is
+        # gone the manager drives the replacement to a serving worker.
+        with self._lock:
+            self._state['lastRestart'] = {
+                'source': source, 'outcome': 'started', 'startedAt': _now(),
+                'requestedAt': float(requested_at or _now()), 'uncleanCloses': []}
         with self._lock:
             if server_args is not None and not isinstance(server_args, list):
-                return {'ok': False, 'message': 'serverArgs must be a JSON array'}
+                return self._refuse_restart('validation', 'serverArgs must be a JSON array')
             if server_env is not None and not isinstance(server_env, dict):
-                return {'ok': False, 'message': 'serverEnv must be a JSON object'}
+                return self._refuse_restart('validation', 'serverEnv must be a JSON object')
             if server_args is None and server_env is None:
                 live = read_lock_status(self.project)
                 if live.get('running') and not self._identity_error(live):
@@ -3270,11 +3374,11 @@ class LifecycleManager:
             launch_args = [str(arg) for arg in (
                 server_args if server_args is not None else self._state.get('serverArgs') or [])]
             if len(launch_args) > 32 or any(len(arg) > 4096 for arg in launch_args):
-                return {'ok': False, 'message': 'serverArgs exceeds safety limit'}
+                return self._refuse_restart('validation', 'serverArgs exceeds safety limit')
             project_environment, forwarded_environment, environment_error = (
                 self._validated_server_environment(server_env))
             if environment_error:
-                return {'ok': False, 'message': environment_error}
+                return self._refuse_restart('validation', environment_error)
             effective_env = {**os.environ, **forwarded_environment}
             launch_port = (_server_port(launch_args, effective_env)
                            if server_args is not None or server_env is not None else self.port)
@@ -3284,16 +3388,22 @@ class LifecycleManager:
             self.project, self.python, preparation_environment,
             f'manager {source} before shutdown')
         if not ready:
-            return {'ok': False, 'message': error}
+            return self._refuse_restart('frontend preparation', error)
         try:
             preparation_environment, storage_plan, execution_plan = self._prepare_resident_services(
                 preparation_environment)
         except Exception as exc:
-            return {'ok': False, 'message': f'resident service preparation failed before shutdown: {exc}'}
+            return self._refuse_restart(
+                'resident preparation',
+                f'resident service preparation failed before shutdown: {exc}')
         with self._lock:
             if configuration != self._restart_configuration():
-                return {'ok': False, 'message': (
-                    'Worker lifecycle changed during restart preparation; retry against current state.')}
+                return self._refuse_restart('preparation', (
+                    'Worker lifecycle changed during restart preparation; retry against current state.'))
+            refusal = (production_server_environment_error(self.project, preparation_environment)
+                       or self._resident_replacement_refusal(storage_plan, execution_plan))
+            if refusal:
+                return self._refuse_restart('admission', refusal)
             if server_args is not None:
                 self._state['serverArgs'] = [str(arg) for arg in server_args]
             self._project_env = dict(project_environment or {})
@@ -3312,6 +3422,9 @@ class LifecycleManager:
                     time.monotonic() - started,
                     self._trace_total_suffix(),
                     stopped.get('message') or 'stop refused')
+                self._settle_restart('refused', str(stopped.get('message') or 'stop refused'),
+                                     stage='stop')
+                self._save()
                 return stopped
             self._wait_for_stopped_sidecar_release()
             self._clear_failure_budget()
@@ -3321,11 +3434,33 @@ class LifecycleManager:
                                 _prepared_environment=preparation_environment,
                                 _prepared_storage_plan=storage_plan,
                                 _prepared_execution_plan=execution_plan)
-            if result.get('ok'):
+            outcome = (self._state.get('lastRestart') or {}).get('outcome')
+            if outcome == 'started':
+                # start() returned before any spawn: a worker already serves,
+                # a port conflict or the storage lease defers it to
+                # reconciliation, or the environment quarantine stopped it.
+                outcome = ('spawned' if result.get('alreadyRunning')
+                           else 'deferred' if self._state.get('desired') == 'running'
+                           else 'refused')
+                self._settle_restart(outcome, str(result.get('message') or ''), stage='start')
+                self._save()
+            if outcome == 'spawned':
+                closes = (self._state.get('lastRestart') or {}).get('uncleanCloses') or []
                 logger.info(
-                    'worker restart replacement spawned in %.1fs%s',
+                    'worker restart replacement spawned in %.1fs%s%s',
                     time.monotonic() - started,
-                    self._trace_total_suffix())
+                    self._trace_total_suffix(),
+                    ''.join(f'; recovered {close["service"]} after an unclean close'
+                            for close in closes))
+            elif outcome in RESTART_IN_PROGRESS:
+                # Never a refusal: the old worker is gone and reconciliation
+                # completes the replacement (retry, storage lease or port).
+                logger.error(
+                    'worker restart replacement pending after %.1fs%s; the manager '
+                    'completes it automatically: %s',
+                    time.monotonic() - started,
+                    self._trace_total_suffix(),
+                    result.get('message') or result)
             else:
                 logger.error(
                     'worker restart failed at start stage after %.1fs%s: %s',

@@ -14,6 +14,11 @@ execution variant aborts the transaction pre-commit, and committed commands
 always leave a durable ``(tenant, owner, command_id)`` receipt that returns
 the recorded outcome instead of double-applying (the same classification
 ``lib/evolution/records.py`` already applies to its reads and writes).
+
+``storage_wait_owner`` is the other half: a supervised client waits these
+failures out inside the call while its authority lives, and this thread-local
+port (``lib.agent_core.storage_waits``, re-exported here) lets the waiting
+owner present such a wait and end it.
 """
 
 from __future__ import annotations
@@ -26,6 +31,9 @@ from lib.log import get_logger
 from lib.agent_core.storage_errors import (
     TRANSIENT_STORAGE_CODES, is_transient_storage_error,
 )
+from lib.agent_core.storage_waits import (
+    decline_storage_wait, observe_storage_wait, storage_wait_owner,
+)
 
 logger = get_logger(__name__)
 
@@ -35,7 +43,6 @@ T = TypeVar('T')
 #: per-attempt RPC budgets, so a brief authority brownout (WAL rotation,
 #: checkpoint, pressure spike) degrades to a wait instead of a fatal error.
 DEFAULT_TRANSIENT_DELAYS_S = (1.0, 2.0, 4.0)
-
 
 def call_with_transient_retry(
     fn: Callable[[], T],
@@ -75,5 +82,8 @@ __all__ = [
     'DEFAULT_TRANSIENT_DELAYS_S',
     'TRANSIENT_STORAGE_CODES',
     'call_with_transient_retry',
+    'decline_storage_wait',
     'is_transient_storage_error',
+    'observe_storage_wait',
+    'storage_wait_owner',
 ]

@@ -6,6 +6,20 @@ This directory contains retained, executable measurement contracts. Local run
 outputs and candidate result payloads are reconstructible artifacts and remain
 untracked according to `.gitignore`.
 
+`verification_bundle_reuse.py` runs real Vite builds over identical private
+checkouts and independent collector views. Freeze each implementation, require
+complete JS/CSS artifact digests and executable exports, and compare alternating
+fresh processes. Build counts, preparation clocks and retained cache bytes are
+component evidence, never whole-suite or Agent-task speedups. Verify
+`tests/meta/test_verification_bundle_artifacts.py` and `test_test_bundle_cache.py`.
+
+`sse_text_accumulation.py` compares frozen accumulator revisions through actual
+provider JSON, progress, delta callbacks and finalization. Require complete
+message/callback/state/usage receipts before reporting clocks. Compare fresh
+alternating processes; `--allocations` publishes allocation observations only.
+Text, Unicode scalar, reasoning, mixed and live-readback cases are components,
+not provider or application latency. Verify `test_sse_text_accumulation_measure`.
+
 `storage_history_cohort.py` continues complete private Turn exports through the
 production capture/FIFO/commit owners on disposable authorities. Frozen inputs,
 all event rows, final projection digests, SIGKILL/reopen and offline integrity
@@ -254,6 +268,24 @@ loop's own reads, not Git or publication work. Run each pinned tree in a fresh
 process with `--repository`; the behavior is specified in
 `tests/project_mod/test_delivery_resume_demand.py`.
 
+`held_conflict_passes.py` replays the delivery-lane shape of 2026-11-08: a disposable
+SQLite Sidecar and canonical checkout whose `--tasks` automatic Workers each hold an
+add/add `task_delta_conflict` over `--files` paths (default 2 x 1,100), then
+`--passes` resume passes after the timestamp resolution, reporting interpreter CPU,
+reaped Git child CPU, wall time and claims-lease admissions per pass; the first pass
+starts with nothing remembered, as after a restart, and every pass must leave the held
+receipts unchanged. Run each pinned tree in a fresh process with `--repository`; Git
+work runs in children and local-disk clocks under-state network-volume stats. Verify
+`tests/meta/test_held_conflict_passes_measure.py`.
+
+`workspace_claims_lease.py` builds a disposable Git checkout (default 1,100
+files under a nine-level root, the production task-delta shape) and times one
+complete `workspace_claims_lease` entry/exit of one file claim per path in
+process CPU and wall clock. Compared trees must report the same held key count.
+Run each pinned tree in a fresh process with `--repository`; local-disk clocks
+under-state network-volume stat costs. Verify
+`tests/meta/test_workspace_claims_lease_measure.py`.
+
 `turn_projection_incremental.py` measures per-event Turn projection capture,
 projection and patch time for seeded 10/100/500-round tasks, idle and beside
 CPU-bound GIL-contention threads, one fresh worker per arm; `--source-root`
@@ -279,6 +311,18 @@ each request as the native client does. Arms must produce identical request
 bytes, carried rows and checkpoint texts before clocks count. Verify
 `tests/meta/test_turn_event_persist_encode_measure.py`; the authority, delivery
 coordinator and providers are excluded.
+
+`storage_medium_probe.py` measures one volume from a private scratch directory
+it removes on exit: append+fdatasync and write-only appends (the WAL patterns),
+loose-block publication (temporary file, fsync, rename, directory fsync),
+metadata, sequential and cold random I/O, and 8-thread durable appends and
+publications, plus the shared placement policy's classification of the volume.
+Run it from a shell carrying the production `LD_PRELOAD`/`LIBBGFS_*`
+environment so DolphinFS uses the same userspace client, and alternate media
+between rounds. It measures the medium, not the engine: pair it with the
+engine's `--fastpath-admission required` probe and live `system.metrics`
+(`docs/STORAGE_OPERATIONS.md`, "Native authority placement"). Verify
+`tests/meta/test_storage_medium_probe_measure.py`.
 
 ## Editing rules
 

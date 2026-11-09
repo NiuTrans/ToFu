@@ -11,7 +11,7 @@ import asyncio
 import threading
 import time
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -159,7 +159,7 @@ def _mark_worker_started_locked(
     except Exception as error:
         logger.debug(
             '[Spawn] worker-entry phase emit failed task=%s: %s',
-            task_id[:8] or '?', error,
+            task_log_tag(task_id) or '?', error,
         )
     if has_workspace:
         # Binding is execution authority: errors must escape to the existing
@@ -181,7 +181,7 @@ def _mark_worker_started_locked(
                 )
             except Exception as error:
                 logger.debug('[Spawn] workspace-ready phase emit failed task=%s: %s',
-                             task_id[:8] or '?', error)
+                             task_log_tag(task_id) or '?', error)
         project_path = str((task.get('config') or {}).get('projectPath') or '')
         try:
             from lib.conversations.project_brain import (
@@ -193,7 +193,7 @@ def _mark_worker_started_locked(
             # todo/file signal still creates the same deterministic work item.
             logger.debug(
                 '[Spawn] isolated Project work signal failed task=%s: %s',
-                task_id[:8] or '?', error,
+                task_log_tag(task_id) or '?', error,
             )
     if worker_started is not None:
         worker_started.set()
@@ -207,7 +207,7 @@ def _settle_unscheduled_workspace(task):
         persist_terminal_workspace_intent(task)
     except Exception as error:
         logger.warning('[Spawn] workspace preservation deferred task=%s: %s',
-                       task.get('id', '?')[:8], error, exc_info=True)
+                       task_log_tag(task.get('id', '?')), error, exc_info=True)
 
 
 def _owned_task_callable(
@@ -363,7 +363,7 @@ def _publish_executor_queue_phase(
         except Exception as error:
             logger.debug(
                 '[Spawn] queued phase emit failed task=%s: %s',
-                str(task.get('id') or '?')[:8], error,
+                str(task.get('id') or '?'), error,
             )
         return True, signature
 
@@ -415,6 +415,25 @@ def agent_scheduling_snapshot(task_id: str | None = None) -> dict:
     return dict(snapshot(task_id))
 
 
+def task_identity_scheduled(task_id: str) -> bool:
+    """Whether this process still holds a carrier or executor job with this id.
+
+    A project Worker reuses ``project-worker:<assignment>`` for every attempt.
+    Its previous carrier keeps the agent executor's job until its worker has
+    returned, after its Turn settled, and the executor refuses the same id until
+    then. A start that reuses the identity must ask before its durable attempt
+    exists, never learn it from that refusal.
+    """
+    task_id = str(task_id or '')
+    if not task_id:
+        return False
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    if chat_task_runtime.has_live_carrier(task_id):
+        return True
+    return agent_scheduling_snapshot(task_id).get('taskState') in {
+        'queued', 'running', 'abandoned'}
+
+
 def _prepare_task_worker(task, runner):
     """One domain admission/error envelope for inline and submitted workers."""
     if runner is None:
@@ -432,7 +451,7 @@ def _prepare_task_worker(task, runner):
             _finalize_rejected_submission(task, error)
         else:
             logger.error('[Spawn] Task %s failed after worker entry: %s',
-                         task.get('id', '?')[:8], error, exc_info=True)
+                         task_log_tag(task.get('id', '?')), error, exc_info=True)
 
     return owned, failed, worker_started, scheduling_phase_lock
 
@@ -468,7 +487,7 @@ def spawn_task(task: dict, *, runner=None, executor=None):
     chat_task_runtime.spawn_owned_worker(
         task, owned, executor=_agent_executor, serving_loop=_serving_loop,
         on_error=failed, on_queued=on_queued,
-        thread_name=f'run_task-{task.get("id", "?")[:8]}')
+        thread_name=f'run_task-{task_log_tag(task.get("id", "?"))}')
 
 
 __all__ = [
@@ -476,6 +495,7 @@ __all__ = [
     'agent_scheduling_snapshot',
     'cancel_queued_task',
     'set_agent_executor',
+    'task_identity_scheduled',
     'set_serving_loop',
     'run_task_inline',
     'spawn_task',

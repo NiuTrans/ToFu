@@ -46,6 +46,9 @@ _STOPPING = threading.Event()
 # Set once the scheduler tick has called in: only then does this process host bridges.
 _HOSTING = threading.Event()
 _TERMINAL_STATES = frozenset({'needs_login', 'kicked'})
+# Launcher refusals that are account states of their own: a login the owner
+# must approve, or the SSO step's own runtime, which no login can fix.
+_LAUNCHER_STATES = frozenset({'needs_login', 'runtime_unavailable'})
 
 
 def start_channel_bridges() -> None:
@@ -219,7 +222,7 @@ def _confirm_identity(owner: int, store: ChannelStore, wanted: dict, *, identity
                 return
             store.update_account(CHANNEL, bind)
     except ChannelError as error:
-        _confirmation_failure(owner, store, 'needs_login' if error.code == 'needs_login' else 'error',
+        _confirmation_failure(owner, store, error.code if error.code in _LAUNCHER_STATES else 'error',
                               str(error), serves)
     except Exception as error:
         logger.warning('[Channels] dx identity confirmation failed owner=%s', owner, exc_info=True)

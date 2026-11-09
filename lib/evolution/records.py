@@ -17,7 +17,7 @@ import uuid
 
 from lib.identity import require_user_id
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 from .contracts import EvolutionContractError
 

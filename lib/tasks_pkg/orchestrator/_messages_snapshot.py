@@ -16,6 +16,7 @@ def emit_messages_snapshot_event(
     round_num: int, model: str, thinking_enabled: bool, thinking_depth: int,
     preset: str, temperature: float, max_tokens: int, response_format: Any,
     tools: Any, prepared_messages: list[dict[str, Any]] | None = None,
+    prepared_lineage: dict | None = None,
 ) -> None:
     """Record finalized messages; explicitly label failed-build reconstructions.
 
@@ -28,7 +29,7 @@ def emit_messages_snapshot_event(
                                        round_num + 1, task.get('_flow_phase') or '')
             event = build_round_evidence(
                 task, messages, ref=ref, kind='request', model=model,
-                prepared_messages=prepared_messages, tools=tools,
+                prepared_messages=prepared_messages, tools=tools, prepared_lineage=prepared_lineage,
                 params={'maxTokens': max_tokens, 'temperature': temperature,
                         'thinkingEnabled': thinking_enabled,
                         'thinkingDepth': thinking_depth, 'preset': preset,

@@ -407,7 +407,7 @@ def set_conv_roots(conv_id, primary_path, extras=None, readonly_paths=None):
     # _evict_conv_roots_over_cap) and never picks the newest registration.
     register_root_policy(conv_id, policy)
     logger.debug('[Config] set_conv_roots conv=%s primary=%s extras=%d names=%s',
-                 conv_id[:12] if conv_id else '?',
+                 conv_id if conv_id else '?',
                  abs_primary, len(extras_list), list(conv_map.keys()))
 
 
@@ -482,7 +482,7 @@ def add_conv_root(conv_id, path, name=None, access='rw'):
         if conv_id in _conv_roots:
             _conv_roots.move_to_end(conv_id)
     logger.info('[Config] add_conv_root conv=%s [%s] %s',
-                conv_id[:12] if conv_id else '?', rname, abs_path)
+                conv_id if conv_id else '?', rname, abs_path)
     return rname
 
 
@@ -526,7 +526,7 @@ def _conv_has_live_task(conv_id):
     except Exception as e:
         logger.debug('[Config] live-task probe failed for conv=%s: %s — '
                      'treating as idle (eviction not blocked)',
-                     conv_id[:12] if conv_id else '?', e)
+                     conv_id if conv_id else '?', e)
         return False
 
 
@@ -611,7 +611,7 @@ def get_conv_cwd(conv_id):
         with _lock:
             _conv_cwd.pop(conv_id, None)
         logger.debug('[Config] sticky cwd for conv=%s vanished (%s) — cleared',
-                     conv_id[:12] if conv_id else '?', cwd)
+                     conv_id if conv_id else '?', cwd)
     return None
 
 
@@ -630,7 +630,7 @@ def set_conv_cwd(conv_id, abs_cwd):
     if not _cwd_within_conv_roots(conv_id, abs_cwd):
         logger.debug('[Config] sticky cwd %s rejected for conv=%s '
                      '(outside registered roots)', abs_cwd,
-                     conv_id[:12] if conv_id else '?')
+                     conv_id if conv_id else '?')
         return False
     with _lock:
         if conv_id in _conv_cwd:
@@ -727,7 +727,7 @@ def resolve_namespaced_path(rel_path, conv_id=None):
                 r = conv_map.get(name)
                 if r:
                     logger.debug('[Config] conv=%s namespaced resolve: %s → base=%s',
-                                 conv_id[:12], rel_path, r['path'])
+                                 conv_id, rel_path, r['path'])
                     return r['path'], rest or '.'
                 # Case-insensitive within conv registry
                 for rn, rs in conv_map.items():
@@ -923,7 +923,7 @@ def get_state_for_conv(conv_id, held_roots=()):
                 }
     except Exception as e:
         logger.debug('[Config] cross_dc info unavailable (conv=%s): %s',
-                     conv_id[:12] if conv_id else '?', e)
+                     conv_id if conv_id else '?', e)
     _attach_git_branches(s, primary)
     return s
 

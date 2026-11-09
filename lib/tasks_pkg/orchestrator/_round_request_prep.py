@@ -117,6 +117,7 @@ def build_round_request(task, rs, messages, tool_list, *,
     emit_messages_snapshot_event(
         task, messages,
         prepared_messages=body.get('messages'),
+        prepared_lineage=body.get('_context_lineage'),
         **_snapshot_arguments,
     )
     # Preserve the already-paid full-prompt admission count for downstream

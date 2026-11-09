@@ -43,6 +43,12 @@ _SQLITE_CONNECT_ALLOWLIST = {
     # candidate opens first prove they are not the canonical authority.
     'lib/storage_authority_sql/offline.py',
     'lib/storage_authority_sql/offline_maintenance.py',
+    # Landing-verification impact records are a reconstructible cache beside
+    # the warm merge checkout, never the conversation authority: the records
+    # DB has its own schema, per-environment keys and a locked read-only
+    # import of the previous generation. Routing it through the conversation
+    # repository would couple cache latency and failure to canonical work.
+    'lib/storage_authority_sql/impact_cache.py',
     # Offline authority migrations run only under a stopped-project lease.
     'scripts/migrate_pg_to_sqlite.py',
     'scripts/migrate_sqlite_to_postgres.py',

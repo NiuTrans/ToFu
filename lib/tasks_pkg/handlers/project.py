@@ -12,11 +12,10 @@ from __future__ import annotations
 import os
 import threading
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.executor import (
     _build_simple_meta,
     _finalize_tool_round,
-    _resolve_content_ref,
     tool_registry,
 )
 from lib.tasks_pkg.handlers._read_gate import (
@@ -31,7 +30,7 @@ from lib.tasks_pkg.handlers._write_freshness_gate import (
 )
 from lib.desktop.remote import remote_worktree_binding
 from lib.tools.meta import build_project_tool_meta
-from lib.tools.project import PROJECT_TOOL_NAMES
+from lib.tools.project import PROJECT_TOOL_NAMES, retired_edit_operation_error
 from lib.tools.result_projection import (
     TOOL_RESULT_PRODUCER_METADATA_KEY,
     TOOL_RESULT_PROJECTION_ITEMS_KEY,
@@ -260,14 +259,14 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
             stop.wait(0.25)  # 与 tool_progress 200ms 合并节奏同量级
 
     params = {k: v for k, v in fn_args.items()
-              if k not in ('content_ref', 'timeout_s', 'timeout')}
+              if k not in ('timeout_s', 'timeout')}
     explicit_timeout = fn_args.get('timeout_s', fn_args.get('timeout'))
     if explicit_timeout is not None:
         params['timeout'] = explicit_timeout
     params['root'] = remote['root']
     logger.info('[Remote] run_command streaming @%s:%s cmd=%s (task=%s)',
                 remote['agent_id'][:8], remote['root'], cmd_id[:8],
-                task.get('id', '?')[:8])
+                task_log_tag(task.get('id', '?')))
     watcher = threading.Thread(target=_watch, daemon=True)
     watcher.start()
     command_failed = True
@@ -359,13 +358,26 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
             f'worktree ({remote["root"]}) yet.',
             badge='remote unsupported')
 
-    params = {k: v for k, v in fn_args.items() if k != 'content_ref'}
+    params = dict(fn_args)
+    if fn_name == 'edit_file' and isinstance(params.get('edits'), list):
+        for edit in params['edits']:
+            retired = (retired_edit_operation_error(edit.get('operation'))
+                       if isinstance(edit, dict) else None)
+            if retired:
+                # The stamp below would run this insert as a replace that
+                # drops its anchor, so a caller bypassing input repair is
+                # refused here, as the local executor refuses it.
+                return _finish(f'Error: {retired}', badge='invalid edit')
+        # Deployed desktop agents predating replace-only edit_file refuse an
+        # item without ``operation``; current agents accept 'replace' too.
+        params['edits'] = [{**edit, 'operation': 'replace'} if isinstance(edit, dict) else edit
+                           for edit in params['edits']]
     params['root'] = remote['root']
     if fn_name in {'write_file', 'apply_diff', 'edit_file'}:
         params['file_receipts_version'] = 1
     bridge_timeout = None
     logger.info('[Remote] routing %s → %s @%s:%s (task=%s)', fn_name, cmd_type,
-                remote['agent_id'][:8], remote['root'], task.get('id', '?')[:8])
+                remote['agent_id'][:8], remote['root'], task_log_tag(task.get('id', '?')))
     result, error = send_desktop_command(
         cmd_type, params, timeout=bridge_timeout,
         target_agent_id=remote['agent_id'],
@@ -384,7 +396,7 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
             entries = decode_write_receipts(result, paths)
             note_remote_file_changes(task.get('id'), task.get('_userId'), remote, entries)
         except FileReceiptError:
-            logger.warning('[Remote] invalid committed-file receipts for task %s', task.get('id', '')[:8])
+            logger.warning('[Remote] invalid committed-file receipts for task %s', task_log_tag(task.get('id', '')))
     return _finish(format_desktop_result(cmd_type, result))
 
 
@@ -455,29 +467,6 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     with timing_phase('project_admission'):
         ensure_execution_roots(task)
         fn_args = route_project_tool_args(task, fn_name, fn_args)
-    # ── content_ref resolution for write_file ──
-    if fn_name == 'write_file' and 'content_ref' in fn_args and 'content' not in fn_args:
-        ref = fn_args.pop('content_ref')
-        resolved = _resolve_content_ref(task, ref)
-        if resolved is None:
-            ref_round = ref.get('tool_round', '?')
-            error_msg = (
-                f'Error: content_ref resolution failed — tool_round={ref_round} '
-                f'not found or has no content. Provide explicit content instead.'
-            )
-            logger.warning('[Tool:write_file] content_ref resolution failed: ref=%s task=%s',
-                           ref, task.get('id', '?')[:8])
-            meta = build_project_tool_meta(fn_name, fn_args, error_msg)
-            meta['badge'] = 'ref failed'
-            meta['refusal'] = {'kind': 'content_ref'}
-            _finalize_tool_round(task, rn, round_entry, [meta])
-            return tc_id, error_msg, False
-        fn_args['content'] = resolved
-        logger.info('[Tool:write_file] content_ref resolved: tool_round=%s → %d chars, '
-                    'path=%s task=%s',
-                    ref.get('tool_round'), len(resolved),
-                    fn_args.get('path', '?'), task.get('id', '?')[:8])
-
     from lib.tasks_pkg.conversation_delivery import deferred_completion_refusal
     deferred_refusal = deferred_completion_refusal(task, fn_name, fn_args)
     if deferred_refusal:
@@ -643,7 +632,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 meta['refusal'] = {'kind': 'read_first', 'paths': list(_unread_raw)}
                 _finalize_tool_round(task, rn, round_entry, [meta])
                 logger.info('[ReadGate] Refused all %d edit(s) of %s for unread file(s) %s (task=%s)',
-                            len(edits), fn_name, ', '.join(_unread_raw), task.get('id', '?')[:8])
+                            len(edits), fn_name, ', '.join(_unread_raw), task_log_tag(task.get('id', '?')))
                 return tc_id, _gate_err, False
             # Keep the original call/round arguments. Partition only the
             # execution copy after BOTH gates have checked the original set.
@@ -657,7 +646,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             )
             logger.info('[ReadGate] Partial %s: skipped %d/%d edit(s) for unread file(s) %s (task=%s)',
                         fn_name, len(_skip_set), len(edits), ', '.join(_unread_raw),
-                        task.get('id', '?')[:8])
+                        task_log_tag(task.get('id', '?')))
 
     # ── Write-freshness guard (shared-HEAD overwrite protection) ──
     # The read gate above proves "you read this file at SOME point in this
@@ -709,7 +698,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 meta['refusal'] = {'kind': 'stale', 'paths': list(_stale_raw)}
                 _finalize_tool_round(task, rn, round_entry, [meta])
                 logger.info('[FreshGate] Refused all %d edit(s) of %s for stale file(s) %s (task=%s)',
-                            len(edits), fn_name, ', '.join(_stale_raw), task.get('id', '?')[:8])
+                            len(edits), fn_name, ', '.join(_stale_raw), task_log_tag(task.get('id', '?')))
                 return tc_id, _fresh_err, False
             _batch_skips.update({i: 'stale; re-read first' for i in _stale_set})
             _fresh_skip_note = (
@@ -722,7 +711,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             )
             logger.info('[FreshGate] Partial %s: skipped %d/%d stale-target edit(s) %s (task=%s)',
                         fn_name, len(_stale_set), len(edits), ', '.join(_stale_raw),
-                        task.get('id', '?')[:8])
+                        task_log_tag(task.get('id', '?')))
 
     _admitted_indices = []
     if _batch_skips:

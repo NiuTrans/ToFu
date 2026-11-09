@@ -85,6 +85,7 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
     batch_text: dict[Any, str] = {}
     batch_think: dict[Any, str] = {}
     batch_sig: dict[Any, str] = {}
+    batch_model_text: dict[Any, str] = {}
     ordered_batch_keys = execution_batch_keys(segments)
     for position, s in enumerate(segments):
         if not isinstance(s, dict):
@@ -97,6 +98,9 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
             text = s.get('text')
             if isinstance(text, str):
                 batch_text.setdefault(batch_key, text)
+                model_text = s.get('modelText')
+                if isinstance(model_text, str):
+                    batch_model_text.setdefault(batch_key, model_text)
         elif st == SEG_THINKING:
             text = s.get('text')
             if isinstance(text, str):
@@ -131,6 +135,8 @@ def _rounds_view_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
         # Attach the batch prose/thinking to the FIRST tool_use of the batch.
         if batch_key not in seen_prose_batches:
             seen_prose_batches.add(batch_key)
+            if batch_model_text.get(batch_key):
+                r['assistantModelContent'] = batch_model_text[batch_key]
             if batch_text.get(batch_key):
                 r['assistantContent'] = batch_text[batch_key]
             if batch_think.get(batch_key):

@@ -126,6 +126,8 @@ def test_bound_coordinator_role_is_ordinary_root_guidance(setup, monkeypatch):
     # Session-free coordination: progress lives on the task board and every
     # question is an ask_human card, never a report or a timed decision.
     assert 'update_task_progress' in role and 'ask_human' in role
+    # One progress source: the board is the Coordinator's checklist too.
+    assert 'todo_write writes the same board' in role and 'keep no separate plan' in role
     assert 'blocking=false' in role and 'blocking=true' in role
     assert 'request_user_decision' not in role
     for changes in ({'_parentTaskId': 'parent'}, {'_userId': 2}, {'_transientRuntime': True}, {'convId': 'other'}):

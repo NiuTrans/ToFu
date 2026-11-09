@@ -22,7 +22,7 @@ from lib.agent_core.run_contract import (
     project_agent_event_evidence, project_agent_evidence, project_agent_result,
 )
 from tofu_agent.models import AgentResult
-from lib.storage.storage_projection import sanitize_usage_for_persist
+from lib.task_replay.persistence_projection import sanitize_usage_for_persist
 
 TERMINAL = frozenset({'done', 'error', 'aborted', 'interrupted'})
 _IDENTIFIER = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')

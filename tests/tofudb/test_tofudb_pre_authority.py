@@ -326,7 +326,7 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "appendAdmission": "checked-u64-offset-without-maintenance-byte-quota",
         "foregroundMaintenancePolicy": "notify-existing-rotation-driver;never-wait-for-history-encoding-or-publication",
         "recoveryPolicy": "buffered-frame-scan;validate-record-size-before-allocation;preserve-exact-durable-prefix-and-tail-truncation",
-        "maximumRecoveryPackedLocations": 65536,
+        "recoveryLookupPolicy": "all-distinct-selected-wal-references;one-verified-packed-and-history-index-pass;release-after-replay",
         "foregroundMaterializeTargetBytes": 8388608,
         "historyPreparationTargetBytes": 262144,
         "maximumHistoryPreparationBytes": 4194304,
@@ -456,6 +456,7 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "catalogInvalidation": "when-a-replacement-catalog-drops-a-previously-referenced-segment-evict-its-verified-index-ids-absent-from-every-added-segment;clear-on-any-uncertainty;pure-additions-keep-verified-payloads",
     }
     assert document["payloadSegmentReadCache"] == {
+        "maximumPersistedHints": 65536,
         "maximumResidentIndexAndFilterBytes": 67108864,
         "maximumResidentSegments": 4096,
         "maximumRecencyRecords": 8192,

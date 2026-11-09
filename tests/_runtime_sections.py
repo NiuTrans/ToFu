@@ -10,6 +10,7 @@ Vite receives.
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 from functools import lru_cache
 import hashlib
 import json
@@ -20,6 +21,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +146,19 @@ def _section_import_ports(name: str) -> tuple[
     # Raw fixtures also compose eager sections into lazy ones (debug_state
     # into debug_panel), so the eager prelude's bindings always apply.
     prelude = (SECTIONS / payload['prelude']).read_text(encoding='utf-8')
+    rows.extend(_prelude_import_ports(prelude, RUNTIME.parent))
+    return tuple(rows)
+
+
+@lru_cache(maxsize=None)
+def _prelude_import_ports(prelude: str, origin: Path) -> tuple:
+    """Resolve the common header once for the collection's source snapshot.
+
+    Section-specific lazy imports stay with their section. Exact header text
+    and its resolution origin identify the shared portion, so a changed header
+    or another source tree obtains its own result.
+    """
+    rows: list = []
     for match in _IMPORT_STATEMENT.finditer(prelude):
         if not match.group(2).startswith('.'):
             continue
@@ -150,7 +169,7 @@ def _section_import_ports(name: str) -> tuple[
                 continue
             exported, local = words[0], words[-1]
             pairs.append((local, exported))
-        module = _resolve_frontend_module(RUNTIME.parent, match.group(2)).resolve()
+        module = _resolve_frontend_module(origin, match.group(2)).resolve()
         rows.append((tuple(pairs), module))
     rows.extend(_PRELUDE_SERVICE.findall(prelude))
     return tuple(rows)
@@ -178,7 +197,8 @@ def _import_port_path(module: Path) -> str:
     if cached is not None:
         return str(cached)
     _require_frontend_bundler()
-    global_name = 'TofuImportPort_' + hashlib.sha256(key.encode()).hexdigest()[:12]
+    action = f'import-port:{_to_token(str(module))}'
+    global_name = 'TofuImportPort_' + hashlib.sha256(action.encode()).hexdigest()[:12]
     path = _DIRECTORY / '.import-ports' / f'{global_name}.js'
     path.parent.mkdir(parents=True, exist_ok=True)
     footer = (f'for(const[k,v]of Object.entries({global_name}))'
@@ -251,21 +271,26 @@ def _cleanup() -> None:
 # Every xdist worker collects the whole suite, so every worker of every
 # session repeated the same compiles before running a single test.
 # Decision: cache complete bundler outputs, validated by content. The bundler
-# reports every file Rollup read (--inputs-manifest); a hit requires each
+# reports inputs and every emitted JS/CSS/asset (--inputs-manifest); a hit requires each
 # recorded input to hash identically, every directory holding an input to
 # list identically (a new or renamed file can change module resolution without
 # touching a recorded input), plus an unchanged bundler script, dependency
-# lockfile, TypeScript configs and frontend/src file list. Output that names
+# lockfile, package/config metadata, Node identity, public build environment
+# and frontend/src file list. Portable actions use root-relative path tokens;
+# generated source bytes stay exact. Output that names
 # this session's view directory is never stored, and inputs modified near or
-# after the build started are never recorded.
+# after the build started are never recorded. Location-sensitive modules keep
+# checkout-local records. Same-checkout collectors join an in-flight compile;
+# other checkouts build independently and share only verified complete output.
 # Alternatives rejected: hashing the whole frontend tree invalidates every
 # bundle on any edit and still misses inputs outside it (tests/fixtures,
 # contracts); mtime-only validation is unsafe on whole-second FUSE mtimes.
 # TOFU_TEST_BUNDLE_CACHE=off disables it; a path value relocates it.
-_BUNDLE_CACHE_VERSION = 2
+_BUNDLE_CACHE_VERSION = 3
 _BUNDLE_CACHE_MAX_AGE_SECONDS = 7 * 24 * 3600
 _BUNDLE_CACHE_PRUNE_SCAN_LIMIT = 4096
 _DIRECTORY_TOKEN = '{TEST_VIEW_DIR}'
+_ROOT_TOKEN = '{TEST_SOURCE_ROOT}'
 _bundle_cache_pruned = False
 # Racy-git rule for whole-second FUSE mtimes: a digest is memoized by stat
 # signature, and a build's inputs are recorded, only when the path's mtime and
@@ -303,10 +328,13 @@ def _file_digest(path: Path) -> str | None:
 
 def _directory_digest(path: Path) -> str | None:
     try:
-        names = sorted(os.listdir(path))
+        # Replacing a symlink can change resolution while preserving names.
+        with os.scandir(path) as entries:
+            names = sorted((entry.name, os.readlink(entry.path) if entry.is_symlink() else '')
+                           for entry in entries)
     except OSError:
         return None
-    return hashlib.sha256('\0'.join(names).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(names).encode()).hexdigest()
 
 
 def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int]:
@@ -351,29 +379,119 @@ def _bundle_environment_digest() -> str | None:
     listing = _frontend_source_listing()
     if listing is None:
         return None
-    digest = hashlib.sha256(f'v{_BUNDLE_CACHE_VERSION}\0{ROOT}\0'.encode())
+    # Paths locate the inputs, but do not identify their contents. Generated
+    # entry bytes remain exact: absolute imports are never rewritten for reuse.
+    digest = hashlib.sha256(f'v{_BUNDLE_CACHE_VERSION}\0'.encode())
     digest.update(listing)
-    nested_tsconfigs = [
+    # Worktrees share one installation. Equal version labels do not prove
+    # that two independently installed (or locally patched) trees are equal.
+    digest.update(f'node_modules\0{os.path.realpath(ROOT / "node_modules")}\0'.encode())
+    env_files = [ROOT / name for name in
+                 ('.env', '.env.local', '.env.production', '.env.production.local')]
+    has_env_files = any(path.exists() for path in env_files)
+    environment = {key: value for key, value in os.environ.items()
+                   if has_env_files or key.startswith('VITE_') or key in
+                   ('NODE_ENV', 'NODE_OPTIONS', 'NODE_PATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD')}
+    if environment.get('NODE_OPTIONS'):
+        return None  # Arbitrary Node preload modules have no input manifest.
+    if has_env_files:
+        # dotenv expansion / loader hooks can depend on the checkout location
+        # and arbitrary environment. Do not claim cross-checkout equivalence.
+        digest.update(str(ROOT).encode())
+    digest.update(json.dumps(environment, sort_keys=True).encode())
+    for library in re.split(r'[:\s]+', environment.get('LD_PRELOAD', '')):
+        if not library:
+            continue
+        identity = _memoized_digest(library) if os.path.isabs(library) else None
+        if identity is None:
+            return None
+        digest.update(f'preload\0{library}\0{identity}\0'.encode())
+    node = shutil.which('node')
+    if node:
+        digest.update(f'node\0{os.path.realpath(node)}\0{_memoized_digest(node)}\0'.encode())
+    resolution_configs = [
         ROOT / name for name in listing.decode(errors='replace').split('\0')
-        if name.rsplit('/', 1)[-1].startswith('tsconfig')]
+        if name.rsplit('/', 1)[-1].startswith('tsconfig')
+        or name.rsplit('/', 1)[-1] == 'package.json']
     for path in (
             ROOT / 'scripts' / 'vite_test_bundle.mjs',
             Path(__file__),
             ROOT / 'node_modules' / '.package-lock.json',
+            ROOT / 'package.json',
             ROOT / 'package-lock.json',
+            *env_files,
             *sorted(ROOT.glob('tsconfig*.json')),
             *sorted(ROOT.glob('frontend/tsconfig*.json')),
-            *nested_tsconfigs):
-        digest.update(f'{path}\0{_memoized_digest(str(path))}\0'.encode())
+            *resolution_configs):
+        digest.update(f'{_to_token(str(path))}\0{_memoized_digest(str(path))}\0'.encode())
     return digest.hexdigest()
 
 
 def _to_token(value: str) -> str:
-    return value.replace(str(_DIRECTORY), _DIRECTORY_TOKEN)
+    for path, token in ((_DIRECTORY, _DIRECTORY_TOKEN), (ROOT, _ROOT_TOKEN)):
+        if value == str(path) or value.startswith(str(path) + os.sep):
+            return token + value[len(str(path)):]
+    return value
 
 
 def _from_token(value: str) -> str:
-    return value.replace(_DIRECTORY_TOKEN, str(_DIRECTORY))
+    for path, token in ((_DIRECTORY, _DIRECTORY_TOKEN), (ROOT, _ROOT_TOKEN)):
+        if value == token or value.startswith(token + os.sep):
+            return str(path) + value[len(token):]
+    return value
+
+
+def _bundle_argument(value: str) -> str:
+    name, separator, path = value.partition('=')
+    if separator and name in ('--outfile', '--outdir', '--sourcefile'):
+        return name + separator + _to_token(path)
+    # A footer is code, not a path. Its exact bytes participate in identity.
+    return _to_token(value) if not value.startswith('--') else value
+
+
+def _artifact_target(value: str, outputs: list[Path]) -> Path:
+    target = Path(_from_token(value))
+    if '..' in target.parts or not any(
+            target.resolve().is_relative_to(output.parent.resolve()) for output in outputs):
+        raise ValueError('artifact escaped the requested output directories')
+    return target
+
+
+def _checkout_bundle_record(record_dir: Path) -> Path:
+    return record_dir.with_name(record_dir.name + '-local-' + hashlib.sha256(str(ROOT).encode()).hexdigest())
+
+
+def _restore_available_bundle(record_dir: Path, outputs: list[Path]) -> bool:
+    return (_restore_bundle(record_dir, outputs)
+            or _restore_bundle(_checkout_bundle_record(record_dir), outputs))
+
+
+def _restore_bundle(record_dir: Path, outputs: list[Path]) -> bool:
+    try:
+        record = json.loads((record_dir / 'record.json').read_text(encoding='utf-8'))
+        expected = [_to_token(str(path)) for path in outputs]
+        if record.get('outputs') != expected or not _record_is_valid(record):
+            return False
+        if not record.get('portable') and record.get('source_root') != str(ROOT):
+            return False
+        artifacts = record['artifacts']
+        if not set(expected).issubset(item['path'] for item in artifacts):
+            return False
+        restored = []
+        for index, artifact in enumerate(artifacts):
+            target = _artifact_target(artifact['path'], outputs)
+            blob = (record_dir / f'output-{index}').read_bytes()
+            if hashlib.sha256(blob).hexdigest() != artifact['sha256']:
+                return False
+            restored.append((target, blob))
+        # Validate the complete receipt before restoring any of its files.
+        for target, blob in restored:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+        os.utime(record_dir)
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
 
 
 def _record_is_valid(record: dict) -> bool:
@@ -418,11 +536,70 @@ def _prune_bundle_cache(root: Path) -> None:
                     if (entry.is_dir(follow_symlinks=False)
                             and entry.stat(follow_symlinks=False).st_mtime
                             < cutoff):
-                        shutil.rmtree(entry.path, ignore_errors=True)
+                        if entry.name.startswith('.lease-') and fcntl is not None:
+                            with open(Path(entry.path) / 'lock', 'a+') as handle:
+                                try:
+                                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                except BlockingIOError:
+                                    continue
+                                # A caller may have refreshed it after the scan.
+                                if os.stat(entry.path).st_mtime < cutoff:
+                                    shutil.rmtree(entry.path, ignore_errors=True)
+                        else:
+                            shutil.rmtree(entry.path, ignore_errors=True)
                 except OSError:
                     continue
     except OSError:
         return
+
+
+@contextmanager
+def _bundle_build_lease(root: Path, key: str):
+    """Join one in-flight compile of the same action in this source checkout.
+
+    Other checkouts never wait: their source contents may differ. A follower
+    revalidates complete artifacts under a shared lock; without valid output it
+    releases the lease and builds independently. Failed/interrupted producers
+    therefore cannot serialize every follower's retry. Kernel descriptor
+    lifetime releases ownership on process death; no daemon or polling loop.
+    """
+    if fcntl is None:
+        yield True
+        return
+    identity = hashlib.sha256(f'{ROOT}\0{key}'.encode()).hexdigest()
+    directory = root / f'.lease-{identity}'
+    handle = None
+    try:
+        while True:
+            directory.mkdir(exist_ok=True)
+            path = directory / 'lock'
+            handle = open(path, 'a+')
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                producer = True
+            except BlockingIOError:
+                fcntl.flock(handle, fcntl.LOCK_SH)
+                producer = False
+            # Eviction may have unlinked an inode before this waiter acquired it.
+            if os.fstat(handle.fileno()).st_ino == path.stat().st_ino:
+                os.utime(directory)
+                break
+            handle.close()
+            handle = None
+    except OSError:
+        if handle is not None:
+            handle.close()
+            handle = None
+        producer = True  # Cache coordination is optional; compilation is not.
+    except BaseException:
+        if handle is not None:
+            handle.close()
+        raise
+    try:
+        yield producer
+    finally:
+        if handle is not None:
+            handle.close()
 
 
 def _run_test_bundler(
@@ -430,28 +607,29 @@ def _run_test_bundler(
         failure: str) -> None:
     """Run ``scripts/vite_test_bundle.mjs`` with ``args`` producing
     ``outputs``, reusing a content-validated cached result when available."""
-    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
     root = _bundle_cache_root()
     environment = _bundle_environment_digest() if root is not None else None
     record_dir = None
     if root is not None and environment is not None:
         key = hashlib.sha256(json.dumps(
-            [environment, str(_DIRECTORY.parent),
-             [_to_token(arg) for arg in args],
+            [environment,
+             [_bundle_argument(arg) for arg in args],
              [_to_token(str(path)) for path in outputs]]).encode()).hexdigest()
         record_dir = root / key
-        try:
-            record = json.loads(
-                (record_dir / 'record.json').read_text(encoding='utf-8'))
-            if (record.get('outputs') == len(outputs)
-                    and _record_is_valid(record)):
-                for index, output in enumerate(outputs):
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(record_dir / f'output-{index}', output)
-                os.utime(record_dir)
+        if _restore_available_bundle(record_dir, outputs):
+            return
+        with _bundle_build_lease(root, key) as producer:
+            if _restore_available_bundle(record_dir, outputs):
                 return
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
+            if producer:
+                _compile_test_bundle(args, outputs, timeout, failure, root, record_dir)
+                return
+    _compile_test_bundle(args, outputs, timeout, failure, root, record_dir)
+
+
+def _compile_test_bundle(args, outputs, timeout, failure, root, record_dir):
+    """Build once and publish only complete, settled, content-validated artifacts."""
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
     manifest = _DIRECTORY / '.inputs' / (
         hashlib.sha256(repr(args).encode()).hexdigest()[:16] + '.json')
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -465,11 +643,13 @@ def _run_test_bundler(
     if record_dir is None:
         return
     try:
+        receipt = json.loads(manifest.read_text(encoding='utf-8'))
+        if (not isinstance(receipt, dict) or receipt.get('format') != 'tofu.test-bundle/v1'
+                or receipt.get('complete') is not True):
+            return
         inputs = {}
         directories = {}
-        for path in json.loads(manifest.read_text(encoding='utf-8')):
-            if '/node_modules/' in path:
-                continue
+        for path in receipt['inputs']:
             digest = _settled_digest(path, started_ns, directory=False)
             if digest is None:
                 return
@@ -482,23 +662,33 @@ def _run_test_bundler(
                 directories[_to_token(parent)] = listing
         if not inputs:
             return
-        blobs = [output.read_bytes() for output in outputs]
+        emitted = sorted(set(receipt['outputs']))
+        if not {str(path) for path in outputs}.issubset(emitted):
+            return
+        targets = [_artifact_target(_to_token(path), outputs) for path in emitted]
+        blobs = [target.read_bytes() for target in targets]
         session_markers = (str(_DIRECTORY).encode(), _DIRECTORY.name.encode())
         if any(marker in blob for blob in blobs for marker in session_markers):
             return
+        portable = receipt.get('portable') is True and not any(str(ROOT).encode() in blob for blob in blobs)
+        if not portable:
+            record_dir = _checkout_bundle_record(record_dir)
         _prune_bundle_cache(root)
         staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=root))
         try:
             for index, blob in enumerate(blobs):
                 (staging / f'output-{index}').write_bytes(blob)
             (staging / 'record.json').write_text(json.dumps(
-                {'outputs': len(outputs), 'inputs': inputs,
+                {'outputs': [_to_token(str(path)) for path in outputs], 'inputs': inputs,
+                 'portable': portable, 'source_root': str(ROOT),
+                 'artifacts': [{'path': _to_token(str(path)), 'sha256': hashlib.sha256(blob).hexdigest()}
+                               for path, blob in zip(targets, blobs)],
                  'directories': directories}), encoding='utf-8')
             shutil.rmtree(record_dir, ignore_errors=True)
             os.replace(staging, record_dir)
         except OSError:
             shutil.rmtree(staging, ignore_errors=True)
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         return
 
 
@@ -1166,6 +1356,14 @@ def _require_frontend_bundler() -> None:
     pytest.skip(msg, allow_module_level=True)
 
 
+def _native_entry_import(source: Path) -> str:
+    """Author portable private entries; leave external paths and source bytes exact."""
+    try:
+        return '#tofu-test-root/' + source.relative_to(ROOT).as_posix()
+    except ValueError:
+        return source.as_posix()
+
+
 def native_module_path(name: str, source: str | Path) -> str:
     """Bundle one migrated TypeScript owner as an isolated classic test view.
 
@@ -1189,7 +1387,8 @@ def native_module_path(name: str, source: str | Path) -> str:
             'vite_test_bundle.mjs is required to materialize native test modules')
     path = _DIRECTORY / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    global_name = 'TofuNativeTest_' + hashlib.sha256(key.encode()).hexdigest()[:12]
+    action = f'native:{name}:{_to_token(str(source_path))}'
+    global_name = 'TofuNativeTest_' + hashlib.sha256(action.encode()).hexdigest()[:12]
     compile_source = source_path
     footer = f'Object.assign(globalThis,{global_name});'
     orchestration_dir = ROOT / 'frontend' / 'src' / 'features' / 'orchestration'
@@ -1199,8 +1398,8 @@ def native_module_path(name: str, source: str | Path) -> str:
         entry.parent.mkdir(parents=True, exist_ok=True)
         registry = orchestration_dir / 'registry.ts'
         entry.write_text(
-            f'import * as owner from {source_path.as_posix()!r};\n'
-            f'import {{ orchestrationRegistry }} from {registry.as_posix()!r};\n'
+            f'import * as owner from {_native_entry_import(source_path)!r};\n'
+            f'import {{ orchestrationRegistry }} from {_native_entry_import(registry)!r};\n'
             'export { owner, orchestrationRegistry };\n',
             encoding='utf-8',
         )
@@ -1215,8 +1414,8 @@ def native_module_path(name: str, source: str | Path) -> str:
         entry.parent.mkdir(parents=True, exist_ok=True)
         registry = ROOT / 'frontend' / 'src' / 'feature-registry.ts'
         entry.write_text(
-            f'import * as owner from {source_path.as_posix()!r};\n'
-            f'import {{ featureRegistry }} from {registry.as_posix()!r};\n'
+            f'import * as owner from {_native_entry_import(source_path)!r};\n'
+            f'import {{ featureRegistry }} from {_native_entry_import(registry)!r};\n'
             'export { owner, featureRegistry };\n',
             encoding='utf-8',
         )
@@ -1358,7 +1557,9 @@ def native_module_graph(
     ]
     key = 'native-graph:' + '|'.join(
         f'{name}:{Path(source)}' for name, source in resolved)
-    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    action = 'native-graph:' + '|'.join(
+        f'{name}:{_to_token(str(source))}' for name, source in resolved)
+    digest = hashlib.sha256(action.encode()).hexdigest()[:12]
     if output_dir is not None:
         target_root = Path(output_dir)
     else:
@@ -1379,12 +1580,12 @@ def native_module_graph(
     entry.parent.mkdir(parents=True, exist_ok=True)
     orchestration_dir = ROOT / 'frontend' / 'src' / 'features' / 'orchestration'
     imports = [
-        f'import * as owner{index} from {Path(source).as_posix()!r};'
+        f'import * as owner{index} from {_native_entry_import(Path(source))!r};'
         for index, (_, source) in enumerate(resolved)
     ]
     imports.append(
         'import { orchestrationRegistry } from '
-        f'{(orchestration_dir / "registry.ts").as_posix()!r};')
+        f'{_native_entry_import(orchestration_dir / "registry.ts")!r};')
     exports = ', '.join(
         [f'owner{index}' for index in range(len(resolved))]
         + ['orchestrationRegistry'])

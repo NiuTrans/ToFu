@@ -57,18 +57,26 @@ class _KeyAdmission:
     per selection so the package facade remains the patch seam.
     """
 
-    def __init__(self, *, enforced: bool = True, credentials=None):
+    def __init__(self, *, enforced: bool = True, credentials=None,
+                 billing_stops_only: bool = False):
         self._read = None
         self._batch = nullcontext()
         self._verdicts: dict[int, bool] = {}
         if not enforced:
             return
         try:
-            from lib.key_stats import is_key_enabled, key_admission_batch
+            if billing_stops_only:
+                from lib.key_stats import is_key_refused_for_optional_work
+                self._read = lambda provider, key, model: not (
+                    is_key_refused_for_optional_work(
+                        provider, key, model=model, honor_override=True))
+            else:
+                from lib.key_stats import is_key_enabled
+                self._read = is_key_enabled
+            from lib.key_stats import key_admission_batch
         except ImportError as e:
             logger.debug('[Dispatch] key_stats.is_key_enabled unavailable: %s', e)
             return
-        self._read = is_key_enabled
         self._batch = key_admission_batch(credentials=credentials)
 
     def __enter__(self):
@@ -1068,10 +1076,15 @@ class LLMDispatcher:
         pinned_provider = get_pinned_provider()
         from lib.key_stats import is_strict_billing_stop_admission
 
-        # Key health counts only under strict billing-stop admission. It uses
-        # the picker's credential-health identity and freshness batch.
-        with _KeyAdmission(enforced=is_strict_billing_stop_admission(),
-                           credentials=self._credential_index) as key_health:
+        # Key health counts for a recorded billing stop under EVERY admission
+        # policy: a key the provider has already refused for lack of credit is
+        # a durable disqualifier, not a transient cooldown, so treating it as
+        # healable capacity would poll this pool forever without sending a
+        # request. Credential-health (success-rate) disables still count only
+        # under strict billing-stop admission, where last-resort promotion is
+        # disabled too; outside it they keep their last-resort reprieve.
+        with _KeyAdmission(credentials=self._credential_index,
+                           billing_stops_only=not is_strict_billing_stop_admission()) as key_health:
             with self._lock:
                 return any(
                     capability in s.capabilities and s.is_available

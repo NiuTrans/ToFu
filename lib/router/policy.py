@@ -25,6 +25,19 @@ CHANNEL_TOOLS = frozenset({
     'channel_subscribe', 'channel_unsubscribe', 'channel_outbox', 'channel_outbox_approve',
 })
 ROUTER_TOOLS = COORDINATOR_TOOLS | ROUTER_ONLY_TOOLS | CHANNEL_TOOLS
+# The Router's direct core: every Router tool called at least four times in its
+# 2026-11-03..08 record, in call-count order until core plus the discovery pair
+# fill the Sankuai Claude tool-name budget. Other Router tools stay eager but may
+# be hidden behind search_tools/execute_tools on that route
+# (docs/LLM_COST_OPTIMIZATION.md section 6, "Coordinator-role surfaces").
+ROUTER_DIRECT_TOOLS = frozenset({
+    'get_conversation', 'update_task_progress', 'route_to_project', 'list_conversations',
+    'get_project_workers', 'await_project_workers', 'channel_send', 'channel_outbox',
+    'report_to_user', 'get_conversation_status', 'get_router_projects', 'channel_read',
+    'cancel_project_work', 'get_project_assignment', 'todo_write', 'ask_human',
+    'router_instruction_list', 'delegate_project_work', 'send_project_message',
+    'router_instruction_create', 'review_project_work', 'restart_server',
+})
 
 ROUTER_ROLE_ADDENDUM = (
     'You are the Global Router: the owner\u2019s front door for Tofu and external channels. These rules '
@@ -82,5 +95,5 @@ def router_scope(task: dict, project_path: str | None = None) -> dict | None:
     return scope if is_router_scope(scope) else None
 
 
-__all__ = ['CHANNEL_TOOLS', 'ROUTER_ONLY_TOOLS', 'ROUTER_ROLE_ADDENDUM', 'ROUTER_TOOLS',
-           'is_router_scope', 'router_scope', 'router_tool_ceiling']
+__all__ = ['CHANNEL_TOOLS', 'ROUTER_DIRECT_TOOLS', 'ROUTER_ONLY_TOOLS', 'ROUTER_ROLE_ADDENDUM',
+           'ROUTER_TOOLS', 'is_router_scope', 'router_scope', 'router_tool_ceiling']

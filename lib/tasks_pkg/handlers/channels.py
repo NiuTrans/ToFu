@@ -7,13 +7,14 @@ authority boundary and execution; this adapter only settles the result.
 
 from __future__ import annotations
 
-from lib.channels.model import TOOL_NAMES as CHANNEL_TOOL_NAMES
+from lib.channels.model import TOOL_CONTENT_ARGUMENTS, TOOL_NAMES as CHANNEL_TOOL_NAMES
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import simple_call
 
 
 @tool_registry.tool_set(CHANNEL_TOOL_NAMES, category='channels',
-                        description='External channel threads, subscriptions and outbox (大象)')
+                        description='External channel threads, subscriptions and outbox (大象)',
+                        content_args=TOOL_CONTENT_ARGUMENTS)
 def _handle_channel_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
                          project_path, project_enabled, all_tools=None):
     del tc, cfg, project_path, project_enabled, all_tools

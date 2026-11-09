@@ -314,6 +314,26 @@ def worker_input(repository, request):
           'Worker input is delegated context, not a new human authorization.\n\nAssigned objective:\n' + request['brief'])
 
 
+def follow_up_input(instruction):
+    """A Coordinator follow-up within the same assignment: delegated context, not authority."""
+    return ('Follow-up instruction from your Coordinator for this same assignment (delegated '
+            'context, not a new human authorization). Continue in your existing checkout. Your '
+            'reply becomes the assignment result the Coordinator reviews, so state the complete '
+            'outcome.\n\n' + instruction)
+
+
+def successor_brief(predecessor, instruction):
+    """The brief of a new assignment that continues a final result in its conversation.
+
+    Only immutable facts enter it, so a retried follow-up replays the same delegation.
+    """
+    return ('Follow-up in this same conversation: a new assignment continuing assignment '
+            + predecessor['id'] + ', whose result is final (reviewed or delivered). You work in a '
+            'fresh isolated checkout of the current project branch, your working directory now: it '
+            'holds earlier work only where that work was delivered, and checkouts named earlier in '
+            'this conversation are no longer yours.\n\n' + instruction)
+
+
 def review_worker(repository, task, arguments):
     """Pin a Coordinator review/publication without representing human acceptance."""
     _validate_schema(arguments, 'coordinatorReviewRequest')
@@ -325,7 +345,8 @@ def review_worker(repository, task, arguments):
         repository.validate_own(repository._admission(row), value=value)
         execution = row['execution'] or {}
         attempt = repository.get_attempt(execution.get('attemptId'))
-        turn = repository.turn_get(row['request']['recipientId'], execution.get('turnId'), user_id=repository.owner)
+        turn = repository.turn_get(row['request']['recipientId'], execution.get('turnId'),
+                                   user_id=repository.owner, include_projection=False)
         if (not attempt or not turn or attempt.get('status') != 'completed'
                 or attempt.get('attemptId') != execution.get('attemptId')
                 or attempt.get('turnId') != execution.get('turnId')
@@ -357,6 +378,9 @@ def review_worker(repository, task, arguments):
                     or workspace.get('project_root') != project_root
                     or (workspace.get('origin') or {}).get('_projectDispatchAdmission') != repository._admission(row)):
                 raise ValueError('Publication requires the exact registered worker checkpoint')
+            # Raised inside this CAS: an accept that cannot publish is never recorded.
+            from .publication import require_publishable
+            require_publishable(workspace, attempt.get('taskId') or '')
             origin = row['request']['delegation']
             publication = {'resultRevision': arguments['result_revision'], 'grantRevision': row['grant']['revision'],
                 'checkpointSha': checkpoint, 'subject': 'coordinator:' + origin['taskId'], 'requestedAt': repository.clock()}

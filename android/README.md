@@ -73,9 +73,8 @@ session/
   ApiMetaGate.kt      pure GET /api/v4/meta verdict — blocks only on a
                       definitive apiMajor / minAndroidBuild mismatch, fail-open
                       on partial knowledge (404 / unparseable / transport)
-  SessionController.kt orchestrates add/edit/delete/activate over DAO+vault+manager
-                       (rename moves the alias-keyed secret; delete removes it;
-                        host-change routes through updateUrlAndReauth)
+  SessionController.kt Room-first scoped saves + bounded vault reconciliation;
+                       fresh-row activation and shared URL-change invalidation
   ReauthWebViewClient gateway expiry ⇒ bounded replay or interactive handoff
   TrustedWebBridge   origin/frame-scoped SPA channels; no Java bridge on IdP pages
   TofuApplication    process diagnostic owner, restart evidence and crash handoff
@@ -126,8 +125,9 @@ path prefixes and cookie scopes must survive every native/browser handoff.
   refusal at that endpoint, proves the outer gate was passed. Public health/meta
   endpoints are insufficient. For a stopped Tofu, a configured supervisor can
   instead prove its versioned control-plane status contract. HTML, CSRF cookies and redirects cannot promote
-  a session. The repository's conditional write compares id, alias, URL and
-  saved auth, rejecting edited/deleted profiles without a Room schema change.
+  a session. The repository's conditional session stamp compares id, alias,
+  URL, saved auth and `REMOTE_URL` kind, rejecting edited/deleted/retyped rows
+  without touching LOCAL/SSH state or other columns.
   Discovery rechecks the current profile and credential before password POST;
   a rejected late stamp cannot be reported as a successful sign-in.
 - Native calls retain IPv6, explicit ports and the prefix before `/proxy/` or
@@ -159,11 +159,17 @@ kept the password interception active and could block sign-in. Permanently
 switching the saved profile to SSO would lose password continuation. Importing
 external-browser cookies is not a supported authentication contract.
 
-**Resource and lifecycle bounds.** Authentication responses are bounded to
-256 KiB, redirects to eight and simultaneous sign-in popups to one. Popups are
-created only on demand; idle screens hold none. HTTP callbacks buffer the
-bounded response and close the socket before handoff; cancelling a login
-cancels its call and prevents late cookie/profile writes. Verified sessions
+**Resource and lifecycle bounds.** Native authentication, update and form-health
+responses share the 256 KiB decoded-body correctness boundary in
+`BoundedResponse.kt`; redirects remain bounded to eight and simultaneous
+sign-in popups to one. Health has an eight-second total-call liveness deadline.
+Popups are created only on demand; idle screens hold none. HTTP callbacks buffer
+the bounded response and close the socket before handoff; cancelling login,
+update or form health cancels the live call, including a stalled body read.
+Oversized bodies fail verification, but legitimate empty HTTP responses retain
+gateway/waking status classification. Health detail/diagnostics never return a
+server-controlled body or exception message. Cancellation prevents late
+cookie/profile writes. Verified sessions
 reuse protected-probe/meta requests and skip password POSTs. Test observations pin one
 initial request for a foreign-SSO redirect, zero for `NONE` or missing-password
 handoff, two for a valid cached session, and no writes/flushes after cancellation.
@@ -175,84 +181,157 @@ Verification: `SessionManagerGatewayTest`, `LoginFormTest`,
 external-app return, session expiry and process-kill restoration still require
 on-device validation with the deployment's real gateway.
 
+## Native URLs, review forms and operation ownership
+
+**Problem.** Connection links and legacy addresses can contain sign-in data;
+replayed intents can overwrite a draft, and a cancelled login or full-row save
+can publish stale navigation, credentials or session metadata.
+
+**Decision.** `ServerUrl.storageError` is the one credential-free admission rule
+for saved profiles, QR/paste/deep-link prefills and native probes. It rejects
+userinfo, credential query/fragment fields and nested return URLs/JSON, including
+encoded keys, browser-style slash/backslash authorities and decoded controls.
+Each decoding pass is inspected before the next pass: encoded username slashes
+cannot disappear into a path. Invalid labels/errors never echo the input. The
+storage rule does not replace transient gateway/SSO navigation parsing.
+
+- URLs are bounded to 8,192 characters, connect payloads to 16,384, and nested
+  decoding to four passes; ambiguous deeper encoding fails closed.
+- REMOTE_URL admission also refuses both native credential hosts before a
+  cookie lookup or native call. LOCAL/SSH have endpoint-free stored rows and
+  controller-owned transient addresses. LOCAL's explicitly injected health
+  cookie remains valid for its installed-session proof; generic remote probes
+  cannot borrow it.
+- Links open a **review form**, never save or log in. Accepted initializers and
+  pending intents are separate observable state. A dirty or editing form offers
+  **Replace form** / **Keep form**; keeping it preserves its current fields.
+  Deliberate replacement changes the form identity; stale effects/callbacks
+  cannot accept/dismiss a newer intent or restore an old draft.
+- Noncredential draft fields survive Activity recreation in the retained
+  ViewModel's memory, including safe partial typing. The password is only a
+  local `remember` value: no password field exists in a draft, Bundle or
+  `SavedStateHandle`. Process death does not restore a password/draft.
+- A legacy unsafe address is refused on activation without rewriting Room or
+  changing saved `NONE`. Edit offers a sanitized proposal and a correction
+  message; only an explicit save replaces the row. Saved auth choices survive
+  URL editing; URL-shaped defaults apply only to new profiles.
+- `MainActivity` obtains its graph from `ViewModelProvider`, using application
+  context rather than retaining the old Activity. Back, new selection, deletion
+  and form edits cancel obsolete login intent. Coroutine and generation fences
+  guard late reads, cookie/stamp writes and navigation. The exact owned Job's
+  completion releases Room and owned authentication/update clients only after
+  all children, including save reconciliation, settle. Form health owns a
+  separate cancellable Job; disposal cancels it and releases its private HTTP
+  dispatcher/pool after that Job settles. Supplied clients stay caller-owned.
+- Room commits reviewed connection fields before vault changes. URL save
+  compares id, kind, alias, URL, auth and project path; SSH save also compares
+  the reviewed host/port/user/remote-port identity. Both preserve concurrent
+  recency and unrelated owner columns. Same-connection cookie stamps and SSH
+  trust pins survive; reviewed host/port changes clear only the corresponding
+  pin. Changed/deleted/retyped rows are rejected. Network login does not hold
+  the graph's save mutex.
+  Readback after a lost commit result is noncancellable but bounded to **five
+  seconds**. Vault compare-and-set preserves newer values; incomplete
+  reconciliation is reported and never rolls back a committed row.
+
+**Alternatives rejected.** Automatic link acceptance loses drafts; vault-first
+writes orphan credentials after a failed insert; whole-row save/rollback
+reinstates stale fields; swallowing cancellation permits late publication.
+
+Verification: `UrlCredentialsTest`, `ProfileFormTest`, `SessionControllerTest`,
+`UpdateProbeTest`, `HealthProbeTest`, `NativeHttpCancellationTest`, `SecretVaultTest` and the real
+AndroidX `ProfilesViewModelTest`. `tests/test_profile_save_query.py` executes the
+actual Room DAO SQL against in-memory SQLite, not generated Room bindings.
+The local ladder does not prove Compose/Paparazzi/APK packaging, real gateway
+policy, process-kill cookie persistence or on-device intent delivery.
+
 ## Distribution
-Release APKs ship via **GitHub Releases** — NOT self-hosted from Tofu, NOT a
-browser-extension bundle (an Android app has no host to embed in). The Tofu web
-UI surfaces a download card in **Settings → General → About & Update** from
-`GET /api/health` → `mobile_client_url`, which **defaults to a DIRECT APK deep
-link**:
+
+**Problem:** a floating latest link and a source-version badge can describe
+unrelated APKs; a public debug signing key lets anyone forge an update.
+**Decision:** keep `rangehow/tofu-android` separate from desktop releases and
+advertise only `android/published-release.json` through
+`lib/mobile_distribution/` and `/api/health`. Settings → General → About &
+Update uses that asset's version-pinned URL and matching badge. Health reads the
+local receipt once per process; it makes no release-service requests and never
+promotes a new receipt automatically.
+
+The receipt currently names **legacy 0.1.15 / build 16**:
 
 ```
-https://github.com/rangehow/tofu-android/releases/latest/download/tofu-android.apk
+https://github.com/rangehow/tofu-android/releases/download/v0.1.15/tofu-android.apk
 ```
 
-GitHub's `/releases/latest/download/<asset>` is a stable redirect that always
-serves the newest release's asset and triggers a real download on tap — exactly
-what a phone needs. `TOFU_MOBILE_CLIENT_URL` overrides it (e.g. to pin a
-specific version's asset).
+Its downloaded bytes and manifest were checked in the original verification;
+it uses the public Android Debug certificate. It is **not this hardened source
+build** and is **not a privately authenticated release**. Source versions may
+advance without changing this download. Publication requires separate signing,
+asset verification and receipt promotion; an asset URL alone is not byte or
+signature evidence.
 
-**Why the APK release stream stays on `rangehow/tofu-android` even though the
-source moved into `rangehow/ToFu`:** `/releases/latest/download/<asset>`
-resolves to the CHRONOLOGICALLY NEWEST release in the repo. Co-locating the
-APK on the ToFu release stream would let any newer desktop-only release
-(`v0.14.x`, which carries no `tofu-android.apk`) shadow the deep link into a
-permanent 404. A dedicated repo has no competing release stream, so the link
-can never be shadowed.
+`TOFU_MOBILE_CLIENT_URL` overrides the Android asset. An alternate URL gets no
+badge unless explicitly paired with `TOFU_MOBILE_CLIENT_VERSION`; a version-only
+override cannot relabel the default artifact. Empty, invalid or credential-
+bearing URLs disable downloads. iOS remains in development until a real signed
+distribution is supplied through `TOFU_IOS_CLIENT_URL`.
 
-**Graceful-degradation tradeoff (deliberate):** before the first tagged release
-this deep link **404s** — an honest "not published yet". We chose that over the
-releases *page* (`/releases/latest`), which never 404s but on a phone dumps the
-user into a list of wrong-platform desktop installers with no APK. Since the
-user's need is an **on-device install**, a clean 404-until-published beats a
-misleading wrong-platform page. The frontend still hides the link defensively if
-the URL is blanked, so emptying `TOFU_MOBILE_CLIENT_URL` never yields a dead
-button.
+Authenticated `/api/v4/mobile/android` and `/api/v4/mobile/android/apk` also
+serve the operator's configured local APK (`TOFU_ANDROID_APK_PATH`). No browser
+credential enters a download URL or QR; the phone signs in independently. Local
+delivery does not inspect the APK signature/manifest on each request: validate
+it before configuring that file. JSON links retain a configured ASGI root_path;
+behind a stripping gateway, the scan page derives the exact prefix from browser
+location and sends the same-host root explicitly as `base`.
 
-The URL's filename (`tofu-android.apk`) and the CI-published asset name are the
-**same string**, kept in lockstep by `tests/server/test_mobile_client_apk_url.py`
-(same repo: backend `MOBILE_CLIENT_APK_ASSET` ⇔ workflow publish list) so the
-deep link can't silently rot into a 404.
+**Alternatives rejected:** floating latest links can change the artifact;
+source badges are not publication evidence; retaining public-key update
+compatibility permits a forged update to read saved secrets.
 
 ## Building the APK & CI
-`.github/workflows/build-android-apk.yml` (repo root, in the ToFu monorepo):
-- **every push/PR touching `android/**`** → runs `./gradlew test` +
-  `assembleDebug` and uploads the debug APK as a build artifact (so the build
-  can't silently rot);
-- **on an `android-v*` tag** → `assembleRelease`, **renames the output to
-  `tofu-android.apk`** (Gradle emits `app-release[-unsigned].apk`, which would
-  NOT match the deep link), and publishes exactly that asset **to the
-  `rangehow/tofu-android` repo's Releases** (`fail_on_unmatched_files: true`,
-  so a missing/misnamed APK fails the release loudly instead of silently
-  shipping a 404 link). The tag prefix is `android-v*` — NOT bare `v*` — so
-  desktop releases (`v0.14.x`) never fire an APK build.
 
-### Release & signing
-A release APK must be **signed** to install on a normal device. Because this is
-**sideloaded GitHub-Release distribution** (not Play Store), the `release` build
-type is signed with the SAME fixed, committed **debug keystore**
-(`app/debug.keystore`) used for debug builds — see `signingConfig` in the
-`release` block of `app/build.gradle.kts`. This makes `assembleRelease` produce
-a signed, installable APK with no repo-secret setup, and — because the key never
-changes across builds — every future release installs in-place over the previous
-one. Signing with the debug *key* does NOT make the build debuggable
-(`debuggable` stays false on `release`). Before any **Play Store** submission,
-switch to a secret-backed `signingConfigs.release` (keystore base64 + passwords
-as repo secrets). The workflow's release step publishes whatever
-`assembleRelease` produces; an **unsigned** APK is inspection-only and rejected
-by Android's installer.
+`.github/workflows/build-android-apk.yml` runs `testDebugUnitTest` and
+`assembleDebug` for Android changes. Debug builds use the separate package
+**`com.tofu.client.debug`**, so the public debug key cannot replace a production
+install. Debug verification needs no private release credentials.
 
-> **First install may need one uninstall.** The in-place-update guarantee holds
-> only between APKs signed with this committed key. The robot-icon build some
-> users already have predates the fixed-keystore commit (`56115a3`) and any
-> tagged release, so it was likely a hand-distributed debug build signed with an
-> ephemeral key. Android rejects an update across a signature change
-> (`INSTALL_FAILED_UPDATE_INCOMPATIBLE` / "App not installed"). Expected, not
-> alarming: **uninstall the old app once, then install the new signed release;
-> all subsequent updates are in-place.**
+An explicitly pushed `android-v<versionName>` tag stages an owner-only private
+keystore, checks tag/build monotonicity, builds one release APK, verifies its
+signer and manifest, and publishes APK plus receipt to the Android repository.
+Missing configuration, a mismatched signer/tag/manifest, multiple APKs or missing
+assets fail publication. Key cleanup runs after failure too. Ordinary source
+pushes do not publish an APK.
 
-This signing setup + the on-device cookie-persistence test are the parts that
-require a real Android SDK / device — the signed APK is first actually built by
-the tag build in CI.
+### Private signing and migration
+
+Local `assembleRelease` requires all five environment values:
+
+- `TOFU_ANDROID_KEYSTORE_PATH`
+- `TOFU_ANDROID_KEYSTORE_PASSWORD`
+- `TOFU_ANDROID_KEY_ALIAS`
+- `TOFU_ANDROID_KEY_PASSWORD`
+- `TOFU_ANDROID_SIGNER_SHA256` — the release certificate's SHA-256 pin
+
+Gradle resolves the signing file relative to `android/app` and passes its
+**canonical absolute path** to the JDK-only `ValidateKeystore.java` guard
+(any Java 11+ source launcher runs it, so its specs need no Android JDK).
+That public path is the only argument; passwords remain in the environment.
+The guard verifies the real private-key entry, certificate validity and pin,
+including copied/renamed public debug keys. CI also requires
+`TOFU_ANDROID_KEYSTORE_BASE64` and `TOFU_ANDROID_RELEASE_PAT` as secrets.
+`validate_release.py` runs real `apksigner verify --print-certs` and
+`aapt dump badging`: exactly one pinned non-debug signer, the production package,
+expected version/build and a non-debuggable manifest are required. R8 and
+resource shrinking remain enabled.
+
+**Legacy migration is deliberate.** Android normally refuses an in-place update
+from the public debug certificate to a private certificate. Record server
+aliases/URLs and settings you need, then choose to uninstall the old production
+app and install the verified private release once. Uninstalling deletes local
+profiles, cookies, encrypted credentials and any other app-local data. Do not
+uninstall until needed local files/projects are safely backed up. Re-enter
+passwords, never export them in a QR/URL. No profile-export or signature-lineage migration is implemented.
+Later in-place updates require the same protected key and an increasing build
+number. Never uninstall the user's app automatically.
 
 ## Cleartext (http:// LAN servers)
 
@@ -703,15 +782,14 @@ the request body at 1 MiB.
   still require hardware validation).
 - **URL stability** (needs a re-provision): confirm whether stop→start reuses the UUID.
 - **On-device unverified**: QR scan, the deep-link cold/warm paths, the update
-  banner's download, and the new report sheet — all compile + unit-tested, but
-  need real hardware eyes.
-- **Next increment**: server-side QR of the Tofu address (`/api/v1/mobile/…`) so
-  the app's scanner has a first-class producer, and Play-Store signing.
+  banner's download, and the report sheet still need real hardware checks.
+  Local JVM/Robolectric/lifecycle gates are not APK or device proof.
+- **Next increment**: Play-Store signing.
 
 ## Installing & configuring
 
-Three ways to add a server, all funneled through the pure `DeepLink` parser so a
-payload is validated exactly once:
+Three ways to open a server review form, all using the pure `DeepLink` parser
+and the same storage URL authority:
 
 1. **Scan a QR code** — ZXing's embedded `CaptureActivity` (dependency
    `com.journeyapps:zxing-android-embedded`, permission `CAMERA`). Shared by the
@@ -720,14 +798,15 @@ payload is validated exactly once:
    URL or a `tofu://connect?url=…&name=…` link.
 3. **Deep link** — `<activity>` declares a `tofu://connect` VIEW intent-filter
    with `launchMode="singleTop"`; `MainActivity.onNewIntent`/`onCreate` pre-fill
-   the add form. A link the operator generates (or a future server QR page) adds
-   a server with one tap, warm or cold.
+   the add form, warm or cold. Review its fields and choose **Save & connect**;
+   receiving a link never adds a server or begins authentication by itself.
 
 **First-run guidance.** When the app has no servers and setup has never been
 completed (`data/OnboardingStore`, a plain SharedPreferences flag), the list is
 replaced by `ui/OnboardingScreen` offering the three paths above plus "set up
-later". Completing any of them — or the first successful add — retires onboarding
-permanently, even if the list is later emptied.
+later". Saving the first profile or choosing "set up later" retires onboarding
+permanently, even if the list is later emptied. Merely receiving/scanning/pasting
+a link opens review and does not mark setup complete.
 
 **Official QR producer (server side).** So the app's scanner has a real source
 instead of a hand-made code, Tofu serves one itself
@@ -743,8 +822,7 @@ instead of a hand-made code, Tofu serves one itself
   prefix should pass their exact address.
 
 Both sit behind the normal auth gate. The deep link decodes to the same
-`DeepLink.Connect` the scanner/paste paths use, so a scan adds the server in one
-tap.
+`DeepLink.Connect` the scanner/paste paths use and opens the same review form.
 
 **SSH kernels.** For a Tofu that runs on a machine you can SSH into (its
 port stays on that machine's loopback): *Add → SSH tunnel*, enter host, SSH
@@ -758,16 +836,27 @@ is deleted and added again. Design and limits:
 
 ## Update check
 
-On opening the list, `UpdateChecker` probes `GET {base}/api/health` of every
-configured server (a public path, no credential needed) and reads the two fields
-the backend already exposes — `mobile_client_version` / `mobile_client_url`
-(`routes/common.py`). If the newest advertised version is strictly newer than
-`BuildConfig.VERSION_NAME`, the list shows a one-line **update banner** with a
-link that opens the direct APK URL. Comparison is numeric and segment-wise
-(`UpdateCheck`, pure + tested) — `0.1.18 > 0.1.9`, unlike a string compare — and
-the whole check is one-shot per process and never blocks the UI. The installed
-version's bump (`0.1.18` / `versionCode 19`) is kept in lockstep with the
-backend's `MOBILE_CLIENT_VERSION` by `tests/server/test_mobile_client_apk_url.py`.
+`UpdateChecker` asks each configured server's `GET {base}/api/health`
+concurrently. Health may be public inside Tofu but still gated by a proxy:
+`UpdateProbe` selects cookies for the exact endpoint URL, disables automatic
+cookie jars and all redirects, and accepts only a bounded JSON advertisement.
+Decoded bodies are limited to 256 KiB, calls to eight seconds, and cancellation
+closes the live socket. HTML, redirects, oversize bodies and transport failures
+are unknown, not a successful “up to date” result. A valid newer advertisement
+can still be offered when another server fails; partial knowledge cannot prove
+that the whole server set is up to date.
+
+A strictly newer `mobile_client_version` than `BuildConfig.VERSION_NAME` shows
+an update banner opening `mobile_client_url`. Comparison is numeric and
+segment-wise (`0.1.18 > 0.1.9`). Checks are not one-shot: failures have a 30-second
+retry cooldown, successful checks a six-hour cooldown, and changed server URLs
+or restored connectivity after a failure can retry. Only a started, visible
+list runs the retry timer. Changed/deleted server sets fence old probe results.
+
+Advertisements describe the published artifact, not an unbuilt source bump:
+`published-release.json` currently records **0.1.15 / build 16**. The receipt-backed
+backend metadata is independent of the local source's `BuildConfig` version;
+source version 0.1.18/build 19 is not proof that such an APK was published.
 
 ## Performance, compatibility & localization
 
@@ -825,30 +914,46 @@ Standard Gradle/AGP 8.5.2 project (Gradle 8.9 wrapper committed), `minSdk 26`,
 `targetSdk 34`, JDK 17. Open in Android Studio or `./gradlew :app:assembleDebug`.
 
 ## Running the unit tests
-The canonical target is `./gradlew test` (needs the Android SDK). For a fast
-proof without the SDK, `./test-local.sh` runs two tiers on a plain JDK 17 +
-`kotlinc`:
+The canonical target is `./gradlew test` (needs the Android SDK); rendered
+screen changes also need `:app:verifyPaparazziDebug`. The offline `./test-local.sh`
+runs actual sources with JDK 17 + `kotlinc`, cached Robolectric, genuine
+AndroidX lifecycle and genuine SSH tiers. The full ladder requires every tier;
+focused selectors run only the requested tier, never substitute a stub:
 
-- **Pure-JVM tier** (319 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
+- **Pure-JVM tier** (`ServerUrl`, `LoginForm`, `CookieHeaders`,
   `ProfileForm`, `SessionManager` + `SessionController` via the `CookieSink` /
-  `SecretVault` seams (incl. the login-retry and meta-preflight suites and the
-  kernel kind dispatch), `KernelController`, `ApiMetaGate`, `InteractiveSso`,
-  `ServerLifecycle`, `SupervisorUrl`, `TofuProbe`, the local kernel's
-  supervisor, process and secret suites, This phone's adapter, credential
-  and lifecycle suites, and the device self-check's report, redaction, stress
-  and run suites) —
-  no Android runtime. `SupervisorRunner` and `UrlKernelController` stay
-  Gradle-tier (they need `SupervisorClient` → `android.webkit` + `org.json`,
-  absent from the pure classpath), as do `ProfilesViewModel`, the Room
-  migration tests and the `ssh/` carrier tests (MINA SSHD is not in `LIBS`).
-- **Robolectric tier** (20 tests: `CookieBridge` against a shadow `CookieManager`,
-  incl. the local credential's host scope;
-  `ReauthWebViewClient` latch + consecutive-failure cap + dead-link routing +
-  the 127.0.0.1 guard;
-  `RuntimeInstaller` against real archives) — runs headless on the JVM, no device/emulator.
-  `LocalKernelService`, `ThisPhoneAndroidTest` and the merged-manifest checks stay
-  Gradle-tier (they need `Dispatchers.Main`, merged assets and AGP's merged manifest).
+  `SecretVault` seams, kernel-kind dispatch, the local supervisor/process/secret
+  and lifecycle suites, and the device self-check's report/redaction/stress/run
+  suites). `HealthProbe`, `SupervisorRunner` and `UrlKernelController` compile
+  in the actual dependency closure; platform behavior stays in Robolectric or
+  the real SDK tier. No Android runtime is substituted.
+- **Robolectric tier** (`CookieBridge` against a shadow `CookieManager`,
+  including the local credential's host scope; bounded reauthentication and
+  dead-link recovery; URL-kernel control; `RuntimeInstaller` against real archives). These use the
+  actual Android test runtime, without a device/emulator. `LocalKernelService`,
+  `ThisPhoneAndroidTest` and merged-manifest checks remain Gradle-tier because
+  they need `Dispatchers.Main`, merged assets and AGP's merged manifest.
   Needs the Robolectric jars + an instrumented `android-all` in `LIBS`.
+- **Genuine lifecycle tier**: set `LIFECYCLE_LIBS` to the verified local directory
+  containing AndroidX ViewModel 2.8.6, annotation 1.8.0 and coroutines-android
+  1.8.1 jars. It compiles the actual graph/ViewModel and uses real
+  `ViewModelProvider`/`ViewModelStore` APIs, with no lifecycle/platform stubs.
+- **Genuine SSH tier**: `SSH_CLASSPATH` supplies the declared MINA
+  sshd-core/common 2.20.1, eddsa 0.3.0 and SLF4J jars. It compiles actual SSH
+  carrier/identity/controller sources and tests trust/ownership semantics;
+  it does not establish a live CodeLab login or cellular reachability.
+- `PYTHON=/path/to/python3` selects the full ladder's SDK-free actual-DAO
+  SQLite query specification. Its table is derived from the exported Room 3
+  schema rather than a separately maintained table definition; the schema is
+  included in the rechecked input manifest. This is SQL scope proof, not
+  generated Room/APK proof.
+
+Bare class arguments select the smallest pure-JVM suite; `--updates`, `--pure`,
+`--robolectric`, `--lifecycle` or `--ssh` select one genuine tier and accept
+that tier's class names. `TEST_OUTPUT=/path/to/output` retains compiler/JUnit
+logs, source/dependency manifests, lifecycle class origins and an explicit exit
+code. All recorded inputs are rechecked on success or failure; missing required
+jars fail that tier rather than silently skipping it or fetching replacements.
 
 The jars are fetched reproducibly by the committed `fetch-test-deps.sh` (pinned
 versions, `MIRROR`-overridable with Maven Central fallback; it also extracts the
@@ -860,7 +965,10 @@ export JAVA_HOME=/path/to/jdk17            # e.g. Temurin 17
 export KOTLINC=/path/to/kotlinc/bin/kotlinc  # kotlinc 1.9.24
 
 ./fetch-test-deps.sh /tmp/tofu-libs        # populate a LIBS dir from Maven
-LIBS=/tmp/tofu-libs ./test-local.sh        # → pure-JVM + Robolectric
+LIBS=/tmp/tofu-libs ./test-local.sh --pure
+LIBS=/tmp/tofu-libs ./test-local.sh --robolectric
+# Supply the official cached LIFECYCLE_LIBS and SSH_CLASSPATH, plus PYTHON,
+# before running ./test-local.sh with no arguments for the full ladder.
 ```
 
 (A JDK 17 + `kotlinc` on PATH are the only prerequisites the script does not
@@ -923,89 +1031,24 @@ mechanism is removed):**
 
 ## Release / cutting a version
 
-Publishing a new App build is a **deterministic, tag-triggered** flow — no
-manual APK upload, no per-build keystore setup. The device download link the
-Tofu backend serves (`DEFAULT_MOBILE_CLIENT_URL` →
-`…/releases/latest/download/tofu-android.apk`) always points at whatever the
-newest tagged release published, so cutting a version IS the delivery.
+1. Configure the private signing values and cross-repository PAT in CI. Protect
+   the key/pin for all future production updates; never commit or print them.
+2. Increase `versionCode` beyond both the previous Android tag and the published
+   receipt (build 16 remains a baseline even with no Android tags). Set the
+   matching `versionName` and `android-v<versionName>` tag.
+3. Only with explicit publication authorization, push the reviewed source/tag
+   and require debug tests/build plus release/signature/manifest checks to pass.
+   Source implementation does not authorize tag pushes or release publication.
+4. Download APK and receipt from that exact release. Compare size/SHA-256,
+   verify signature/certificate and manifest, and perform device install/update
+   checks. Merely finding an asset name is not signature evidence.
+5. Only then promote the receipt into `android/published-release.json` in a
+   reviewed commit. The receipt is also included by `tofu.spec`; normal operator
+   restart/redeployment is needed for health to advertise the new artifact.
+   Publication alone cannot change the pinned download.
 
-### Prerequisites
-- A machine/terminal with **GitHub write access** to `rangehow/ToFu` (the
-  source monorepo). The cross-repo publish to `rangehow/tofu-android` is done
-  by CI via a PAT secret — see the workflow. The release APK is signed with
-  the **committed** `app/debug.keystore` (see below), not a repo secret.
-
-### Steps
-1. **Bump the version** in `app/build.gradle.kts` `defaultConfig`:
-   - `versionCode` — integer, MUST strictly increase (Android refuses a
-     downgrade install); e.g. `12`.
-   - `versionName` — human string, e.g. `"0.1.11"`.
-   Commit the bump together with the change it ships.
-2. **Tag and push** (fast-forward; never force):
-   ```bash
-   git push origin master
-   git tag android-vX.Y.Z   # e.g. android-v0.1.11 — MUST match versionName
-   git push origin android-vX.Y.Z
-   ```
-   The `android-v*` tag is what triggers the release path in
-   `.github/workflows/build-android-apk.yml` (a plain push to `master` only
-   builds/tests the debug APK — it does NOT publish a release).
-3. **Watch CI** (Actions → the `vX.Y.Z` run). On the tag it runs, in order:
-   `keystore hash guard` → `versionCode guard` → `Assemble release APK` →
-   `Rename release APK to canonical asset name` → `Publish APK to GitHub
-   Release`. All must be green (the guards are described below).
-4. **Verify the asset name.** Open the `vX.Y.Z` Release page and confirm the
-   attached asset is **exactly** `tofu-android.apk`. This is load-bearing: the
-   backend deep link 404s on any other name. The coupling is guarded by the
-   backend test `tests/server/test_mobile_client_apk_url.py` (asset name ==
-   `MOBILE_CLIENT_APK_ASSET`), but eyeball it on the Release page too.
-5. **Install / verify on device.** The published APK is directly installable and
-   installs *over* any prior version (same signing key), so testers just tap the
-   download link and update in place — no uninstall.
-
-   **Failure mode — signature mismatch.** Android refuses an in-place update
-   when the new APK is signed with a DIFFERENT key than the installed one,
-   failing with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / "App not installed".
-   With the current setup this should never happen — every tag is signed with
-   the SAME committed `app/debug.keystore` (verify across two tags with
-   `git rev-parse android-v<old>:android/app/debug.keystore` == `git rev-parse
-   android-v<new>:android/app/debug.keystore`). It CAN happen if someone (a) migrated the
-   release to a secret-backed `signingConfigs.release`, or (b) the tester's
-   existing install came from a locally-built APK signed with a personal debug
-   key. **Fix:** uninstall the old app first, then install the new APK
-   (a one-time step; subsequent same-key updates install over each other
-   normally). Uninstalling clears the app's local data (saved profiles), which
-   on a fresh single-user setup is harmless.
-
-### CI release guards (build-android-apk.yml)
-Two guards in `.github/workflows/build-android-apk.yml` make the
-in-place-update and version-monotonicity invariants fail loudly instead of
-silently breaking:
-
-- **`versionCode` guard (tag builds only).** On an `android-v*` tag, CI fetches
-  the previous `android-v*` tag, parses `versionCode` from that tag's
-  `android/app/build.gradle.kts`, and fails unless the current `versionCode` is
-  **strictly greater** (Android refuses a downgrade install). The first tagged
-  release has no previous tag, so the guard skips gracefully.
-- **Keystore hash guard (all builds).** Release APKs are signed with the
-  committed `app/debug.keystore`; if that file ever changes, in-place updates
-  silently break (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). CI compares the
-  keystore's sha256 against the previous `android-v*` tag's committed keystore
-  and fails on any difference (skips when no previous tag exists). Changing the
-  keystore is therefore a loud, deliberate act requiring a coordinated one-time
-  uninstall — never a silent signature break.
-
-### Signing (why no secret is needed)
-`build.gradle.kts` binds BOTH the `debug` and `release` buildTypes to a fixed,
-committed debug keystore (`app/debug.keystore`, `storePassword`/`keyPassword` =
-`android`). Because the key never changes, every CI build — and every local
-`./gradlew assembleRelease` — produces an APK with the SAME signature, so
-release updates install over each other (and over debug installs) without
-`INSTALL_FAILED_UPDATE_INCOMPATIBLE`. A committed debug keystore is standard
-practice for a sideloaded, non-Play-Store test build and is **not** a secret.
-Signing with the debug *key* does not make the build debuggable — release keeps
-`isDebuggable=false`. Switch to a secret-backed `signingConfigs.release` only
-before any Play Store submission. Release APKs run R8 (code + resource
-shrinking). `app/proguard-rules.pro` keeps `@JavascriptInterface` methods on
-the WebView bridges (`window.TofuDiag` / `window.TofuNative`) and the Room
-profile store; do not turn shrinking on without those keep rules.
+`python3 validate_release.py --help` describes local validation inputs. A receipt
+from the SDK's real `apksigner` and `aapt` is evidence of the local APK, not proof
+that uploaded/downloaded bytes match. Root tests include real JDK private/public
+certificate and relative-path checks plus simulated native-tool failures. They
+are not a signed release, SDK/Compose build or device install test.

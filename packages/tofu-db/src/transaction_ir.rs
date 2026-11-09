@@ -374,6 +374,13 @@ pub enum TransactionIrStep {
         limit: usize,
         slot: usize,
     },
+    ConversationTurnUsage {
+        conversation_id: String,
+        timestamp_gte: i64,
+        timestamp_lt: i64,
+        title_fallback_characters: usize,
+        slot: usize,
+    },
     ConversationDiagnostic {
         request: crate::turn::diagnostic::Request,
         slot: usize,
@@ -833,6 +840,13 @@ pub enum TransactionIrStep {
         turn_id: String,
         projection_revision: u64,
         image_index: usize,
+        slot: usize,
+    },
+    TurnProjectionPage {
+        conversation_id: String,
+        turn_id: String,
+        projection_revision: Option<u64>,
+        page: u64,
         slot: usize,
     },
     TurnContextRead {
@@ -3431,6 +3445,32 @@ impl TransactionIr {
                             invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
+                TransactionIrStep::ConversationTurnUsage {
+                    conversation_id,
+                    timestamp_gte,
+                    timestamp_lt,
+                    title_fallback_characters,
+                    slot,
+                } => {
+                    let initialized = initialized_slots
+                        .get_or_insert(*slot as usize);
+                    if *initialized {
+                        return Err(invalid_input("Transaction IR initializes a slot twice"));
+                    }
+                    *initialized = true;
+                    if conversation_id.is_empty()
+                        || conversation_id.chars().count() > 256
+                        || timestamp_gte >= timestamp_lt
+                        || *title_fallback_characters > 256
+                    {
+                        return Err(invalid_input("invalid conversation turn-usage step"));
+                    }
+                    literal_bytes = literal_bytes
+                        .checked_add(conversation_id.len())
+                        .ok_or_else(|| {
+                            invalid_input("Transaction IR literal byte count overflow")
+                        })?;
+                }
                 TransactionIrStep::ModelRoutingGet { tenant_label, slot }
                 | TransactionIrStep::ModelRoutingMigrationReceiptGet { tenant_label, slot }
                 | TransactionIrStep::ModelRoutingSecretList { tenant_label, slot } => {
@@ -4042,11 +4082,15 @@ impl TransactionIr {
                     {
                         return Err(invalid_input("invalid Turn steer commit step"));
                     }
+                    let image_bytes = serde_json::to_vec(&request.images)
+                        .map_err(|_| invalid_input("Turn steer images are not JSON"))?
+                        .len();
                     literal_bytes = literal_bytes
                         .checked_add(request.conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(request.attempt_id.len()))
                         .and_then(|bytes| bytes.checked_add(request.command_id.len()))
                         .and_then(|bytes| bytes.checked_add(request.text.len()))
+                        .and_then(|bytes| bytes.checked_add(image_bytes))
                         .ok_or_else(|| {
                             invalid_input("Transaction IR literal byte count overflow")
                         })?;
@@ -4234,6 +4278,12 @@ impl TransactionIr {
                     slot,
                     ..
                 }
+                | TransactionIrStep::TurnProjectionPage {
+                    conversation_id,
+                    turn_id,
+                    slot,
+                    ..
+                }
                 | TransactionIrStep::TurnContextRead {
                     conversation_id,
                     turn_id,
@@ -4264,6 +4314,19 @@ impl TransactionIr {
                             || *image_index >= crate::generated_tofudb_ir::MAX_LEGACY_TURN_IMAGES
                         {
                             return Err(invalid_input("invalid legacy Turn image identity"));
+                        }
+                    }
+                    if let TransactionIrStep::TurnProjectionPage {
+                        projection_revision,
+                        page,
+                        ..
+                    } = step
+                    {
+                        if projection_revision
+                            .is_some_and(|revision| revision == 0 || revision > i64::MAX as u64)
+                            || *page > i64::MAX as u64
+                        {
+                            return Err(invalid_input("invalid Turn projection page identity"));
                         }
                     }
                     literal_bytes = literal_bytes
@@ -6129,7 +6192,9 @@ fn prepare_transaction_ir_mode(
     };
     for step in steps {
         if !matches!(step, TransactionIrStep::TurnEventRecord { .. }) {
+            // Any other step may change head state a reconstruction depends on.
             adjacent_turn_projection = None;
+            transaction.clear_resident_projection_publications();
         }
         let carried_after_previous_step = carried_after_turn_event.take();
         match step {
@@ -6753,6 +6818,25 @@ fn prepare_transaction_ir_mode(
                         limit: *limit,
                     },
                 )?));
+            }
+            TransactionIrStep::ConversationTurnUsage {
+                conversation_id,
+                timestamp_gte,
+                timestamp_lt,
+                title_fallback_characters,
+                slot,
+            } => {
+                slots[*slot as usize] = Some(crate::conversation_header::turn_usage(
+                    database,
+                    &mut transaction,
+                    &crate::conversation_header::TurnUsageRequest {
+                        conversation_id: conversation_id.clone(),
+                        timestamp_gte: *timestamp_gte,
+                        timestamp_lt: *timestamp_lt,
+                        title_fallback_characters: *title_fallback_characters,
+                    },
+                    &mut deadline_elapsed,
+                )?);
             }
             TransactionIrStep::ConversationDiagnostic { request, slot } => {
                 slots[*slot as usize] = Some(crate::turn::diagnostic::read(
@@ -7418,6 +7502,22 @@ fn prepare_transaction_ir_mode(
                     turn_id,
                     *projection_revision,
                     *image_index,
+                )?);
+            }
+            TransactionIrStep::TurnProjectionPage {
+                conversation_id,
+                turn_id,
+                projection_revision,
+                page,
+                slot,
+            } => {
+                slots[*slot as usize] = Some(crate::turn::projection_page::read(
+                    database,
+                    &mut transaction,
+                    conversation_id,
+                    turn_id,
+                    *projection_revision,
+                    *page,
                 )?);
             }
             TransactionIrStep::TurnContextRead { conversation_id, turn_id, replay, after_turn_id, slot } => {
@@ -8818,7 +8918,9 @@ fn prepare_transaction_ir_mode(
             }
         }
     }
-    drop(adjacent_turn_projection);
+    if let Some(last) = adjacent_turn_projection.take() {
+        last.publish_with(&mut transaction);
+    }
     drop(_steps_timer);
     let mut response = result_bytes(&ir.result, &mut slots)?;
     // This completion witness alone grants no cache eligibility. The semantic

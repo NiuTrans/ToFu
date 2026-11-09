@@ -8,15 +8,18 @@ now that my turn ended?":
       commands still running, owner-scoped.
 
 Both sources are process-local registries (lib/swarm/integration/_state.py,
-lib/tasks_pkg/background_commands.py); the payload is deliberately small and
-cheap to assemble so the client can poll it on a few-second cadence.
+lib/tasks_pkg/background_commands.py). A split API unions its own view with
+the execution host's, where conversations run, through the private execution
+control (lib/tasks_pkg/command_control_runtime.py); an unconfirmed remote view
+is 503, never an empty list. The payload is deliberately small and cheap to
+assemble so the client can poll it on a few-second cadence.
 """
 
 from __future__ import annotations
 
-from quart import Blueprint
+from quart import Blueprint, current_app
 
-from lib.api_response import api_internal_error, api_ok
+from lib.api_response import api_internal_error, api_ok, api_service_unavailable
 from lib.log import get_logger
 from lib.openapi import api_meta
 
@@ -43,27 +46,17 @@ api_v1_activity_bp = Blueprint('api_v1_activity', __name__)
     tags=['activity'],
 )
 def background_activity():
-    user_id = int(request_user_id())
+    from lib.tasks_pkg.command_control_runtime import background_activity as snapshot
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
     try:
-        from lib.swarm.integration import list_active_swarms
-        swarms = list_active_swarms(user_id=user_id)
+        activity = snapshot(current_app, user_id=int(request_user_id()))
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the activity snapshot.')
     except Exception as e:
-        logger.error('[activity.v1] swarm snapshot failed: %s', e,
-                     exc_info=True)
-        return api_internal_error(e, context='background_activity swarms',
+        logger.error('[activity.v1] activity snapshot failed: %s', e, exc_info=True)
+        return api_internal_error(e, context='background_activity',
                                   source='api_v1.activity.background')
-    try:
-        from lib.tasks_pkg.background_commands import list_background_commands
-        commands = [
-            item for item in list_background_commands(user_id=user_id)
-            if item.get('status') == 'running'
-        ]
-    except Exception as e:
-        logger.error('[activity.v1] background-command snapshot failed: %s',
-                     e, exc_info=True)
-        return api_internal_error(e, context='background_activity commands',
-                                  source='api_v1.activity.background')
-    return api_ok({'swarms': swarms, 'backgroundCommands': commands})
+    return api_ok(activity)
 
 
 __all__ = ['api_v1_activity_bp']

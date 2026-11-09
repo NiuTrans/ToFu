@@ -16,6 +16,7 @@ pytestmark=pytest.mark.unit
 def runtime(native):
  value=EmbeddedRuntime.__new__(EmbeddedRuntime);value._handle=_ffi.cast('void*',1)
  value._lifecycle=threading.Condition();value._active_calls=0;value._closing=False
+ value._watch_tokens=set()
  value._lib=SimpleNamespace(tofudb_embed_checkpoint_supported=lambda:1,
      tofudb_embed_checkpoint_execute=native,tofudb_embed_close=lambda _:None)
  return value

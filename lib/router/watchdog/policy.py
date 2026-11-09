@@ -16,6 +16,8 @@ WATCHDOG_ONLY_TOOLS = frozenset({
 })
 WATCHDOG_TOOLS = WATCHDOG_ONLY_TOOLS | frozenset({
     'list_conversations', 'get_conversation', 'search_tools', 'execute_tools',
+    # The recovery a partial result names (see coordinator_policy.COORDINATOR_TOOLS).
+    'read_tool_artifact', 'search_tool_artifact',
 })
 
 WATCHDOG_ROLE = (

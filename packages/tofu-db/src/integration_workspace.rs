@@ -747,18 +747,42 @@ fn delivery_needs_action(workspace: &Workspace, retained: bool) -> bool {
         _ => false,
     }
 }
-fn preserve_denied_delivery(old: &Value, patch: &mut Map<String, Value>) {
+fn delivery_generation(receipt: &Value) -> &str {
+    receipt.get("executorTaskId").and_then(Value::as_str).unwrap_or("")
+}
+/// A receipt records one executor generation (`executorTaskId`, the attempt
+/// whose outcome it is). Within a generation a terminal denial stays final. A
+/// write naming another generation is a stale writer, except a fresh `working`
+/// receipt, which opens the next generation (SQL: `_delivery_patch`).
+fn fence_delivery_patch(old: &Value, patch: &mut Map<String, Value>) {
+    let (Some(next), Some(stored)) = (patch.get("delivery"), old.get("delivery")) else {
+        return;
+    };
+    if !stored.is_object() {
+        return;
+    }
+    let generation = delivery_generation(next);
+    if generation != delivery_generation(stored) {
+        let outcome = next.get("taskOutcome");
+        let no_outcome = matches!(outcome, None | Some(Value::Null))
+            || outcome.and_then(Value::as_str) == Some("");
+        let opens_next = !generation.is_empty()
+            && next.get("state").and_then(Value::as_str) == Some("working")
+            && no_outcome;
+        if !opens_next {
+            patch.remove("delivery");
+        }
+        return;
+    }
     if !delivery_denied(old) {
         return;
     }
-    if let Some(next) = patch.get("delivery") {
-        if next.get("taskOutcome") != old["delivery"].get("taskOutcome") {
-            patch.remove("delivery");
-        } else {
-            let mut delivery = old["delivery"].as_object().cloned().unwrap_or_default();
-            delivery.extend(next.as_object().cloned().unwrap_or_default());
-            patch.insert("delivery".to_owned(), Value::Object(delivery));
-        }
+    if next.get("taskOutcome") != stored.get("taskOutcome") {
+        patch.remove("delivery");
+    } else {
+        let mut delivery = stored.as_object().cloned().unwrap_or_default();
+        delivery.extend(next.as_object().cloned().unwrap_or_default());
+        patch.insert("delivery".to_owned(), Value::Object(delivery));
     }
 }
 fn workspace_projection(workspace: &Workspace) -> Value {
@@ -1207,7 +1231,7 @@ fn set_meta(
         .as_object()
         .cloned()
         .unwrap_or_default();
-    preserve_denied_delivery(&Value::Object(origin.clone()), &mut patch);
+    fence_delivery_patch(&Value::Object(origin.clone()), &mut patch);
     origin.extend(patch);
     if delivery_denied(&Value::Object(origin.clone())) && is_active(&workspace.state) {
         workspace.state = "checkpointed".to_owned();

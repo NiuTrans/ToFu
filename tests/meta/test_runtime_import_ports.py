@@ -1,4 +1,6 @@
 """Raw section harnesses inject exactly the owners needed by their bindings."""
+import json
+
 import pytest
 
 from tests import _runtime_sections as runtime
@@ -46,3 +48,56 @@ def test_section_service_uses_its_factory_even_when_only_service_is_referenced(t
     assert result.startswith(owner.read_text())
     assert "globalThis['service'] = createService();" in result
     assert result.endswith('service.render();')
+
+
+def test_sections_share_prelude_resolution_and_revalidate_changed_text(tmp_path, monkeypatch):
+    sections = tmp_path / 'sections'
+    sections.mkdir()
+    owner = tmp_path / 'owner.ts'
+    other = tmp_path / 'other.ts'
+    lazy = tmp_path / 'lazy.ts'
+    for path in (owner, other, lazy):
+        path.write_text('export const value = 1;\n')
+    prelude = sections / 'prelude.ts'
+    prelude.write_text("import { value as alias, type Context, makeService } from './owner';\n"
+                       'const service = makeService();\n')
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'prelude': prelude.name, 'lazyBundles': [{
+        'sections': [{'source': 'lazy-fixture.js'}],
+        'moduleImports': [{'source': lazy.name, 'bindings': ['value']}],
+    }]}))
+    monkeypatch.setattr(runtime, 'ROOT', tmp_path)
+    monkeypatch.setattr(runtime, 'RUNTIME', tmp_path / 'runtime.js')
+    monkeypatch.setattr(runtime, 'SECTIONS', sections)
+    monkeypatch.setattr(runtime, 'MANIFEST', manifest)
+    original = runtime._resolve_frontend_module
+    resolutions = []
+
+    def observed(origin, specifier):
+        resolutions.append((origin, specifier))
+        return original(origin, specifier)
+
+    monkeypatch.setattr(runtime, '_resolve_frontend_module', observed)
+    runtime._section_import_ports.cache_clear()
+    try:
+        expected = (((('alias', 'value'), ('makeService', 'makeService')), owner),
+                    ('service', 'makeService'))
+        assert runtime._section_import_ports('eager-fixture.js') == expected
+        assert runtime._section_import_ports('lazy-fixture.js') == (
+            ((('value', 'value'),), lazy), *expected)
+        assert len(resolutions) == 1
+        prelude.write_text("import { value as changed } from './other';\n")
+        assert runtime._section_import_ports('changed-fixture.js') == (
+            ((('changed', 'value'),), other),)
+        assert len(resolutions) == 2
+        relocated = tmp_path / 'relocated'
+        relocated.mkdir()
+        relocated_owner = relocated / other.name
+        relocated_owner.write_bytes(other.read_bytes())
+        monkeypatch.setattr(runtime, 'RUNTIME', relocated / 'runtime.js')
+        assert runtime._section_import_ports('relocated-fixture.js') == (
+            ((('changed', 'value'),), relocated_owner),)
+        assert len(resolutions) == 3
+    finally:
+        runtime._section_import_ports.cache_clear()
+        runtime._prelude_import_ports.cache_clear()

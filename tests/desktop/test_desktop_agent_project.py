@@ -219,56 +219,35 @@ class TestWriteSafetyNet:
             'replace': 'zz', 'replace_all': True})
         assert out2.get('replacements') == 2
 
-    def test_edit_file_mixed_batch(self, proj):
+    def test_edit_file_batch_accepts_the_server_compat_operation(self, proj):
+        # The server stamps operation='replace' for agents predating
+        # replace-only edit_file; current agents accept it as a replace.
         pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
         out = pj.cmd_project_edit_file({
             'root': 'app',
             'edits': [
-                {'path': 'README.md', 'operation': 'insert_after',
-                 'anchor': '# app', 'content': 'inserted'},
                 {'path': 'README.md', 'operation': 'replace',
-                 'anchor': 'hello world', 'content': 'hello remote'},
+                 'anchor': '# app', 'content': '# app\ninserted'},
+                {'path': 'README.md', 'anchor': 'hello world', 'content': 'hello remote'},
             ],
         })
         assert out.startswith('Applied 2/2 edits')
         assert (proj['root'] / 'README.md').read_text() == (
             '# app\ninserted\nhello remote\n')
 
-    @pytest.mark.parametrize(('operation', 'replace_all', 'expected'), [
-        ('insert_after', False, '# app\ninserted\nhello world\n'),
-        ('insert_after', True, '# app\ninserted\nhello world\n'),
-        ('insert_before', False, 'inserted\n# app\nhello world\n'),
-        ('insert_before', True, 'inserted\n# app\nhello world\n'),
-    ])
-    def test_edit_file_insert_ignores_replace_all_for_unique_anchor(
-            self, proj, operation, replace_all, expected):
-        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
-        out = pj.cmd_project_edit_file({
-            'root': 'app',
-            'edits': [{
-                'path': 'README.md', 'operation': operation,
-                'anchor': '# app', 'content': 'inserted',
-                'replace_all': replace_all,
-            }],
-        })
-        assert out.startswith('Applied 1/1 edits')
-        assert (proj['root'] / 'README.md').read_text() == expected
-
-    def test_edit_file_replace_all_does_not_enable_ambiguous_insert(self, proj):
+    @pytest.mark.parametrize('operation', ['insert_after', 'insert_before'])
+    def test_edit_file_refuses_a_retired_insert_operation(self, proj, operation):
         target = proj['root'] / 'README.md'
-        target.write_text('# app\n# app\n', encoding='utf-8')
         pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
+        before = target.read_bytes()
         out = pj.cmd_project_edit_file({
             'root': 'app',
-            'edits': [{
-                'path': 'README.md', 'operation': 'insert_after',
-                'anchor': '# app', 'content': 'inserted',
-                'replace_all': True,
-            }],
+            'edits': [{'path': 'README.md', 'operation': operation,
+                       'anchor': '# app', 'content': 'inserted'}],
         })
-        assert out.startswith('Applied 0/1 edits (1 failed)')
-        assert 'matches 2 locations' in out
-        assert target.read_text(encoding='utf-8') == '# app\n# app\n'
+        assert out.startswith('Applied 0/1 edits (1 failed)'), out
+        assert 'only replaces' in out
+        assert target.read_bytes() == before
 
     @pytest.mark.parametrize(('before', 'anchor', 'replacement', 'expected'), [
         ('A\nC\n', 'A', 'A\nB', 'A\nB\nC\n'),
@@ -289,8 +268,7 @@ class TestWriteSafetyNet:
         target.write_bytes(before.encode('utf-8'))
         pj.cmd_project_read_files({'root': 'app', 'path': 'sample.txt'})
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [{
-            'path': 'sample.txt', 'operation': 'replace',
-            'anchor': anchor, 'content': replacement,
+            'path': 'sample.txt', 'anchor': anchor, 'content': replacement,
         }]})
         assert out.startswith('Applied 1/1 edits'), out
         assert '[replace]' in out and 'Re-issue' not in out
@@ -301,10 +279,8 @@ class TestWriteSafetyNet:
         target.write_text('A\nA\nC\n', encoding='utf-8')
         pj.cmd_project_read_files({'root': 'app', 'path': 'sample.txt'})
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [
-            {'path': 'sample.txt', 'operation': 'replace',
-             'anchor': 'A', 'content': 'A\nB', 'replace_all': True},
-            {'path': 'sample.txt', 'operation': 'insert_before',
-             'anchor': 'C', 'content': 'D'},
+            {'path': 'sample.txt', 'anchor': 'A', 'content': 'A\nB', 'replace_all': True},
+            {'path': 'sample.txt', 'anchor': 'C', 'content': 'D\nC'},
         ]})
         assert out.startswith('Applied 2/2 edits'), out
         assert target.read_bytes() == b'A\nB\nA\nB\nD\nC\n'
@@ -319,8 +295,7 @@ class TestWriteSafetyNet:
         target.write_text(initial, encoding='utf-8')
         pj.cmd_project_read_files({'root': 'app', 'path': 'sample.txt'})
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [{
-            'path': 'sample.txt', 'operation': 'replace',
-            'anchor': anchor, 'content': anchor + '\nB',
+            'path': 'sample.txt', 'anchor': anchor, 'content': anchor + '\nB',
         }]})
         assert out.startswith('Applied 0/1 edits (1 failed)'), out
         assert error in out
@@ -334,26 +309,11 @@ class TestWriteSafetyNet:
             target.write_text('# app\nexternal change\n', encoding='utf-8')
         before = target.read_bytes()
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [{
-            'path': 'README.md', 'operation': 'replace',
-            'anchor': '# app', 'content': '# app\nB',
+            'path': 'README.md', 'anchor': '# app', 'content': '# app\nB',
         }]})
         assert out.startswith('Applied 0/1 edits (1 failed)'), out
         assert ('changed on disk' if stale else 'read-before-write') in out
         assert target.read_bytes() == before
-
-    @pytest.mark.parametrize(('operation', 'anchor'), [
-        ('insert_after', 'A'), ('insert_before', 'C'),
-    ])
-    def test_edit_file_line_insert_retains_newline_behavior(self, proj, operation, anchor):
-        target = proj['root'] / 'sample.txt'
-        target.write_bytes(b'A\r\nC\r\n')
-        pj.cmd_project_read_files({'root': 'app', 'path': 'sample.txt'})
-        out = pj.cmd_project_edit_file({'root': 'app', 'edits': [{
-            'path': 'sample.txt', 'operation': operation,
-            'anchor': anchor, 'content': 'B',
-        }]})
-        assert out.startswith('Applied 1/1 edits'), out
-        assert target.read_bytes() == b'A\nB\nC\n'
 
     @pytest.mark.parametrize(('initial', 'first', 'last', 'warning_count'), [
         ('x = 1\n', 'def f(:', 'def f():\n    pass', 0),
@@ -375,10 +335,8 @@ class TestWriteSafetyNet:
 
         monkeypatch.setattr(_ops, '_py_syntax_guard', record_guard)
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [
-            {'path': 'src/sample.py', 'operation': 'replace',
-             'anchor': initial.rstrip('\n'), 'content': first},
-            {'path': 'src/sample.py', 'operation': 'replace',
-             'anchor': first, 'content': last},
+            {'path': 'src/sample.py', 'anchor': initial.rstrip('\n'), 'content': first},
+            {'path': 'src/sample.py', 'anchor': first, 'content': last},
         ]})
         assert out.startswith('Applied 2/2 edits'), out
         assert out.count('SYNTAX GUARD') == warning_count
@@ -402,10 +360,8 @@ class TestWriteSafetyNet:
 
         monkeypatch.setattr(pj, '_atomic_write', fail_write)
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [
-            {'path': 'src/sample.py', 'operation': 'replace',
-             'anchor': 'x = 1', 'content': 'x = 1\ndef f(:'},
-            {'path': 'src/sample.py', 'operation': 'replace',
-             'anchor': 'def f(:', 'content': 'def f():\n    pass'},
+            {'path': 'src/sample.py', 'anchor': 'x = 1', 'content': 'x = 1\ndef f(:'},
+            {'path': 'src/sample.py', 'anchor': 'def f(:', 'content': 'def f():\n    pass'},
         ]})
         if fail_at == 1:
             assert out.startswith('Applied 0/2 edits (2 failed)'), out
@@ -417,17 +373,14 @@ class TestWriteSafetyNet:
             assert out.count('SYNTAX GUARD') == 1
         pj._check_write_allowed(str(target))  # token is only re-armed on a commit
 
-    def test_edit_file_syntax_feedback_ignores_fixed_insert_and_keeps_files_separate(self, proj):
+    def test_edit_file_syntax_feedback_ignores_fixed_addition_and_keeps_files_separate(self, proj):
         for name in ('first.py', 'second.py'):
             (proj['root'] / 'src' / name).write_text('x = 1\n', encoding='utf-8')
             pj.cmd_project_read_files({'root': 'app', 'path': 'src/' + name})
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [
-            {'path': 'src/first.py', 'operation': 'insert_after',
-             'anchor': 'x = 1', 'content': 'def f():'},
-            {'path': 'src/second.py', 'operation': 'replace',
-             'anchor': 'x = 1', 'content': 'x = 1\ndef broken(:'},
-            {'path': 'src/first.py', 'operation': 'replace',
-             'anchor': 'def f():', 'content': 'def f():\n    pass'},
+            {'path': 'src/first.py', 'anchor': 'x = 1', 'content': 'x = 1\ndef f():'},
+            {'path': 'src/second.py', 'anchor': 'x = 1', 'content': 'x = 1\ndef broken(:'},
+            {'path': 'src/first.py', 'anchor': 'def f():', 'content': 'def f():\n    pass'},
         ]})
         assert out.startswith('Applied 3/3 edits'), out
         assert out.count('SYNTAX GUARD') == 1
@@ -442,7 +395,7 @@ class TestWriteSafetyNet:
     def test_edit_file_syntax_state_obeys_both_size_bounds(
             self, proj, monkeypatch, before, replacement):
         from lib.project_mod.write_tools import _ops
-        monkeypatch.setattr(_ops, '_ECHO_REPAIR_MAX_CHARS', 16)
+        monkeypatch.setattr(_ops, '_SYNTAX_GUARD_MAX_CHARS', 16)
 
         def unexpected_guard(*args):
             pytest.fail('over-budget syntax state must not retain/compare both texts')
@@ -452,68 +405,11 @@ class TestWriteSafetyNet:
         target.write_text(before, encoding='utf-8')
         pj.cmd_project_read_files({'root': 'app', 'path': 'src/sample.py'})
         out = pj.cmd_project_edit_file({'root': 'app', 'edits': [{
-            'path': 'src/sample.py', 'operation': 'replace',
-            'anchor': before, 'content': replacement,
+            'path': 'src/sample.py', 'anchor': before, 'content': replacement,
         }]})
         assert out.startswith('Applied 1/1 edits'), out
         assert 'SYNTAX GUARD' not in out
         assert target.read_text(encoding='utf-8') == replacement
-
-    def test_edit_file_neighbour_echo_auto_repaired(self, proj):
-        """Desktop parity for the mswlvsfgzwiywr incident: an insert_after
-        whose content quotes the following def line is repaired locally."""
-        (proj['root'] / 'src' / 'sample.py').write_text(
-            'def test_previous():\n'
-            '    assert True\n'
-            '\n\n'
-            'def test_existing():\n'
-            "    assert 'x' in 'x'\n", encoding='utf-8')
-        pj.cmd_project_read_files({'root': 'app', 'path': 'src/sample.py'})
-        out = pj.cmd_project_edit_file({
-            'root': 'app',
-            'edits': [
-                {'path': 'src/sample.py', 'operation': 'insert_after',
-                 'anchor': '    assert True',
-                 'content': 'def test_existing():\n'
-                            'def test_new():\n'
-                            "    assert 'y' in 'y'\n"},
-            ],
-        })
-        assert out.startswith('Applied 1/1 edits')
-        assert 'auto-repaired' in out
-        text = (proj['root'] / 'src' / 'sample.py').read_text(encoding='utf-8')
-        assert text.count('def test_existing():') == 1
-        assert 'def test_new():' in text
-        import ast
-        ast.parse(text)
-
-    def test_edit_file_anchor_echo_stripped(self, proj):
-        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
-        out = pj.cmd_project_edit_file({
-            'root': 'app',
-            'edits': [
-                {'path': 'README.md', 'operation': 'insert_after',
-                 'anchor': '# app', 'content': '# app\ninserted'},
-            ],
-        })
-        assert out.startswith('Applied 1/1 edits')
-        assert 'auto-repaired' in out
-        assert (proj['root'] / 'README.md').read_text(encoding='utf-8') == (
-            '# app\ninserted\nhello world\n')
-
-    def test_edit_file_whole_echo_fails(self, proj):
-        pj.cmd_project_read_files({'root': 'app', 'path': 'README.md'})
-        out = pj.cmd_project_edit_file({
-            'root': 'app',
-            'edits': [
-                {'path': 'README.md', 'operation': 'insert_after',
-                 'anchor': '# app', 'content': 'hello world'},
-            ],
-        })
-        assert out.startswith('Applied 0/1 edits (1 failed)')
-        assert 'verbatim copy' in out
-        assert (proj['root'] / 'README.md').read_text(encoding='utf-8') == (
-            '# app\nhello world\n')
 
 
 # ═══════════════════════════════════════════════════════════

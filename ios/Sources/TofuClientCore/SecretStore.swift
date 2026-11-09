@@ -13,4 +13,12 @@ public protocol SecretLookup: Sendable {
 public protocol SecretStore: SecretLookup {
     func putSecret(_ secret: String, for alias: String)
     func removeSecret(_ alias: String)
+    /// Post-commit alias/password reconciliation. Compare BOTH keys with the
+    /// edit's snapshots under the same lock used by ordinary vault writes.
+    /// Never overwrite changed keys; verify the destination before removing
+    /// the source. False means a concurrent change or a vault write failure.
+    @discardableResult func applyProfileEdit(
+        from oldAlias: String, to newAlias: String,
+        expectedOldSecret: String?, expectedNewSecret: String?, secret: String?
+    ) -> Bool
 }

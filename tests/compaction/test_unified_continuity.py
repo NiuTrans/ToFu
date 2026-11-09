@@ -264,3 +264,105 @@ def test_unfit_or_corrupt_state_refuses_before_paid_summary(monkeypatch, corrupt
     assert messages == original
     assert meta['summaryFailureReason'] == (
         'continuity_invalid' if corrupt else 'irreducible_prompt_floor')
+
+
+def _observation_key(row):
+    return row.get('observationKey') or row['id']
+
+
+def _accumulated_handoff(count):
+    """A verified packet holding ``count`` distinct settled test outcomes."""
+    from lib.tasks_pkg.compaction._continuity import attach_continuity
+    from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+    messages = []
+    for index in range(count):
+        messages += execution(f'test-{index}', f'pytest tests/test_{index}.py',
+                              f'1 passed; invocation {index} ' + 'evidence ' * 40)
+    text, digest = attach_continuity('Old narrative.', messages)
+    return make_compaction_handoff(text, phase='mid_turn', continuity_digest=digest)
+
+
+def test_continuity_over_the_floor_folds_its_oldest_observations_into_the_narrative(monkeypatch):
+    """Regression for muu1klptjtwd3t (2026-11-07): the packet alone outgrew the target.
+
+    1,302 settled observations rendered to 328k tokens against a 327.6k dispatch
+    target, so even the smallest execution tail refused as irreducible_prompt_floor
+    and every later Turn failed before any provider request. The oldest
+    observations now fold into the narrative; the newest that fit the plan's
+    preservation allowance stay verbatim and the packet counts the fold.
+    """
+    from lib.tasks_pkg.compaction._layer2 import _compact as l2
+    from lib.tasks_pkg.compaction._continuity import read_continuity
+    from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
+    handoff = _accumulated_handoff(60)
+    full = read_continuity([handoff])['observations']
+    messages = [{'role': 'user', 'content': 'Continue the release work.'}, handoff,
+                {'role': 'assistant', 'content': 'old data ' * 3000},
+                {'role': 'user', 'content': 'continue'}]
+    calls = []
+
+    def summarize(summary_input, query, *args, **kwargs):
+        calls.append(kwargs)
+        return 'Narrative carrying the folded outcomes.'
+
+    monkeypatch.setattr(l2, '_generate_query_aware_summary', summarize)
+    monkeypatch.setattr(l2, '_extract_recently_accessed_files', lambda *a: [])
+    meta = {}
+    l2.execute_compact_tool(messages, preserve_budget_tokens=_estimate_msg_tokens(handoff) // 4,
+                           _compaction_skip_archive=True, _result_meta=meta,
+                           _dispatch_prompt_measure=lambda rows: len(str(rows)),
+                           _dispatch_prompt_target=len(str(handoff)) // 2)
+    assert meta['compacted'] is True, meta
+    state = read_continuity(messages)
+    kept = state['observations']
+    assert 0 < len(kept) < len(full)
+    assert kept == full[-len(kept):]
+    assert state['foldedIntoNarrative'] == len(full) - len(kept)
+    folded, = [call['continuity_fold'] for call in calls]
+    assert folded == {_observation_key(row) for row in full[:-len(kept)]}
+
+
+def test_summary_input_hands_folded_observations_to_the_narrative():
+    from lib.tasks_pkg.compaction._continuity import CLOSE, OPEN, read_continuity
+    from lib.tasks_pkg.compaction._layer2._summary import _summary_input_ports
+    from lib.tasks_pkg.compaction._layer2._summary_input import compose_summary_input
+    handoff = _accumulated_handoff(6)
+    rows = read_continuity([handoff])['observations']
+    fold = frozenset(_observation_key(row) for row in rows[:4])
+    composed = compose_summary_input(
+        [handoff], 'continue', task=None, source_messages=None, anchor_text='',
+        ports=_summary_input_ports(), continuity_fold=fold)
+    content = composed.prompt[-1]['content']
+    carried = content[content.index(OPEN):content.index(CLOSE)]
+    folded = content[content.index(CLOSE):]
+    assert 'carry their still-relevant consequences' in folded
+    for row in rows[:4]:
+        assert row['id'] not in carried and row['id'] in folded
+    for row in rows[4:]:
+        assert row['id'] in carried and row['id'] not in folded
+
+
+def test_folded_packet_counts_carry_forward_and_match_the_machine_contract():
+    from pathlib import Path
+    from jsonschema import Draft202012Validator
+    from lib.tasks_pkg.compaction._continuity import (
+        attach_continuity, build_continuity, read_continuity)
+    from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+    schema = json.loads((Path(__file__).parents[2] /
+                         'contracts/compaction_continuity_v1.schema.json').read_text())
+    handoff = _accumulated_handoff(6)
+    rows = read_continuity([handoff])['observations']
+    text, digest = attach_continuity(
+        'Narrative.', [handoff], folded=frozenset(_observation_key(row) for row in rows[:4]))
+    folded = make_compaction_handoff(text, phase='mid_turn', continuity_digest=digest)
+    state = read_continuity([folded])
+    assert state['observations'] == rows[4:] and state['foldedIntoNarrative'] == 4
+    Draft202012Validator(schema).validate(state)
+    later = [folded] + execution('test-new', 'pytest tests/test_new.py', '1 passed')
+    assert build_continuity(later)['foldedIntoNarrative'] == 4
+    text, digest = attach_continuity(
+        'Narrative.', later, folded=frozenset([_observation_key(rows[4])]))
+    state = read_continuity([make_compaction_handoff(
+        text, phase='mid_turn', continuity_digest=digest)])
+    assert state['foldedIntoNarrative'] == 5
+    assert [row['toolCallId'] for row in state['observations']] == ['test-5', 'test-new']

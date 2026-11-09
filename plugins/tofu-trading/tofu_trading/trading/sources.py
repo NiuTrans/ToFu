@@ -20,7 +20,7 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 
-import requests
+from lib.http_transport import http_get
 
 from lib.log import get_logger
 from tofu_trading._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
@@ -162,7 +162,7 @@ def fetch_google_news_rss(query: str, max_results: int = 20,
     """
     results = []
     try:
-        resp = requests.get(
+        resp = http_get(
             'https://news.google.com/rss/search',
             params={'q': query, 'hl': 'zh-CN', 'gl': 'CN', 'ceid': 'CN:zh-Hans'},
             headers=_HEADERS,
@@ -278,7 +278,7 @@ def fetch_cls_telegraph(category: str = '', max_results: int = 20) -> list[dict]
     """
     results = []
     try:
-        resp = requests.get(
+        resp = http_get(
             'https://www.cls.cn/nodeapi/updateTelegraphList',
             params={'app': 'CailianpressWeb', 'os': 'web', 'sv': '7.7.5', 'rn': 50},
             headers={**_HEADERS, 'Referer': 'https://www.cls.cn/'},
@@ -365,7 +365,7 @@ def fetch_ddg_time_filtered(query: str, max_results: int = 8,
     """
     results = []
     try:
-        resp = requests.get(
+        resp = http_get(
             'https://html.duckduckgo.com/html/',
             params={'q': query, 'df': time_filter},
             headers=_HEADERS,

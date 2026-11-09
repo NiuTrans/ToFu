@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.protocols import FetchService
 from lib.tasks_pkg.manager import append_event
 
@@ -26,7 +26,7 @@ def _generate_tool_summary(
     Purpose: tell the model *what actions were taken* so it won't repeat them.
     Zero LLM calls, < 1ms.
     """
-    pfx = f'[Task {task["id"][:8]}]'
+    pfx = f'[Task {task_log_tag(task["id"])}]'
 
     lines = []
     i = 0
@@ -123,7 +123,7 @@ def _prefetch_user_urls(
 
     urls = extract_urls_from_text(last_text)
     if not urls: return []
-    logger.debug('[Task %s] Pre-fetching %d URL(s)', task['id'][:8], len(urls))
+    logger.debug('[Task %s] Pre-fetching %d URL(s)', task_log_tag(task['id']), len(urls))
     round_entries = []
     for url in urls:
         rn = len(task['toolRounds']) + 1

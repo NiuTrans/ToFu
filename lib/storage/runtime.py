@@ -476,15 +476,33 @@ class StorageRuntime:
             retryable=False,
             retry_after_ms=int(_REFUSAL_RECHECK_SECONDS * 1000))
 
-    def _recover_client(self, timeout: float) -> StorageClient:
-        """Resolve the selected ready generation within the caller's budget."""
-        with self._lock:
+    def _recover_client(self, pause: float) -> StorageClient:
+        """Resume a bound client that is waiting out a transient failure.
+
+        This is the native client's liveness witness between replays. The
+        caller's backoff ``pause`` elapses on the readiness condition, so
+        stop, a degraded verdict or a published refusal ends it at once. A
+        ready authority is alive and its current client is returned; a
+        restart in flight is waited out within ``client()``'s restart window.
+        Every other state proves the authority down for this call: stopping
+        and degraded raise non-retryable errors, a refusal raises its remedy
+        and an exit without a restart worker raises the fence error. Elapsed
+        time alone never ends the wait.
+        """
+        deadline = time.monotonic() + max(0.0, float(pause))
+        with self._ready_condition:
+            while not (self._stopping.is_set() or self._degraded
+                       or self._refusal is not None):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._ready_condition.wait(remaining)
             if self._stopping.is_set() or self._degraded:
                 raise StorageError('database_unavailable',
                     'Storage runtime recovery is stopped', retryable=False)
-        return self.client(wait_timeout=timeout)
+        return self.client()
 
-    def client(self, *, write: bool = False, wait_timeout: float | None = None) -> StorageClient:
+    def client(self, *, write: bool = False) -> StorageClient:
         """Return the ready client, waiting out a bounded in-flight restart.
 
         A crash-restart window (~10 s) used to fail every in-flight caller
@@ -501,9 +519,7 @@ class StorageRuntime:
         """
         if self.ready:
             return self._supervisor.client
-        wait_budget = (_FENCE_RESTART_WAIT_CAP_S if wait_timeout is None
-                       else min(_FENCE_RESTART_WAIT_CAP_S, max(0.0, wait_timeout)))
-        deadline = time.monotonic() + wait_budget
+        deadline = time.monotonic() + _FENCE_RESTART_WAIT_CAP_S
         with self._ready_condition:
             while self._restart_in_flight_locked():
                 remaining = deadline - time.monotonic()

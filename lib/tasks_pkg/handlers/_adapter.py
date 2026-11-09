@@ -21,8 +21,8 @@ from concurrent.futures import Future, as_completed
 from lib.observability import InstrumentedThreadPoolExecutor
 from typing import Any, TypeVar
 
-from lib.log import get_logger
-from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
+from lib.log import get_logger, task_log_tag
+from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round, tool_registry
 
 logger = get_logger(__name__)
 
@@ -83,9 +83,9 @@ def simple_call(
         ``(tc_id, tool_content, is_search=False)`` — conforming to
         :class:`~lib.protocols.ToolHandler`.
     """
-    tid = task.get('id', '?')[:8]
+    tid = task_log_tag(task.get('id', '?'))
     tag = module_tag or source
-    _arg_preview = str(fn_args)[:300]
+    _arg_preview = str(tool_registry.log_arguments(fn_name, fn_args))[:300]
     logger.info('[Task %s] [%s] %s called with args=%s', tid, tag, fn_name, _arg_preview)
 
     t0 = time.time()

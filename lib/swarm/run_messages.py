@@ -72,6 +72,23 @@ def binding_for(parent: dict, spec, swarm_key: str, *, run_id: str) -> dict:
     }
 
 
+def scope_key(binding: dict) -> tuple:
+    """The binding fields ``validate_scope`` reads; equal keys get one verdict."""
+    return binding['owner'], binding['conversationId'], binding['projectPath']
+
+
+def validate_scope(binding: dict) -> None:
+    """Conversation/project scope, the part of ``validate_target`` every target shares."""
+    from lib.conversations.project_identity import normalize_project_path
+    from lib.conversations.repository import ConversationRepository
+    if binding['conversationId']:
+        conv = ConversationRepository().get(binding['conversationId'], user_id=binding['owner'], include_messages=False)
+        settings = (conv.metadata.get('settings') or {}) if conv is not None else None
+        if (not isinstance(settings, dict) or settings.get('archived') or settings.get('readOnly')
+                or normalize_project_path(settings.get('projectPath') or '') != binding['projectPath']):
+            raise RunMessageError('message_scope_unavailable', 'Original conversation/project scope is no longer available')
+
+
 def validate_target(binding: dict, *, active_retained: bool = True,
                     outcome_admitted: bool = False) -> None:
     """Revalidate ownership/scope when sending AND consuming, not from text.
@@ -84,14 +101,7 @@ def validate_target(binding: dict, *, active_retained: bool = True,
     Every check is one compact session/agent state read; it never pages the
     session's agent checkpoints, so its cost is independent of team history.
     """
-    from lib.conversations.project_identity import normalize_project_path
-    from lib.conversations.repository import ConversationRepository
-    if binding['conversationId']:
-        conv = ConversationRepository().get(binding['conversationId'], user_id=binding['owner'], include_messages=False)
-        settings = (conv.metadata.get('settings') or {}) if conv is not None else None
-        if (not isinstance(settings, dict) or settings.get('archived') or settings.get('readOnly')
-                or normalize_project_path(settings.get('projectPath') or '') != binding['projectPath']):
-            raise RunMessageError('message_scope_unavailable', 'Original conversation/project scope is no longer available')
+    validate_scope(binding)
     if active_retained:
         from lib.swarm.persistence import load_session
         row = load_session(binding['swarmKey'], required=True,

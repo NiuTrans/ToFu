@@ -63,6 +63,7 @@ INTERNAL_FENCE_ABORT_REASONS = frozenset({
     'storage_frame_overflow',
     'turn_attempt_stale_fence',
     'conversation_attempt_stale_fence',
+    'worker_lease_lost',
 })
 # ``_abort_reason`` stamps recording that project-dispatch authority ended a
 # dispatch task (lib.project_dispatch.admission). They halt work through the
@@ -75,6 +76,36 @@ DISPATCH_AUTHORITY_ABORT_REASONS = frozenset({
     DISPATCH_GRANT_REVOKED,
     DISPATCH_AUTHORITY_LOST,
 })
+# ``_abort_reason`` stamps for work a server restart paused. ``server_shutdown``
+# is planted by the shutdown quiesce. ``restart_recovery`` is planted when an
+# executor learns that restart recovery has already settled its attempt
+# ``interrupted``: the Turn continues from its durable checkpoint, so the work
+# is resumable and was never stopped by a person.
+RESTART_RECOVERY = 'restart_recovery'
+RESTART_ABORT_REASONS = frozenset({'server_shutdown', RESTART_RECOVERY})
+# A stale-attempt fence whose attempt a person's Stop had already settled:
+# the executor learns of that Stop through the fence and keeps its reading.
+STOPPED_ELSEWHERE = 'attempt_stopped_by_user'
+# Planted by the stuck-task reaper (lib.tasks_pkg.manager._maintenance) when it
+# force-fails a wedged root with a ``worker_lost`` envelope: a system failure.
+STUCK_NO_PROGRESS = 'stuck_no_progress'
+
+
+def system_abort_label(abort_reason: object) -> str:
+    """Who stopped the work, worded for results; empty for a person's Stop.
+
+    Tool results and logs say ``aborted by user`` only when this is empty.
+    """
+    reason = str(abort_reason or '')
+    if reason in RESTART_ABORT_REASONS:
+        return 'server restart'
+    if reason in DISPATCH_AUTHORITY_ABORT_REASONS:
+        return f'project dispatch authority ({reason})'
+    if reason in INTERNAL_FENCE_ABORT_REASONS:
+        return f'storage authority fence ({reason})'
+    if reason == STUCK_NO_PROGRESS:
+        return 'stuck-task reaper'
+    return ''
 
 
 def dispatch_authority_stop_detail(reason: str, provenance: str = '') -> str:
@@ -128,9 +159,10 @@ class TurnTerminalEvidence:
     aborted: bool
     task_status: str
     # The internal ``_abort_reason`` stamp, when one was planted. Only the
-    # INTERNAL_FENCE_ABORT_REASONS, DISPATCH_AUTHORITY_ABORT_REASONS and
-    # ``server_shutdown`` stamps change verdict attribution; every other value
-    # keeps the historic user_abort reading.
+    # INTERNAL_FENCE_ABORT_REASONS, DISPATCH_AUTHORITY_ABORT_REASONS,
+    # RESTART_ABORT_REASONS and STUCK_NO_PROGRESS stamps change verdict
+    # attribution; every other value (including STOPPED_ELSEWHERE) keeps the
+    # historic user_abort reading.
     abort_reason: str = ''
 
     invocation_stop_reason: str = ''
@@ -229,12 +261,22 @@ def derive_turn_verdict(evidence: TurnTerminalEvidence) -> TurnVerdict:
             evidence.abort_reason,
             TurnTerminationEvidence.EXTERNAL_AUTHORITY,
         )
-    if evidence.abort_reason == 'server_shutdown':
+    if evidence.abort_reason in RESTART_ABORT_REASONS:
         return TurnVerdict(
             TurnStatus.INTERRUPTED,
             TurnOutcome.INTERRUPTED,
             'server_restart',
             TurnTerminationEvidence.SYSTEM_RECOVERY,
+        )
+    if evidence.abort_reason == STUCK_NO_PROGRESS:
+        # The reaper's root verdict, as invocation_stalled is a child's. Read
+        # as user_abort it recorded a phantom Stop beside an ``error`` task
+        # result, which durable worker recovery can never reconcile.
+        return TurnVerdict(
+            TurnStatus.FAILED,
+            TurnOutcome.FAILED,
+            'worker_lost',
+            TurnTerminationEvidence.GENERATION_ERROR,
         )
     if evidence.invocation_stop_reason in {'stalled', 'deadline'}:
         return TurnVerdict(
@@ -538,6 +580,9 @@ __all__ = [
     'GATEWAY_CONTENT_FILTER_CAUSE',
     'INTERNAL_FENCE_ABORT_REASONS',
     'MODEL_REFUSAL_CAUSE',
+    'RESTART_ABORT_REASONS',
+    'RESTART_RECOVERY',
+    'STOPPED_ELSEWHERE',
     'TurnOutcome',
     'TurnStatus',
     'TerminalTaskFailure',
@@ -551,6 +596,7 @@ __all__ = [
     'normalize_turn_settlement',
     'parse_provider_stream_state',
     'require_deliverable_task',
+    'system_abort_label',
     'task_terminal_evidence',
     'terminal_finish_reason',
 ]

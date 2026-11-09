@@ -208,6 +208,7 @@ impl PackedBlockFilter {
 pub(crate) struct CarriedRecoveryLookup {
     locations: BTreeMap<BlockId, (Option<PayloadSegmentReference>, bool)>,
     complete: bool,
+    history: Option<(Arc<crate::history_payload::Catalog>, crate::history_payload::RecoveryLookup)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -792,6 +793,10 @@ pub struct BlockStore {
     /// builds, and the maintenance worker derives each later publication's
     /// table off the authority mutex.
     catalog_locations: RwLock<Option<PublishedCatalogLocations>>,
+    /// The table the published one replaced. The next derivation writes into
+    /// it once no reader holds it, so the published table and this spare
+    /// alternate as the two allocations every derivation reuses.
+    retired_catalog_locations: Mutex<Option<Arc<CatalogLocationTable>>>,
     pending: Mutex<PendingBlocks>,
     background_pack: Mutex<BackgroundPackSlots>,
     background_pack_signal: Condvar,
@@ -1083,6 +1088,7 @@ impl BlockStore {
             next_payload_catalog_publication: AtomicU64::new(0),
             installed_payload_catalog_publication: AtomicU64::new(0),
             catalog_locations: RwLock::new(None),
+            retired_catalog_locations: Mutex::new(None),
             pending: Mutex::new(PendingBlocks::default()),
             background_pack: Mutex::new(BackgroundPackSlots::default()),
             background_pack_signal: Condvar::new(),
@@ -1135,6 +1141,7 @@ impl BlockStore {
             next_payload_catalog_publication: AtomicU64::new(0),
             installed_payload_catalog_publication: AtomicU64::new(0),
             catalog_locations: RwLock::new(None),
+            retired_catalog_locations: Mutex::new(None),
             pending: Mutex::new(PendingBlocks::default()),
             background_pack: Mutex::new(BackgroundPackSlots::default()),
             background_pack_signal: Condvar::new(),
@@ -1603,12 +1610,10 @@ impl BlockStore {
     pub(crate) fn prepare_carried_recovery_until(
         &self, ids: BTreeSet<BlockId>, should_stop: &dyn Fn() -> bool,
     ) -> io::Result<CarriedRecoveryLookup> {
-        if ids.len() > crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "recovery location budget exceeded"));
-        }
         let mut lookup = CarriedRecoveryLookup {
             locations: ids.into_iter().map(|id| (id, (None, false))).collect(),
             complete: true,
+            history: None,
         };
         let (manifest, publication) = self.payload_catalog_snapshot()?;
         if let Some(manifest) = manifest {
@@ -1629,7 +1634,26 @@ impl BlockStore {
             *self.packed_filter.write()
                 .map_err(|_| io::Error::other("packed block filter lock was poisoned"))? = filter;
         }
+        self.prepare_history_recovery_until(&mut lookup, should_stop)?;
         Ok(lookup)
+    }
+
+    /// The history root is installed after packed-reference preparation.
+    /// Bind this volatile lookup to that exact catalog for this exclusive open.
+    pub(crate) fn prepare_history_recovery_until(
+        &self, lookup: &mut CarriedRecoveryLookup, should_stop: &dyn Fn() -> bool,
+    ) -> io::Result<()> {
+        let catalog = self.history_payloads.read()
+            .map_err(|_| io::Error::other("history payload catalog lock poisoned"))?.clone();
+        lookup.history = match catalog {
+            Some(catalog) => {
+                let prepared = catalog.prepare_recovery_lookup(
+                    self, lookup.locations.keys().copied(), should_stop)?;
+                Some((catalog, prepared))
+            }
+            None => None,
+        };
+        Ok(())
     }
 
     pub(crate) fn restore_carried_with_lookup(
@@ -1642,7 +1666,7 @@ impl BlockStore {
         if lookup.locations.get(&id).is_some_and(|(_, verified)| *verified) {
             return Ok(id);
         }
-        match self.get_from_history(id) {
+        match self.get_from_history_with_lookup(id, Some(lookup)) {
             Ok(Some(existing)) if existing == payload => {
                 if let Some((_, verified)) = lookup.locations.get_mut(&id) { *verified = true; }
                 return Ok(id);
@@ -1694,9 +1718,16 @@ impl BlockStore {
                 return Ok(payload);
             }
         }
-        // Overflow or an incomplete index scan retains the normal verified
+        // An unselected reference or incomplete index scan retains the verified
         // fallback. A lookup never fabricates existence or skips byte checks.
-        self.get(id)
+        if let Some(payload) = self.cache.read()
+            .map_err(|_| io::Error::other("block cache lock was poisoned"))?.peek_shared(id) {
+            return Ok((*payload).clone());
+        }
+        let payload = self.get_uncached_with_history_lookup(id, Some(lookup))?;
+        self.cache.write().map_err(|_| io::Error::other("block cache lock was poisoned"))?
+            .insert(id, &payload);
+        Ok(payload)
     }
 
     fn stage_pending_payload(&self, id: BlockId, payload: Cow<'_, [u8]>) -> io::Result<()> {
@@ -1733,8 +1764,29 @@ impl BlockStore {
     pub(crate) fn stage_pending_sync(&self, id: BlockId) -> io::Result<()> {
         let catalog = self.history_payloads.read().map_err(|_| io::Error::other("history payload catalog lock poisoned"))?.clone();
         if let Some(catalog) = catalog {
-            if catalog.root.lookup(self, id)?.is_some() { return Ok(()); }
+            if catalog.lookup(self, id)?.is_some() { return Ok(()); }
         }
+        self.stage_pending_loose_sync(id)
+    }
+
+    pub(crate) fn stage_pending_sync_for_recovery(
+        &self, id: BlockId, lookup: &CarriedRecoveryLookup,
+    ) -> io::Result<()> {
+        let current = self.history_payloads.read()
+            .map_err(|_| io::Error::other("history payload catalog lock poisoned"))?.clone();
+        if let (Some(current), Some((catalog, prepared))) = (current, &lookup.history) {
+            if Arc::ptr_eq(&current, catalog) {
+                let mut held = false;
+                if let Some(result) = prepared.visit_locations(id, &mut |_| { held = true; Ok(true) }) {
+                    result?;
+                    return if held { Ok(()) } else { self.stage_pending_loose_sync(id) };
+                }
+            }
+        }
+        self.stage_pending_sync(id)
+    }
+
+    fn stage_pending_loose_sync(&self, id: BlockId) -> io::Result<()> {
         self.pending
             .lock()
             .map_err(|_| io::Error::other("pending block set poisoned"))?
@@ -2620,15 +2672,18 @@ impl BlockStore {
     }
 
     fn get_from_history(&self, id: BlockId) -> io::Result<Option<Vec<u8>>> {
+        self.get_from_history_with_lookup(id, None)
+    }
+
+    fn get_from_history_with_lookup(
+        &self, id: BlockId, lookup: Option<&CarriedRecoveryLookup>,
+    ) -> io::Result<Option<Vec<u8>>> {
         let _resolve = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_BLOCK_HISTORY_RESOLVE);
         let catalog = self.history_payloads.read().map_err(|_| io::Error::other("history payload catalog lock poisoned"))?.clone();
         let Some(catalog) = catalog else { return Ok(None); };
         let mut found = None;
         let mut copy_error = None;
-        catalog.root.visit_locations(self, id, &mut |location| {
-            if !catalog.sources.contains(&location.source) {
-                return Err(invalid_data("history payload source is outside the published manifest"));
-            }
+        let mut visit = |location: crate::history_payload::PayloadLocation| {
             match self.read_history_location(id, location) {
                 Ok(payload) => { found = Some(payload); Ok(true) }
                 Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
@@ -2636,7 +2691,13 @@ impl BlockStore {
                 }
                 Err(error) => Err(error),
             }
-        })?;
+        };
+        let prepared = lookup.and_then(|lookup| lookup.history.as_ref())
+            .filter(|(captured, _)| Arc::ptr_eq(captured, &catalog));
+        match prepared.and_then(|(_, prepared)| prepared.visit_locations(id, &mut visit)) {
+            Some(result) => result?,
+            None => catalog.visit_locations(self, id, &mut visit)?,
+        }
         if found.is_some() { return Ok(found); }
         if let Some(error) = copy_error { return Err(error); }
         Ok(None)
@@ -2891,13 +2952,19 @@ impl BlockStore {
         {
             return;
         }
-        *published = Some(PublishedCatalogLocations {
+        let replaced = published.replace(PublishedCatalogLocations {
             publication,
             table: Arc::clone(table),
             live_publication: publication,
             live_segments: vec![true; table.segments().len()].into(),
         });
         drop(published);
+        if let Some(replaced) = replaced {
+            let previous_spare = self.retired_catalog_locations.lock().ok()
+                .and_then(|mut retired| retired.replace(replaced.table));
+            // Released outside the lock: it may be the last handle.
+            drop(previous_spare);
+        }
         crate::engine_log::info("catalog_locations", &format!(
             "step=published source={source} publication={publication} installed={installed} \
              located_blocks={} unindexed_segments={} resident_bytes={} elapsed_ms={}",
@@ -2944,7 +3011,12 @@ impl BlockStore {
         let started = std::time::Instant::now();
         let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_CATALOG_LOCATION_DERIVE);
         let catalog = manifest.as_ref().map_or(&[][..], |manifest| manifest.segments.as_slice());
-        let derived = Arc::new(store.derive_location_table(&previous, catalog)?);
+        // A spare a reader still holds is left to that reader, which frees
+        // it; this derivation then allocates.
+        let spare = self.retired_catalog_locations.lock().ok()
+            .and_then(|mut retired| retired.take())
+            .and_then(|table| Arc::try_unwrap(table).ok());
+        let derived = Arc::new(store.derive_location_table(&previous, catalog, spare)?);
         drop(previous);
         self.publish_catalog_locations(captured, &derived, "derive", started);
         Ok(true)
@@ -3045,7 +3117,13 @@ impl BlockStore {
     /// copies interchangeable — both paths verify the payload hash on
     /// read.
     fn get_uncached(&self, id: BlockId) -> io::Result<Vec<u8>> {
-        match self.get_from_history(id) {
+        self.get_uncached_with_history_lookup(id, None)
+    }
+
+    fn get_uncached_with_history_lookup(
+        &self, id: BlockId, lookup: Option<&CarriedRecoveryLookup>,
+    ) -> io::Result<Vec<u8>> {
+        match self.get_from_history_with_lookup(id, lookup) {
             Ok(Some(payload)) => return Ok(payload),
             Ok(None) => {}
             Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
@@ -5428,6 +5506,51 @@ mod tests {
         assert_eq!(crate::payload_segment::read_path_counters::take_index_work().0, 0);
     }
 
+    /// docs/TOFUDB_BLOCK_READ_PATH.md, "Published catalog location table": a
+    /// derivation writes into the table the published one replaced, once no
+    /// reader holds it, so the published table and its spare alternate
+    /// between two allocations instead of mapping a fresh one per
+    /// publication. Before the change every derivation allocated exactly its
+    /// entries; here the catalog that shrinks at the third derivation keeps
+    /// the larger allocation of the first. A table a reader still holds, as a
+    /// whole-store pass holds its table for its whole mark, is never written:
+    /// that derivation allocates.
+    #[test]
+    fn derivations_write_into_the_retired_table_once_no_reader_holds_it() {
+        const BLOCKS: usize = 32;
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        store.set_cache_capacity_bytes(0).unwrap();
+        let (references, _) = full_range_catalog(&store, 6, BLOCKS);
+        let derive = |segments: usize| {
+            store.install_payload_manifest(PayloadManifest::new(references[..segments].to_vec()).unwrap()).unwrap();
+            assert!(store.advance_catalog_locations().unwrap());
+            let (_, table) = store.published_catalog_locations_for_test().unwrap();
+            let fresh = store.payload_segment_store().unwrap()
+                .build_location_table(&references[..segments], || Ok(())).unwrap();
+            assert_eq!(table.located_entries_for_test(), fresh.located_entries_for_test());
+            table
+        };
+        store.install_payload_manifest(PayloadManifest::new(references[..4].to_vec()).unwrap()).unwrap();
+        drop(store.traversal_reader(|| Ok(())).unwrap());
+        let first = derive(5);
+        let (first_allocation, first_capacity) = (first.entries_allocation_for_test(), first.entries_capacity_for_test());
+        assert_eq!(first_capacity, 5 * BLOCKS, "no spare yet: the first derivation allocates its entries");
+        drop(first);
+        drop(derive(6));
+        let third = derive(3);
+        assert_eq!(
+            (third.entries_allocation_for_test(), third.entries_capacity_for_test()),
+            (first_allocation, first_capacity),
+            "the third derivation writes into the first one's allocation"
+        );
+        let held_entries = third.located_entries_for_test();
+        drop(derive(4));
+        let fifth = derive(2);
+        assert_ne!(fifth.entries_allocation_for_test(), third.entries_allocation_for_test());
+        assert_eq!(third.located_entries_for_test(), held_entries, "a table a reader holds is never written");
+    }
+
     /// Each publication's table is derived from the previous one: kept
     /// segments' entries are renumbered, a dropped segment's entries leave and
     /// only segments the old table did not index are read. The result locates
@@ -6707,12 +6830,13 @@ mod tests {
     }
 
     #[test]
-    fn carried_recovery_location_admission_is_bounded() {
+    fn carried_recovery_covers_every_wal_reference_beyond_the_old_location_cap() {
         let vfs = DeterministicVfs::new(None);
         let store = simulated_store(&vfs);
-        let ids = (0..=crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS)
+        let ids: BTreeSet<_> = (0_usize..=65_536)
             .map(|i| BlockId::for_payload(&i.to_le_bytes())).collect();
-        assert_eq!(store.prepare_carried_recovery(ids).err().unwrap().kind(), io::ErrorKind::InvalidInput);
+        let lookup = store.prepare_carried_recovery(ids.clone()).unwrap();
+        assert_eq!(lookup.locations.keys().copied().collect::<BTreeSet<_>>(), ids);
     }
 
     #[test]

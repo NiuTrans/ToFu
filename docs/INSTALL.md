@@ -295,7 +295,7 @@ part to the shared internal servers (below). `export.py --mode internal` and
 | Credential vault + its key | `data/config/` | same paths, mode 0600 |
 | All installed skill packages, vendored engines included | `.tofu/skills`, `data/skills` | same paths |
 | Shareable platform config | `features.json`, `pricing.json`, `private_hosts.json`, `site_packs/` | same paths |
-| Meituan-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
+| YourProvider-tagged platform lessons | `data/memories`, `.tofu/memories` | same paths |
 | Internal MCP sources | sibling repos, `tools/github-batch-mcp` | `vendor/` |
 
 Deliberately NOT carried, each for a functional reason rather than a secrecy
@@ -350,7 +350,7 @@ because a repository can be public or change visibility.
 
 `install.sh` additionally provisions the runtime those capabilities need —
 Node ≥22, `@datafe/llm-cli` + `@mtfe/mtsso-auth-official` + `@mtfe/mtskills`,
-and `mt-paas-sandbox-python-sdk` from Meituan's own index — and then reports
+and `mt-paas-sandbox-python-sdk` from YourProvider's own index — and then reports
 what is ready and what still needs a one-time sign-in.
 
 ### Carried skills and MCP registrations (verification)
@@ -706,7 +706,7 @@ issue.
 | `TOFU_RUN_PYTHON_CACHE=auto|1|0` / `TOFU_RUN_PYTHON_CACHE_TTL_DAYS` | Auto-select repeat-heavy network-workspace Python bytecode caching, force it for experiments, or disable it; days an unused namespace is kept (default 7). There is no size quota; see `docs/modules/infra_runtime.md` |
 | `TOFU_SERVER_PYTHON_CACHE=auto|1|0` / `TOFU_SERVER_PYTHON_CACHE_DIR` | Let the stdlib lifecycle manager select, force, disable, or relocate its project/interpreter-scoped host-local server bytecode cache, which the commands the worker runs share. There is no size quota: only bytecode nothing can use is removed (`docs/modules/infra_runtime.md`). An existing `PYTHONPYCACHEPREFIX` or `PYTHONDONTWRITEBYTECODE` wins |
 | `TOFU_RUNTIME_REPLICA=auto|on|off` | Run the managed worker from a verified local copy of its Python environment when that environment lives on a network/FUSE volume (`auto`: only onto a local root at least 3x faster; `on`: skip the speed comparison). Copies build in the background after the worker is ready and are never install targets; see `docs/modules/infra_runtime.md` |
-| `TOFU_LOCAL_WORKSPACES=off|auto|on` | Place managed task checkouts and agent lanes on a local disk. Task checkouts default to `off` (they stay under the data root because they hold uncommitted work); `auto` allows only provably persistent local disks at least 3x faster. Agent lanes (`scripts/lane.py`, `lib/project_mod/lanes.py`) default to `on`, including container overlays, because their durable state is in Git (branch commits plus a saved work-in-progress ref written at every settlement) and their checkouts are reconstructible. `off` keeps both under the data root |
+| `TOFU_LOCAL_WORKSPACES=off|auto|on` | Place agent lanes (`scripts/lane.py`, `lib/project_mod/lanes.py`) and managed task checkouts on a private local disk other than the data volume, including container overlays, because Git rebuilds their checkouts (commits plus a work-in-progress ref saved at every settlement and, for task checkouts, at every restart pause; a missing task checkout is restored when its task binds). Lanes default to `on`. Task checkouts default to `off` and stay under the data root: each keeps its FileHistory undo history, which Git cannot rebuild and which keeps the checkout from being reclaimed. Opting them in with `on` or `auto` accepts that this history and unsaved edits are lost if the local volume vanishes, and that retained checkouts fill it until new ones fall back to the data root. `auto` also requires the local disk to be at least 3x faster; a task checkout the local disk cannot hold goes to the data root. `off` keeps both under the data root. Existing checkouts stay where they are registered; see `docs/modules/project_integration.md` |
 | `TOFU_LOCAL_DIR` | One private local directory for the placements (`runtime-replicas/`, `workspaces/`, `lanes/`); otherwise `XDG_CACHE_HOME`/`XDG_STATE_HOME`, then the home directory, are tried |
 | `TOFU_TOKEN_COUNT_CACHE_CAPACITY` | Digest-only repeated-text token-count entries (personal probe: 64..512 in normal profiles; distributed: 1,024; hard ceiling: 4,096) |
 | `TOFU_USAGE_CACHE_CAPACITY` | Recent per-conversation provider-usage anchors used by the exact-first token counter (personal probe: 128..2,048; 8 GiB reference: 256; probe-failure fallback: 128; distributed: 4,096; hard ceiling: 8,192). Capacity/TTL eviction safely falls through to the next local counter tier; retained model/role/signature fields are bounded and memory-pressure relief may clear the reconstructible working set. |

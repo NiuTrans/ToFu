@@ -47,7 +47,7 @@ UNPRICED_CHEAP_ALLOWLIST = frozenset(
         # minimax M3.1-Flash-Preview (2026-10): M Plan / MiniMax Code only at
         # launch — no pay-as-you-go price card published yet.
         ("minimax", "MiniMax-M3.1-Flash-Preview"),
-        ("meituan", "MiniMax-M3.1-Flash-Preview"),
+        ("yourprovider", "MiniMax-M3.1-Flash-Preview"),
         ("openbmb", "MiniCPM-V-4.6-1B"),
         ("stepfun", "step-3.5-flash"),
         ("upstage", "solar-mini"),
@@ -63,12 +63,23 @@ def _chat_recipes():
             caps = set(row.get("capabilities") or [])
             if caps & DISPATCHER_NON_CHAT_CAPS:
                 continue
-            yield template["key"], row
+            # Subscription plans deliberately drop every managed tier tag
+            # (provider_template_recipes): a flat plan has no per-token price,
+            # and a tier would enrol it in the cheap background pools its terms
+            # forbid. Their absence is the rule, not a mismatch (auth_providers_billing).
+            if template.get("category") == "subscription":
+                if "cheap" in caps:
+                    yield template["key"], row, "subscription tier leaked"
+                continue
+            yield template["key"], row, None
 
 
 def test_priced_chat_models_authored_cheap_matches_derivation():
     mismatches = []
-    for key, row in _chat_recipes():
+    for key, row, rule_violation in _chat_recipes():
+        if rule_violation:
+            mismatches.append((key, row["model_id"], rule_violation))
+            continue
         inp, out = _resolve_prices(
             row["model_id"], _model_input_price(row), _model_output_price(row)
         )
@@ -88,15 +99,15 @@ def test_priced_chat_models_authored_cheap_matches_derivation():
                 )
             )
     assert not mismatches, (
-        "authored cheap disagrees with the pricing bracket — fix the "
-        "template row or the pricing table, never the test:\n"
+        "authored cheap disagrees with the pricing bracket or the subscription "
+        "tier rule — fix the template row or the pricing table, never the test:\n"
         + "\n".join(str(m) for m in mismatches)
     )
 
 
 def test_unpriced_cheap_tags_are_allowlisted():
     found = set()
-    for key, row in _chat_recipes():
+    for key, row, _rule_violation in _chat_recipes():
         caps = set(row.get("capabilities") or [])
         if "cheap" not in caps:
             continue

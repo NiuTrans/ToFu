@@ -43,7 +43,7 @@ Gateway-sanitization parity
 ``_sanitize_messages`` (the gateway-blocked-term replacement) is PROVIDER
 GATED inside ``build_body`` exactly as::
 
-    _pid.startswith('sankuai') or (not _pid and 'sankuai' in lib.LLM_BASE_URL)
+    _pid.startswith('example-corp') or (not _pid and 'example-corp' in lib.LLM_BASE_URL)
 
 The chat main loop builds its body with ``provider_id=''`` (orchestrator.py
 :1533) and the pre-built-body dispatch branch never re-runs sanitization, so
@@ -79,13 +79,13 @@ def _gateway_sanitize_enabled(provider_id: str) -> bool:
     never more aggressive than reality.
     """
     _pid = provider_id.lower() if provider_id else ''
-    return (_pid.startswith('sankuai')
-            or (not _pid and 'sankuai' in getattr(_lib, 'LLM_BASE_URL', '')))
+    return (_pid.startswith('example-corp')
+            or (not _pid and 'example-corp' in getattr(_lib, 'LLM_BASE_URL', '')))
 
 
 def apply_wire_sanitize(messages: list, *, conv_id: str = '',
                         provider_id: str = '',
-                        user_id: int | None = None) -> list:
+                        user_id: int | None = None, lineage: dict | None = None) -> list:
     """Return the OpenAI-form message array the model actually receives.
 
     Operates on a deep-ish copy (``_strip_non_api_fields`` returns shallow
@@ -125,14 +125,23 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
             'carrier(s) before snapshot sanitization', dropped_messages)
     clean = _strip_non_api_fields(
         work, carry_same_role_seam_hints=True)
+    from lib.llm_sanitize.lineage import MessageLineage
+    trace = MessageLineage(messages, clean)
     if _gateway_sanitize_enabled(provider_id):
         _sanitize_messages(clean)
+    trace.observe('gateway_sanitize', clean)
     _strip_empty_text_blocks(clean)
+    trace.observe('text_normalization', clean)
     clean = _fix_tool_call_wire_shape(clean)
     clean = _fix_orphaned_tool_calls(clean)
     clean = _drop_empty_assistant_messages(clean)
+    trace.observe('protocol_repair', clean)
     clean = _merge_consecutive_same_role(clean)
+    trace.observe('same_role_merge', clean)
     _fix_empty_user_messages(clean)
+    report = trace.finish(clean)
+    if lineage is not None:
+        lineage.update(report)
     return clean
 
 
@@ -207,7 +216,7 @@ def build_wire_messages(raw_messages: list, config: dict, *,
         )
     except Exception as e:
         logger.warning('[wire_messages] inject failed (mode=%s conv=%s): %s — '
-                       'returning un-injected wire form', mode, (conv_id or '')[:8], e)
+                       'returning un-injected wire form', mode, (conv_id or ''), e)
 
     wire = apply_wire_sanitize(
         msgs, conv_id=conv_id, provider_id=provider_id, user_id=user_id)

@@ -39,6 +39,9 @@ def compaction_case(monkeypatch):
         def prune_archives(self, *a, **k):
             pass
 
+        def list_compaction_archives(self, *a, **k):
+            return []
+
         def update_archive_summary(self, *a, **k):
             if failure['stage'] == 'protocol':
                 from lib.storage.errors import StorageError
@@ -215,7 +218,7 @@ def test_loaded_skills_survive_l1_l2_and_durable_resume(compaction_case, monkeyp
 def test_suspension_keeps_exact_working_context_after_background_delivery(compaction_case, monkeypatch):
     from lib.tasks_pkg.compaction._layer2 import _compact as l2
     from lib.tasks_pkg.compaction._resume_projection import (
-        preserve_suspended_compaction, restore_compacted_resume, resume_background_digest, resume_execution_digest)
+        preserve_suspended_working_view, restore_compacted_resume, resume_background_digest, resume_execution_digest)
     from lib.tasks_pkg.compaction._handoff import is_compaction_handoff
     task, events, saved, failure = compaction_case
     messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000}, user('Continue')]
@@ -229,8 +232,8 @@ def test_suspension_keeps_exact_working_context_after_background_delivery(compac
     messages.append({'role': 'user', 'content': 'exact background result', '_isMeta': True})
     task['status'] = 'error'
     task['aborted'] = True
-    preserve_suspended_compaction(task)
-    preserve_suspended_compaction(task)
+    preserve_suspended_working_view(task)
+    preserve_suspended_working_view(task)
     checkpoint = saved[-1]
     assert checkpoint['post_messages'] == messages
     assert checkpoint['receipt']['implementation'] == 'suspended_working_context'
@@ -257,16 +260,19 @@ def test_suspension_keeps_exact_working_context_after_background_delivery(compac
     assert restore_compacted_resume(resumed_task, config, [], fresh_messages=[]) is None
 
 
-def test_unfinished_tool_batch_cannot_publish_suspended_context(compaction_case):
-    from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_compaction
+def test_unfinished_tool_batch_is_rewound_and_never_published(compaction_case):
+    from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_working_view
     from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
     task, events, saved, failure = compaction_case
     task.update(status='error', _acceptedCompactionReceipt={'summary': {'accepted': True}})
-    task['messages'] = [user('Scoped work'), make_compaction_handoff('Accepted progress', phase='pre_turn'),
-        {'role':'assistant', 'content':'', 'tool_calls':[
+    boundary = [user('Scoped work'), make_compaction_handoff('Accepted progress', phase='pre_turn')]
+    task['messages'] = boundary + [{'role':'assistant', 'content':'', 'tool_calls':[
             {'id':'unsettled', 'function':{'name':'write_file', 'arguments':'{}'}}]}]
-    preserve_suspended_compaction(task)
-    assert not saved and not task.get('_suspendedCompactionSaved')
+    preserve_suspended_working_view(task)
+    # The unanswered call is never published; its effect returns only as the
+    # settled receipt Continue replays after this boundary.
+    assert saved[-1]['post_messages'] == boundary
+    assert saved[-1]['receipt']['resumeWitness']['toolRoundCount'] == 0
 
 
 def test_owner_stop_during_failed_snapshot_write_keeps_original_input(compaction_case):
@@ -301,7 +307,7 @@ def test_consumed_steer_keeps_the_compaction_resumable(compaction_case, monkeypa
     from lib import agent_inbox
     from lib.tasks_pkg.compaction._layer2 import _compact as l2
     from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
-    from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+    from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
     from lib.tasks_pkg.orchestrator._deferred_inbox_flush import flush_deferred_peer_and_steer
     task, events, saved, failure = compaction_case
     messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000}, user('Continue')]
@@ -342,8 +348,8 @@ def test_unconsumed_inbox_carrier_never_becomes_a_resume_point(compaction_case, 
     # their durable row (peer); a snapshot holding one would deliver it twice.
     from lib import agent_inbox
     from lib.tasks_pkg.compaction._layer2 import _compact as l2
-    from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_compaction
-    from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+    from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_working_view
+    from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
     task, events, saved, failure = compaction_case
     messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000}, user('Continue')]
     task['messages'] = messages
@@ -357,5 +363,5 @@ def test_unconsumed_inbox_carrier_never_becomes_a_resume_point(compaction_case, 
     assert 'resumeWitness' not in saved[-1]['receipt']
     task.update(status='aborted', aborted=True)
     writes = len(saved)
-    preserve_suspended_compaction(task)
+    preserve_suspended_working_view(task)
     assert len(saved) == writes and not task.get('_suspendedCompactionSaved')

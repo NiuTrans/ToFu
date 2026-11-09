@@ -18,6 +18,7 @@ ProviderAccess resources, safe egress, charging, and rate limits. Identity lives
 | HTTP/WebSocket credential selection | `lib/api_keys/transport.py` |
 | Model/provider authority | `lib/model_routing/repository.py`, `domain.py` |
 | Request route resolution/lifecycle | `lib/model_routing/routing.py`, `dispatch_adapter.py` |
+| Storage-free run authority for child invocations | `lib/model_routing/request_authority.py` |
 | Caller-controlled egress policy | `lib/byo/byo_egress.py` |
 | Subscription OAuth | `lib/oauth/` |
 | Kimi Code device sign-in and refresh | `lib/oauth/kimi.py` |
@@ -189,7 +190,15 @@ and proves a snapshot never outlives its response.
 
 Optional Deployment probes start tasks and requested cells on demand. The fixed `TOOL_MAX_PARALLEL_WORKERS` hint governs idle reuse, with no active call or matrix-size quota. Idle workers retire; unsaved terminal outcomes remain available as secret-free fallbacks. Results update a Deployment through its owner CAS aggregate, preserving authorization and enabled state.
 
-Daily key health: HTTP 402 stops the provider account key; an ambiguous `insufficient_quota` 429 stops only the observing key/model pair so one vendor behind an aggregate gateway cannot poison siblings. Settings manual ON wins for attended dispatch. Optional background work may enter request-local strict admission where recorded key/model billing stops beat a stale manual ON and last-resort promotion; a wholly rejected pool raises `DispatchNoAdmissibleSlot` (projected retryable `no_slot`/503). A planner choosing credentials for such work reads the same refusal before minting a slot through `is_key_refused_for_optional_work` (owner-wide auxiliary summaries: `docs/CONTEXT_BUDGET_POLICY.md`, recorded billing stops). Stops are day-scoped; explicit re-enable clears the old stop.
+Daily key health: HTTP 402 stops the provider account key; an ambiguous `insufficient_quota` 429 stops only the observing key/model pair so one vendor behind an aggregate gateway cannot poison siblings. Settings manual ON wins for attended dispatch. A recorded key/model billing stop is never last-resort promoted, under either admission policy; credential-health (success-rate) disables keep that promotion. Optional background work may enter request-local strict admission where recorded key/model billing stops beat a stale manual ON; a wholly rejected pool raises `DispatchNoAdmissibleSlot` (projected retryable `no_slot`/503). A planner choosing credentials for such work reads the same refusal before minting a slot through `is_key_refused_for_optional_work` (owner-wide auxiliary summaries: `docs/CONTEXT_BUDGET_POLICY.md`, recorded billing stops); ordinary dispatch reads it with `honor_override=True`, so a manual ON restores capacity exactly as `is_key_enabled` does. `LLMDispatcher.has_capable_slots` treats a recorded billing stop as durable disqualifying evidence under ordinary admission too, never as healable cooldown, so the no-slot branch cannot poll a pool only an owner or a provider reset can unblock. Stops are day-scoped; explicit re-enable clears the old stop.
+
+Problem (2026-11-06 edit benchmark): most DeepSeek-V4-Pro credentials answered HTTP 402 "Credit exhausted" and the rest were rate-limited, yet every later request spent one more live 402 on an already-stopped credential. Two mechanisms compounded. The provider last-resort guard promoted one billing-stopped key back to enabled whenever every sibling in the owner + Provider namespace was raw-disabled, and each request mints a fresh request-scoped route group, so the slot-local one-hour quota cooldown died with the request while the durable stop was the only surviving evidence. Separately, `has_capable_slots` consulted key health only inside strict optional-work admission, so once the picker refused every stopped slot the no-slot branch still saw healable capacity and polled it indefinitely without sending a request.
+
+Decision: a billing stop is the provider's own statement that this credential cannot pay for another request, so it is durable disqualifying evidence for selection AND for capacity, not a transient condition a retry or a last-resort reprieve can cure. It clears only on provider-defined evidence — the subscription reset time, a new day, or an owner re-enable (which also clears the recorded stops). No cooldown constant, retry cap or other knob was added.
+
+Alternatives rejected: a longer slot-local quota cooldown (does not survive the next request's fresh route group, and is a tuning knob); keeping last-resort promotion for a sole billing-dead key (reproduces the measured one-402-per-request burn); enabling strict billing-stop admission for all attended dispatch (would also drop the retained credential-health last-resort reprieve and let a stale manual ON outrank a fresh stop); leaving capacity key-health-blind outside strict admission (the indefinite poll).
+
+Verification: `tests/llm_dispatch/test_billing_stop_no_last_resort.py` (failing first on the previous lib: re-pick of a stopped credential, healable capacity, endless no-slot polling, one more provider call), `test_key_stats_model_exhaustion.py` (promotion expectations rewritten with the incident, manual-ON and strict-admission precedence), `test_key_stats_no_429_auto_disable.py`, `test_credential_health_attribution.py`, `tests/key_stats/` and `test_gateway_errors_accounting.py`.
 
 
 Daily credential attribution: `PermissionError_.is_credential_error` identifies 401 rejection (excluding missing-credential delivery errors) and explicit invalid/revoked/expired credentials in a 403. A model/region/policy 403, harness failure, unknown exception, network outage, 5xx or ordinary 429 cannot disable a key. `credential_failures` alone joins successes in the existing minimum attempt / health-rate gate; `failure` remains request telemetry. Historical failures without that evidence stay informational. Picker and Settings share one predicate; the displayed disable reason retains the credential rejection even after unrelated failures. Billing stops, day rollover, manual overrides and the last-resort guard retain their existing scopes.
@@ -281,6 +290,43 @@ model row keep the 1.0 write rate the translator always applied).
 Alternative rejected: copying cache rates into every tier row, a second
 declaration of the same fact that drifts. Specification:
 `tests/pricing/test_declared_cache_rates.py`.
+
+FRIDAY (the YourProvider AIGC gateway, `your-llm-gateway.example.com`) bills Claude cache
+tokens by its own multipliers of the model's base input. Problem: every
+consumer priced FRIDAY Claude rounds with the creator's row, so Opus 5.5 and
+Sonnet 5.5 cache reads (Anthropic: 0.05x) were displayed and debited at half
+of FRIDAY's documented read charge. Evidence: 学城 2762588777 《Friday 大模型平台
+Claude 模型接入推荐实践》 §1.3 (modified 2026-05-15, read 2026-11-08), verbatim
+`| 5m（默认） | × 1.25 base | $3.75 |`, `| 1h | × 2.0 base | $6.00 |`,
+`| 命中读取（任意 TTL） | × 0.1 base | $0.30 |`. Decision: `lib/pricing`
+declares those multipliers once (`FRIDAY_CLAUDE_CACHE_MULTIPLIERS`) and
+installs, at import, one provider row per Claude-family `MODEL_PRICING` row
+for each FRIDAY provider (`FRIDAY_PROVIDER_IDS`: `yourprovider`, which a fresh
+install of the YourProvider template creates, and `example-corp`, the deployment's
+provider imported by the v1→v2 cutover). The row keeps the creator's base
+input/output, currency, tiers and their evidence and replaces only the cache
+multipliers, so `lookup_pricing(model, provider_id)` returns it to every
+consumer: the per-round and Turn cost stamps the conversation shows, the My
+Day calendar, the message-cost endpoints, billing receipts, native settlement
+without an Offering price, and compaction summary pricing and cache economics.
+Any other provider, such as a direct Anthropic key, keeps the creator's row.
+Gaps: FRIDAY publishes no base price for any Claude model, and the page
+predates Opus 5.5 (GA 2026-09-22) and Fable 5.1, whose official reads are
+0.05x and 0.025x; nothing else ties 0.1x to them, and the gateway's responses
+carry token counts only. A FRIDAY provider installed under another id keeps
+the creator's row until it is added there. Stored costs are not rewritten:
+round and Turn stamps settled before the change keep their recorded rates,
+while surfaces that price from usage at read time (today's My Day total,
+unstamped rounds, past days not yet in the daily cost cache) use the new row.
+Alternatives rejected: changing the creator rows (would misprice direct
+Anthropic routes); Offering `actual_pricing` from template recipes (needs a
+base price FRIDAY does not publish, template convergence never rewrites a
+stored price, and display pricing does not read it); installing every
+Offering price into the registry (reprices 62 unrelated live offerings); a
+resolver-only overlay (registry snapshot readers such as compaction's verified
+lookup would not see it); binding provider ids from the routing authority at
+route time (processes that price before reading it would disagree).
+Specification: `tests/pricing/test_friday_claude_cache_billing.py`.
 
 For billed requests, `lib/billing/request_flow.py` owns the full sequence:
 

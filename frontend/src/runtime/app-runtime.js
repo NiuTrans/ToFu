@@ -458,6 +458,7 @@ const toolInjectionPresentation = createToolInjectionPresentation({
   renderMarkdown: (source) => renderMarkdown(source),
   iconHtml,
   resolveConversationTitle: (conversationId) => convTitleById(conversationId),
+  resolveMediaUrl: (url) => (url.startsWith('/') ? apiUrl(url) : url),
 });
 const { renderInjectionHtml: renderToolInjectionHtml } =
   toolInjectionPresentation;
@@ -4047,7 +4048,7 @@ const _FEATURE_ENTRY_POINTS = [
   'toggleIgModelDropdown', '_igCancelGeneration', '_igRetryGenerationTurn',
   'openProjectBrain', 'toggleProjectBrain',
   '_wireConvSyncPush',
-  'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
+  'openDailyReport', 'closeDailyReport',
   'openKnowledgeBase',
   'openProjectModal', 'closeProjectModal',
   'openLocalControlModal', 'closeLocalControlModal',
@@ -8556,24 +8557,22 @@ function _renderUnifiedToolLine(round, isSearching) {
     if (memHtml) return memHtml;
   }
 
+  /* Progress side channel: a Coordinator's task board is its checklist, so each
+   * todo_write / update_task_progress round drives both live views from its
+   * meta: the rail's checklist row and the pinned board, whose project push
+   * never reaches this page when the execution host wrote it. A rejected or
+   * no-op round carries the accepted list too, so neither view regresses. */
+  if (round.toolName === "todo_write" || round.toolName === "update_task_progress") {
+    try {
+      const todos = Array.isArray(meta.todos) ? meta.todos : (Array.isArray(round.todos) ? round.todos : null);
+      if (todos) runtimeScope.updateTurnCtxTodos?.(todos);
+      if (meta.coordinatorProgress) runtimeScope.observeCoordinatorProgress?.(meta.coordinatorProgress);
+    } catch (_e) { /* live views must never break the tool render */ }
+  }
   // todo_write — collapsible checklist progress card (state glyphs + a slim
   //   progress bar), rendered off the structured meta.todos the backend
   //   attaches. Falls through to the generic line only if the list is absent.
   if (round.toolName === "todo_write") {
-    /* Side channel for the per-turn context rail: every accepted todo_write
-     * rewrites the live checklist, so the rail's checklist row follows the
-     * plan in real time instead of waiting for the turn to settle. Read the
-     * same structured meta the card renders; a rejected/no-op round carries
-     * the authoritative list too (the backend attaches it on every outcome),
-     * so the rail never regresses to an older plan. */
-    if (typeof runtimeScope.updateTurnCtxTodos === 'function') {
-      const _liveTodos = Array.isArray(meta.todos) ? meta.todos
-        : (Array.isArray(round.todos) ? round.todos : null);
-      if (_liveTodos) {
-        try { runtimeScope.updateTurnCtxTodos(_liveTodos); }
-        catch (_e) { /* rail sync must never break the tool render */ }
-      }
-    }
     const todoHtml = (typeof _renderTodoBlock === "function")
       ? _renderTodoBlock(round, svg, q, badgeHtml) : "";
     if (todoHtml) return todoHtml;
@@ -9249,6 +9248,7 @@ const _SEG_NOTE_REASON_CHIP = {
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
   output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
   output_limit_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
+  paper_output_repair: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
   paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
   parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },
@@ -15682,8 +15682,10 @@ async function _buildConvSubmission(conv, workspace = captureConversationProject
 /**
  * Ask the human how to deliver a message SENT WHILE a turn is generating.
  * Shown ONLY when a task is already running for `convId` (caller-gated). The
- * dialog auto-closes to the safe default ('queue') if that running turn ends
- * while it's open (liveCheck), so a moot choice never lingers on screen.
+ * dialog auto-closes with 'cancel' if that running turn ends while it's open
+ * (liveCheck), so a moot choice never lingers on screen; like a dismissal or a
+ * missing dialog service, nothing is sent without the human's choice and the
+ * message stays in the composer for an ordinary send.
  *
  * @param {string} convId
  * @returns {Promise<'steer'|'queue'|'cancel'>}
@@ -18719,6 +18721,10 @@ function selectTheme(theme) {
   applyTheme(theme);
 }
 
+function _syncRangeOutput(input, outputId, suffix) {
+  const output = document.getElementById(outputId);
+  if (output) output.textContent = String(input && input.value || '') + String(suffix || '');
+}
 
 /* Cost dashboard aliases — moved to myday.js */
 
@@ -21274,9 +21280,12 @@ let backgroundConversationActivity = new Map();
     } catch (_error) { return ''; }
   }
 
-  function sidebarPath() {
-    var folder = typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
+  function sidebarFolder() {
+    return typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
       ? getFolders().find(function (item) { return item.id === getActiveFolderId(); }) : null;
+  }
+  function sidebarPath() {
+    var folder = sidebarFolder();
     return folder ? norm(folder.projectPaths?.[0] || folder.projectPath || '') : projectPath();
   }
   function scope(sidebarOnly) {
@@ -21446,6 +21455,13 @@ let backgroundConversationActivity = new Map();
     canvas: sidebarOnly ? document.createElement('div') : host,
     mode: sidebarOnly ? 'sidebar' : 'canvas',
     scope: function () { return scope(sidebarOnly); }, sidebarPath: sidebarPath,
+    // A selected folder that names no directory has no project to bind yet;
+    // its Coordinator row opens that folder's settings, where one is added.
+    folderSetup: sidebarOnly ? function () {
+      var folder = sidebarFolder();
+      if (!folder || sidebarPath()) return null;
+      return function () { if (typeof _promptRenameFolder === 'function') _promptRenameFolder(folder.id); };
+    } : undefined,
 
     changed: function () { if (typeof renderConversationList === 'function') renderConversationList(); },
     canCreate: function () { return typeof getActiveFolderId === 'function' && !!getActiveFolderId(); },
@@ -21522,9 +21538,11 @@ let backgroundConversationActivity = new Map();
   // Other surfaces (the studio's compute-stall dialog) ensure the Watchdog through its
   // owner, so the header and composer steering adopt the binding they open.
   runtimeScope.ensureRouterWatchdogConversation = function () { return routerWatchdog.ensure(); };
+  // A selected folder is a project before it names a directory: its own
+  // Coordinator row, not the main coordinator's card, takes the slot.
   function sidebarHasProject() {
     var root = sidebarPath();
-    return !!root && !isRouterManaged(root);
+    return root ? !isRouterManaged(root) : !!sidebarFolder();
   }
   /* A bound Coordinator's composer steers its live reply without asking
    * (_promptInjectMode). Each owner names one from a server binding: the open
@@ -21533,6 +21551,10 @@ let backgroundConversationActivity = new Map();
   runtimeScope.isCoordinatorConversation = function (id) {
     return !!id && (id === surface.coordinatorId() || id === sidebarSurface.coordinatorId()
       || id === globalRouter.conversationId() || id === routerWatchdog.conversationId());
+  };
+  // Progress rounds seen in the open conversation (ui/tool_rounds.js) refresh the board.
+  runtimeScope.observeCoordinatorProgress = function (progress) {
+    surface.observeProgress(progress); sidebarSurface.observeProgress(progress);
   };
   // Reached from the main coordinator's card and settings, never as list rows.
   runtimeScope.routerConversationIds = function () {
@@ -25462,6 +25484,7 @@ const runtimeActions = Object.freeze({
   _safeClipboardWrite,
   _swarmCopyAgentId,
   _swarmToggleClass,
+  _syncRangeOutput,
   _timerInstructionToggle,
   _timerPollToggle,
   _timerWatcherToggle,

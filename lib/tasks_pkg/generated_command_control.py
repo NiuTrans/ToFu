@@ -2,6 +2,7 @@
 
 FORMAT = 'tofu.execution-command-control/v1'
 ACKNOWLEDGEMENT_SECONDS = 2.0
-METHODS = ('interrupt', 'background')
+METHODS = ('interrupt', 'background', 'swarm_abort', 'swarm_agent_stop', 'background_activity', 'storage_rpc_metrics')
+OWNER_METHODS = ('background_activity', 'storage_rpc_metrics')
 REQUEST_FIELDS = ('format', 'serviceId', 'token', 'requestId', 'ownerId', 'method', 'taskId', 'params', 'deadlineUnixMs')
 RESPONSE_FIELDS = ('format', 'requestId', 'result', 'error')

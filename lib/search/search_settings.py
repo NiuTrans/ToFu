@@ -1,19 +1,21 @@
-"""lib/search/search_settings.py — Owner of the saved search setting: the fetch blocklist.
+"""lib/search/search_settings.py — Owner of the saved search setting: the operator URL blocklist.
 
 Search and fetch limits (results per search, page sizes, timeouts, download
 size) are fixed tofu-search defaults owned by ``tofu_search.config``; there is
 no host tuning layer. The only saved, user-adjustable search behaviour is
-``skip_domains``: URLs the assistant's web tools never visit. Entries are
+``skip_domains``: operator bans, URLs no assistant tool may reach. Entries are
 hosts (``example.com``, including subdomains) or host+path prefixes
 (``example.com/private``); a ``*`` path segment matches one segment. Matching
-is owned by :mod:`lib.search.url_blocklist`. Its writers share this module
-so "what counts as the same entry" has one answer:
+is owned by :mod:`lib.search.url_blocklist`; the saved schema, and the
+Daily Optimizer's separate fetch-quality skips, by
+:mod:`lib.search.saved_domain_lists`. Its writers share this module so "what
+counts as the same entry" has one answer:
 
   * **The ``update_search_settings`` agent tool** blocks/unblocks a domain
     through :func:`apply_updates` — validated, persisted, hot-reloaded and
     audit-logged; called with no changes it is a pure read.
   * **The Daily Optimizer** (``block_search_domain`` action) reuses
-    :func:`normalise_domain`.
+    :func:`normalise_domain` for its fetch-quality skips.
   * **The Settings UI** saves the same ``search.skip_domains`` list through
     ``routes/config.py``.
 """
@@ -26,6 +28,7 @@ import lib as _lib
 from lib.config_dir import config_path as _config_path
 from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
+from lib.search.saved_domain_lists import saved_skip_domains, store_skip_domains
 
 logger = get_logger(__name__)
 
@@ -66,7 +69,7 @@ def normalise_domain(domain: str) -> str:
 
 
 def read_effective() -> dict:
-    """The blocklist the fetch pipeline will actually use RIGHT NOW."""
+    """The operator blocklist in force RIGHT NOW."""
     return {'skip_domains': sorted(getattr(_lib, 'SKIP_DOMAINS', set()))}
 
 
@@ -129,14 +132,10 @@ def _apply_updates_locked(changes: dict) -> dict:
         if not isinstance(search_cfg, dict):
             search_cfg = {}
             data['search'] = search_cfg
-        current = search_cfg.get('skip_domains')
-        if not isinstance(current, list):
-            # Seed from in-memory defaults so we never shrink the set.
-            current = sorted(_lib.SKIP_DOMAINS)
-        current = set(current)
+        current = saved_skip_domains(search_cfg)
         current |= set(domains_to_block)
         current -= set(domains_to_unblock)
-        search_cfg['skip_domains'] = sorted(current)
+        store_skip_domains(search_cfg, current)
         if domains_to_block:
             result['applied']['block_domain'] = sorted(set(domains_to_block))
         if domains_to_unblock:

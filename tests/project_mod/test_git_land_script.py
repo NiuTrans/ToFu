@@ -362,6 +362,45 @@ def test_orphaned_index_lock_is_reported_stale_and_left_alone(shared, feature):
     assert lock.exists() and state(shared) == before
 
 
+def test_index_lock_is_held_until_the_branch_moves(shared, feature, monkeypatch):
+    from lib.project_mod import checkout_landing
+    replace_line(feature / 'notes.txt', 2, 'line 2 from the branch')
+    commit_all(feature, 'feature work')
+    lock = shared / '.git' / 'index.lock'
+    seen = []
+    original = checkout_landing.git
+
+    def observing(top, *args, **kwargs):
+        if args and args[0] == 'update-ref' and str(args[3]).startswith('refs/heads/'):
+            seen.append(lock.exists())
+        return original(top, *args, **kwargs)
+
+    monkeypatch.setattr(checkout_landing, 'git', observing)
+
+    result = land.land('feature', cwd=shared)
+
+    assert result['status'] == 'landed'
+    assert seen == [True]
+    assert not lock.exists()
+
+
+def test_lock_released_during_inspection_replans_instead_of_refusing(shared, feature, monkeypatch):
+    replace_line(feature / 'notes.txt', 2, 'line 2 from the branch')
+    commit_all(feature, 'feature work')
+    lock = shared / '.git' / 'index.lock'
+    lock.write_text('')
+
+    def released_while_scanning(path):
+        os.unlink(path)
+        return []
+
+    monkeypatch.setattr(land, '_open_holders', released_while_scanning)
+
+    result = land.land('feature', cwd=shared)
+
+    assert result['status'] == 'landed'
+
+
 def test_branch_moving_mid_landing_replans_onto_the_new_tip(shared, feature, monkeypatch):
     replace_line(feature / 'notes.txt', 2, 'line 2 from the branch')
     tip = commit_all(feature, 'feature work')
@@ -384,6 +423,43 @@ def test_branch_moving_mid_landing_replans_onto_the_new_tip(shared, feature, mon
     assert rev(shared, 'HEAD^1') == moved[0] == result['preIntegration']
     assert rev(shared, 'HEAD^2') == tip
     assert git(shared, 'status', '--porcelain') == ''
+
+
+@pytest.mark.parametrize('managed_lane', [False, True])
+def test_source_advancing_during_landing_keeps_its_checkout(
+        shared, feature, monkeypatch, managed_lane):
+    from lib.project_mod import lanes
+    source, branch = feature, 'feature'
+    if managed_lane:
+        branch = 'advancing-source'
+        source, _recycled = lanes.create_lane(shared, branch)
+    replace_line(source / 'notes.txt', 2, 'initial source work')
+    initial = commit_all(source, 'initial source commit')
+    original = land._plan
+    advanced = []
+
+    def plan_then_continue_source(*args):
+        steps = original(*args)
+        if not advanced:
+            (source / 'later.txt').write_text('source continued during verification\n')
+            advanced.append(commit_all(source, 'later source commit'))
+        return steps
+
+    monkeypatch.setattr(land, '_plan', plan_then_continue_source)
+    result = land.land(branch, cwd=shared)
+
+    assert result['status'] == 'landed'
+    assert rev(shared, 'HEAD^2') == initial
+    assert not (shared / 'later.txt').exists()
+    assert source.is_dir(), 'cleanup removed a checkout with unlanded commits'
+    assert rev(source) == advanced[0]
+    assert rev(shared, f'refs/heads/{branch}') == advanced[0]
+
+    # A later landing includes the continued work and can retire the checkout.
+    assert land.land(branch, cwd=shared)['status'] == 'landed'
+    assert (shared / 'later.txt').read_text() == 'source continued during verification\n'
+    assert not source.exists()
+    assert not git(shared, 'branch', '--list', branch).strip()
 
 
 def test_edit_after_planning_is_replanned_not_overwritten(shared, feature, monkeypatch):

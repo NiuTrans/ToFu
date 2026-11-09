@@ -1263,6 +1263,90 @@
     }
 
     #[test]
+    fn turn_steer_commit_stores_preview_images_like_the_sql_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let pair = execute(
+            &mut database,
+            &request(
+                "turn.create_pair",
+                11,
+                json!({
+                    "conversation_id": "steer-images",
+                    "user_id": 11,
+                    "command_id": "steer-images-pair",
+                    "input_projection": {"content": "question"},
+                    "conversation_defaults": {"allowCreate": true},
+                    "now": 1_000
+                }),
+                Some("steer-images-pair-receipt"),
+            ),
+            1_000,
+        )
+        .unwrap();
+        let attempt_id = pair["attempt"]["attemptId"].as_str().unwrap();
+        execute(
+            &mut database,
+            &request(
+                "turn.attempt.bind",
+                11,
+                json!({"attempt_id":attempt_id, "task_id":"steer-images-task", "user_id":11}),
+                Some("steer-images-bind"),
+            ),
+            1_010,
+        )
+        .unwrap();
+        let images = json!([
+            {"preview": "/api/images/shot.png", "url": "/api/images/shot.png", "sizeKB": 96},
+            {"preview": "data:image/png;base64,iVBORw0KGgo="}
+        ]);
+        // Any non-list value carries no images, as on the SQL authority.
+        for (command_id, value, at) in [
+            ("with-images", images.clone(), 1_020),
+            ("text-only", Value::Null, 1_030),
+            ("not-a-list", json!("/api/images/shot.png"), 1_040),
+            ("empty-list", json!([]), 1_050),
+        ] {
+            let mut payload = json!({
+                "conversation_id":"steer-images",
+                "attempt_id":attempt_id,
+                "command_id":command_id,
+                "text":"see the screenshot",
+                "user_id":11
+            });
+            if !value.is_null() {
+                payload["images"] = value;
+            }
+            let receipt = format!("{command_id}-receipt");
+            execute(
+                &mut database,
+                &request("turn.steer.commit", 11, payload, Some(receipt.as_str())),
+                at,
+            )
+            .unwrap();
+        }
+        let turns = execute(
+            &mut database,
+            &request(
+                "turn.list",
+                11,
+                json!({"conversation_id":"steer-images", "user_id":11}),
+                None,
+            ),
+            1_060,
+        )
+        .unwrap();
+        let records = &turns.as_array().unwrap().last().unwrap()["projection"]["_userSteerInjects"];
+        assert_eq!(
+            records[0]["previews"],
+            json!([{"text": "see the screenshot", "images": images}])
+        );
+        for index in 1..=3 {
+            assert_eq!(records[index]["previews"], json!([{"text": "see the screenshot"}]));
+        }
+    }
+
+    #[test]
     fn turn_related_announce_bridges_a_large_live_projection_atomically() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
@@ -8052,6 +8136,38 @@
             execute(&mut database, &foreign, 4_000).unwrap_err(),
             SemanticExecutionError::NotFound
         );
+    }
+
+    #[test]
+    fn regenerate_admits_the_anchor_its_resume_option_advertises() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, &request("conversation.create", 11, json!({
+            "conv_id": "regenerate-anchor", "user_id": 11, "title": "Regenerate", "settings": {}
+        }), Some("regenerate-anchor-conversation")), 1_000).unwrap();
+        execute(&mut database, &request("turn.append_settled", 11, json!({
+            "conversation_id": "regenerate-anchor", "user_id": 11, "command_id": "regenerate-anchor-seed",
+            "actor": "assistant", "kind": "reply", "turn_id": "regenerate-anchor-turn",
+            "projection": {"content": "done", "thinking": "", "segments": [], "toolRounds": []},
+            "settlement": {"outcome": "completed", "cause": "fixture", "resumeOptions": [
+                {"operation": "regenerate", "anchor": {"type": "turn_start"}}]}
+        }), Some("regenerate-anchor-seed-receipt")), 2_000).unwrap();
+        let create = |command: &str, anchor: Value| request("turn.attempt.create", 11, json!({
+            "conversation_id": "regenerate-anchor", "turn_id": "regenerate-anchor-turn",
+            "user_id": 11, "command_id": command, "operation": "regenerate",
+            "dispatch_mode": "conversation_executor", "target_actor": "assistant",
+            "target_kind": "reply", "expected_projection_revision": 1, "config": {},
+            "resume_anchor": anchor
+        }), Some(&format!("{command}-receipt")));
+        assert_eq!(
+            execute(&mut database, &create("stale-anchor", json!({"type": "tool_checkpoint"})), 3_000)
+                .unwrap_err(),
+            SemanticExecutionError::Conflict
+        );
+        let created = execute(&mut database, &create("advertised-anchor", json!({"type": "turn_start"})), 3_000)
+            .unwrap();
+        assert_eq!(created["attempt"]["operation"], "regenerate");
+        assert_eq!(created["attempt"]["resumeAnchor"], json!({"type": "turn_start"}));
     }
 
     #[test]

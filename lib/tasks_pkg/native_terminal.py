@@ -97,10 +97,27 @@ def project_native_terminal(task: dict, request: TerminalRequest) -> None:
             for row in usages:
                 accumulate_usage_into(usage, row)
         from lib.tasks_pkg.manager._events import reset_task_text
-        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
-        silent = declare_silent_turn(task, final, messages[:-1], llm_round=None)
+        from lib.tasks_pkg.stream_handler._router_silence import project_terminal_control_text
+        silent, rejected_empty = project_terminal_control_text(
+            task, final, messages[:-1], llm_round=None)
         task.pop('_silentTextCandidate', None)
-        projected_content = '' if silent else final.get('content') or ''
+        if rejected_empty:
+            task['_nativeTerminalRejectCandidate'] = True
+            from lib.error_envelope import make_envelope
+            # The frozen Rust candidate stays 'done'; its finish reason and
+            # typed error preserve the actual provider-response failure.
+            reason = 'abnormal_stop'
+            task['error'] = make_envelope(
+                'abnormal_stop',
+                detail='The provider emitted no usable answer. Its control declaration '
+                       'is not authorized to close this Turn.',
+                model=str((task.get('config') or {}).get('model') or ''),
+                context='native-terminal', source='native', retryable=True)
+        if silent or rejected_empty:
+            projected_content = ''
+        else:
+            from lib.tasks_pkg.stream_handler._intent_stall import strip_silent_turn_marker
+            projected_content = strip_silent_turn_marker(final.get('content') or '')
         reset_task_text(task, content=projected_content, thinking=(
             task.get('thinking') or '' if thinking is None else thinking))
         task['messages'] = messages
@@ -264,6 +281,9 @@ class NativeTaskTerminalPolicy:
             self.task['_terminalPersistenceRetryReady'] = True
             raise
         if acknowledged is True:
+            if self.task.pop('_nativeTerminalRejectCandidate', False):
+                self._rejected = True
+                return 'rejected'
             if self._resource_refusal:
                 self._rejected=True
                 return 'rejected'

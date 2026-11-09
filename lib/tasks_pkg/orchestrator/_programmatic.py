@@ -258,7 +258,7 @@ def _canonicalize_programmatic_ids(
             logger.warning(
                 '[PTC] rejected unbound program output task=%s '
                 'provider_call_id=%s candidates=%d available=%d active=%d',
-                str(task.get('id') or '')[:8], provider_call_id,
+                str(task.get('id') or ''), provider_call_id,
                 len(all_matches), len(matches), len(active))
 
     for tool_call in assistant_msg.get('tool_calls') or ():
@@ -286,7 +286,7 @@ def _canonicalize_programmatic_ids(
             logger.warning(
                 '[PTC] rejected ambiguous program caller task=%s '
                 'provider_call_id=%s candidates=%d',
-                str(task.get('id') or '')[:8], provider_call_id,
+                str(task.get('id') or ''), provider_call_id,
                 len(candidates))
 
 

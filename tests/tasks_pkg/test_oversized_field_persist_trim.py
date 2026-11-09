@@ -51,7 +51,7 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 
 @pytest.mark.parametrize('status', ['running', 'done', 'error', 'aborted', 'rejected'])
 def test_result_publication_fence_is_transient_but_effect_evidence_is_durable(status):
-    from lib.storage.storage_projection import trim_tool_round_for_persist
+    from lib.task_replay.persistence_projection import trim_tool_round_for_persist
     round_item = {
         'status': status, 'toolContent': 'authoritative result',
         'executionEffect': {'state': 'unknown', 'operationId': 'owned-operation'},
@@ -211,7 +211,7 @@ def _fat_messages():
 def test_window_projection_shrinks_and_preserves_visible_content():
     """The first-paint projection drops heavy state and wire diagnostics."""
     import json
-    from lib.storage.storage_projection import project_message_for_window
+    from lib.task_replay.persistence_projection import project_message_for_window
 
     msgs = _fat_messages()
     before = len(json.dumps(msgs))
@@ -234,7 +234,7 @@ def test_window_projection_shrinks_and_preserves_visible_content():
 
 
 def test_window_projection_is_idempotent_and_copy_on_change():
-    from lib.storage.storage_projection import project_message_for_window
+    from lib.task_replay.persistence_projection import project_message_for_window
 
     original = _fat_messages()[1]
     once = project_message_for_window(original)
@@ -243,9 +243,9 @@ def test_window_projection_is_idempotent_and_copy_on_change():
     assert once is not original
 
 
-def test_manager_uses_single_storage_projection_helpers():
-    """Manager persistence must reuse the storage projection source of truth."""
-    import lib.storage.storage_projection as projection
+def test_manager_uses_single_persistence_projection_helpers():
+    """Manager persistence must reuse the persistence projection source of truth."""
+    import lib.task_replay.persistence_projection as projection
     import lib.tasks_pkg.manager._persist as M
 
     assert M.sanitize_usage_for_persist is projection.sanitize_usage_for_persist
@@ -254,10 +254,11 @@ def test_manager_uses_single_storage_projection_helpers():
     assert M.trim_tool_round_for_persist is projection.trim_tool_round_for_persist
 
 
-def test_storage_projection_import_is_bootstrap_free():
+def test_persistence_projection_import_is_bootstrap_free():
     """Projection reuse must not import the host persistence graph."""
     code = (
-        "import sys; import lib.storage.storage_projection; "
+        "import sys; import lib.task_replay.persistence_projection; "
+        "assert 'lib.storage' not in sys.modules; "
         "assert 'lib.storage_authority_sql' not in sys.modules; "
         "assert 'lib.tasks_pkg' not in sys.modules"
     )

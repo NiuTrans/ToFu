@@ -19,6 +19,7 @@ import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import com.tofu.client.data.SshEndpoint
+import com.tofu.client.session.ProfileDaoFixture
 import com.tofu.client.session.CookieSink
 import com.tofu.client.session.DiagLog
 import com.tofu.client.session.KernelList
@@ -31,6 +32,7 @@ import com.tofu.client.session.UpdateStatus
 import com.tofu.client.ui.AddEditScreen
 import com.tofu.client.ui.OnboardingScreen
 import com.tofu.client.ui.ProfileListScreen
+import com.tofu.client.ui.ProfilesViewModel
 import com.tofu.client.ui.SshKernelScreen
 import com.tofu.client.ui.UiStatus
 import com.tofu.client.ui.theme.TofuTheme
@@ -139,6 +141,26 @@ class ScreenshotTest {
     @Test
     fun add_tablet_zh() =
         renderAdd(DeviceConfig.NEXUS_10.copy(locale = "zh-rCN"), "add-tablet-zh")
+
+    @Test
+    fun review_link_keeps_dirty_edit_phone_en() {
+        paparazzi.unsafeUpdateConfig(deviceConfig = DeviceConfig.PIXEL_5)
+        paparazzi.snapshot(name = "review-link-keeps-dirty-edit-phone-en") {
+            ShellContent {
+                AddEditScreen(
+                    editing = profiles.first(),
+                    existingAliases = profiles.map { it.alias }.toSet(),
+                    secretAlreadyStored = true,
+                    onCancel = {}, onSubmit = { _, _, _, _, _ -> },
+                    initialDraft = ProfilesViewModel.FormDraft(
+                        "Typed name", baseUrl, AuthType.NONE, authTouched = true,
+                        projectPath = "/home/dev/tofu", manageEnabled = true, dirty = true,
+                    ),
+                    pendingPrefill = ProfilesViewModel.Prefill("https://review.example.com/", "Review server", 1),
+                )
+            }
+        }
+    }
 
     @Test
     fun ssh_edit_phone_zh() {
@@ -288,7 +310,7 @@ class ScreenshotTest {
         NoopDao(), NoopSecrets(), NoopCookies(), OkHttpClient(),
     )
 
-    private class NoopDao : ProfileDao {
+    private class NoopDao : ProfileDaoFixture {
         override fun observeAll(): Flow<List<Profile>> = flowOf(emptyList())
         override suspend fun getById(id: Long): Profile? = null
         override suspend fun getByAlias(alias: String): Profile? = null

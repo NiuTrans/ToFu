@@ -28,11 +28,45 @@ Invalidating a recovery input removes the size evidence until materialization
 can mint it again. See [execution frames](TOFUDB_EXECUTION_FRAMES.md#recovery-size-evidence-for-large-histories)
 for compatibility, admission checks and the paired large-history regression.
 
+Live projection heads no longer rewrite a full checkpoint for each structural
+event after streamed text: the text tail becomes one small chain patch per tail
+revision (the first carries the text) and only a full chain (64 patches or
+1 MiB) writes a new checkpoint. On the 3.75 MB production-shaped stream this is
+2 instead of 36 checkpoint writes per 180 events and 16 instead of 141 KB of
+WAL per event; superseded heads are reclaimed by the existing retirement and
+GC paths. Committed live-head projections stay resident in memory between
+events (no durable state, no retention setting); `system.metrics.durability`
+`projectionResidentEntries`/`projectionResidentBytes` report their count and
+exact encoded bytes. Decisions: [text tails](STORAGE_TURN_TEXT.md) and
+[residency](TOFUDB_JSON_MATERIALIZATION.md#committed-live-head-residency).
+
 Task event delivery publishes each acknowledged prefix within the existing
 RPC row bound. A refused chunk is bisected without carrying its reduced size
 into unrelated later chunks. This changes neither durable event counts nor
 retention; failed/unknown prefixes retain their original reconciliation rules.
 See [task event delivery](TASK_EVENT_DELIVERY.md).
+
+## Process-bound worker ownership
+
+A local claim replaces the existing owner string with one versioned kernel
+identity. The 2026-11-07 Linux fixture measures 119 UTF-8 bytes against the
+previous 45-byte `tofu-durable:<uuid>` value: 74 additional logical bytes per
+stored occurrence; PID/start-tick widths vary. The 256-character protocol bound
+is unchanged. There is no heartbeat history, process registry or job schema
+migration. Invocation entry witnesses and request receipts retain the same
+identity under their existing lifetimes.
+
+Due claim acquisition now uses the existing command receipt with
+`retain_claim=true`. It retains one acquisition response per successful claim,
+subject to the ordinary command receipt
+retention policy. The empty-payload Linux fixture retains a 665-byte compact
+JSON response per successful claim; receipt keys, framing, indexes and WAL are
+additional, and nonempty job payloads increase this size. Idle horizons and raced empty claims create zero receipt/WAL writes. This is needed
+because a lost ACK must resolve the original process-bound claim instead of
+leaving it owned by a living service indefinitely. Heartbeats remain live CAS
+operations and create no receipt. Cross-authority recovery and lost-ACK
+specifications live in `test_worker_execution_witness.py`; the demand service
+also verifies unique claim identities at one shared clock tick.
 
 ## Durable conversation publication
 
@@ -433,6 +467,120 @@ is bound by catalog capacity instead: its catalog was at the 4,096 ceiling,
 and compaction waits until pressure consolidation brings it below the 75%
 floor, where it previously took any slot below the ceiling, one segment per
 epoch.
+
+### Growth attribution and reclamation, 2026-11-08
+
+Read-only header census of three authority shards (`TDBBLK01` framing plus the
+payload magic at byte 16 of files written in the last 4 h; one shard listing
+takes about 70 s on the FUSE mount) against `system.metrics` and an offline
+decode of CONTROL and the catalog roots:
+
+| written per hour (x256 shards) | share of bytes | what it is |
+|---|---:|---|
+| 74.8 GB `TDBHLP01` history routing pages (4,194,356 B each) | 85.2% | eager routing retirement rewriting ~2,580 of 2,781 pages per automatic slice |
+| 9.0 GB `TDBHIS01` history segments | 10.3% | sealed WAL; real new data, garbage once retired |
+| 2.6 GB `TDBHMF01` history manifests | 2.9% | 17.8 MB manifest re-encoded per publication, 167,184 retained segments |
+| 1.0 GB `TDBCHN01` blob chunks | 1.2% | blob writes (projection checkpoints included) |
+| 0.2 GB `TDBENT01` entity pages | 0.2% (76% of files) | overlay merges |
+
+Total about 88 GB and 127K files per hour (1.9 TiB/day); every online-GC epoch
+since 11-07 reclaimed zero loose blocks, retained history was 167,184 segments
+against a policy of 64, and the 4,096-segment catalog held 1,084 GB with 15 GB
+left below the 256 MiB segment bound. Since then a history slice writes no
+routing page ([lazy routing retirement](TOFUDB_PUBLICATION_LATENCY.md#full-catalog-history-promotion-and-write-delivery-anchors)),
+every confirmed loose victim goes during the scan that confirms it and a
+consolidation plan always fits one segment
+([Loose victims go with their shard](TOFUDB_ONLINE_GC.md#loose-victims-go-with-their-shard-2026-11-08)).
+Measure a change's growth with the load harness's per-phase `growth` section
+(`scripts/tofudb_load_test.py`: GC, history-retention, promotion and packer
+counters beside `write_bytes_per_change`) and live with the same census on two
+or three shards plus `retainedHistorySegments` and `total_reclaimed_blocks`.
+
+Before/after with the shipped combination (2026-11-09: the same harness at 3x
+for 600 s on identical seed copies, the engine with and without these changes,
+both with the live-head residency of the same release). On local disk, run as a
+simultaneous pair: net store growth per event 194 -> 132 KB (-32%), loose store
+at the end 3.63 -> 1.93 GB, routing pages written and still present 839 -> 176 MB,
+and loose victims reclaimed 0 -> 780 blocks (the older collector reclaimed none,
+as it did live). On tmpfs, two pairs in both orders: net growth -7% and -13%,
+loose store -35% and -52%, routing pages left -66% and -79%; there the older
+collector is not starved and reclaims as much. Engine bytes written per event
+are unchanged (409 and 404 KB); the routing table in this harness is 18 pages
+against 2,781 live, so the live saving per slice is far larger.
+
+## Engine rollback across routing-root version 2
+
+Engines from 2026-11-08 retire history lazily, and the first automatic
+history-compaction slice they run publishes routing-root version 2
+([downgrade boundary](TOFUDB_PUBLICATION_LATENCY.md#full-catalog-history-promotion-and-write-delivery-anchors)).
+Older engines (the certified 2c0532f8 build, production's e899376a) refuse that
+root at open: the daemon exits with `history routing root header mismatch`
+(`database_integrity`) and Tofu cannot start. On the live store the first slice
+runs in the first maintenance round after boot (167,184 retained history
+segments against a policy of 64), so a plain binary rollback works only in the
+first minutes after a deploy. After that, roll back like this:
+
+1. Stop Tofu and keep it stopped: `python3 serverctl.py stop` (it asks for
+   confirmation). `python3 serverctl.py status` shows it stopped and
+   `ps -eo pid,args | grep '[t]ofu-db serve'` lists no daemon on
+   `data/tofudb-authority`. The converter takes the authority's `LOCK` lease and
+   fails with `another tofu-db process owns the data directory` while a daemon on
+   this host holds it.
+2. Use the deployed binary, `packages/tofu-db/target/certified/tofu-db` (its
+   `--build-info` `source_sha256` is the deployed engine), before preparing the
+   older revision replaces it. Call it `NEW`; an older binary cannot open the
+   store to convert it.
+3. `NEW rewrite-history-routing --data-dir data/tofudb-authority` reports the
+   root without writing. `version_before=1` or `none`: no slice ran, go to 5.
+4. `NEW rewrite-history-routing --data-dir data/tofudb-authority --execute`
+   prints `rewritten=true version_after=1` and the entries and pages before and
+   after; set `TOFU_DB_AT_REST_KEY` as the daemon does if the authority is
+   encrypted. It retires nothing: it reads every routing page once and writes the
+   retained locations once (live 2026-11-08: 2,781 pages, about 11.6 GB, so about
+   the cost of one automatic slice of the older engine, which took minutes), with
+   one decoded page per routing run in memory, after the ordinary open (WAL
+   recovery and overlay replay). An error or crash leaves the version-2 root or
+   the new version-1 root, never another; run it again.
+5. Optional, with the older binary `OLD`: `OLD inspect --data-dir
+   data/tofudb-authority` prints `format=tofu-db.v1 ...` instead of the mismatch;
+   `OLD verify --data-dir data/tofudb-authority` is the full read-only walk.
+6. Check out the older revision and `python3 serverctl.py start`: preparation
+   builds and certifies its engine, which opens the converted authority. The
+   search projection (`data/projections/tofudb-search`) runs no history
+   compaction and needs no conversion (step 3 on it reports `none` or `1`).
+
+What stays impossible, and when:
+- Once a slice has run, no older engine opens the authority until step 4 has
+  run. Converting needs the new binary and a stopped authority; a running new
+  engine marks the root again at its next slice, so the conversion is the last
+  step before the older engine starts.
+- Native backups taken after the first slice hold version-2 roots: restore them,
+  then run step 4, before an older engine opens them.
+- After the rollback the older engine behaves as before the deploy: eager
+  routing retirement (about 10.8 GB of routing pages per slice live), online GC
+  epochs that reclaimed no loose victims, about 88 GB/h of loose writes
+  (2026-11-08). New events it records turn the note kinds `context-injection`,
+  `session-context` and `deliberate-silence` into `system-intervention`
+  (display only).
+- Rolling forward again needs nothing: current engines open versions 1 and 2.
+- The routing root is the only format such an older engine refuses: it reads
+  closed text-tail chains and packed reference spills unchanged (cross-engine
+  comparisons of 2026-11-09 found 0 differences).
+
+Specifications: `engine::tests::history_retirement::{routing_rewrite_publishes_a_root_engines_before_lazy_retirement_open,
+every_routing_rewrite_fault_recovers_the_lazy_or_the_rewritten_root}` and
+`history_payload::tests::retain_sources_writes_one_run_with_the_answers_of_a_pairwise_merge`.
+Rehearsal (2026-11-09, isolated copies of the load-harness seed, combined engine
+05627a75 against the certified 2c0532f8 binary): after 300 s at 3x the root was
+version 2 (826,639 entries, 18 pages) and 2c0532f8 refused the authority. The
+conversion took 1.7 s (7.7 s with the open) and left 705,628 entries in 13
+pages. 2c0532f8 then opened it, `verify` found no missing block, and it read 160
+conversations as the combined engine read the unconverted copy (807,932 leaves;
+one event page was cut earlier by a request deadline, and paging returned the
+same events). It then ran the harness for 180 s, including its own history
+slice, without an error, verified again, and the combined engine read the
+continued store identically (999,990 leaves). Repeat the rehearsal against the
+previous certified binary whenever the routing-root encoding changes.
 
 ## Native hot-cache residency
 
@@ -1334,7 +1482,14 @@ listener connection/frame counters, maintenance and background-packer
 counters, fixed durability counters, nonzero commit-stage totals, and the
 launch `resourceBudget`. They answer from observer handles without the
 authority mutex, so they stay responsive under commit load. Client-side, both
-backends feed the same `tofu_storage_rpc_seconds` Prometheus histogram. A
+backends feed the same `tofu_storage_rpc_seconds` Prometheus histogram, one per
+client process. The resident execution host issues most task-path calls but
+has no HTTP listener, so the API host's `/metrics` reads its histogram on each
+scrape through the private execution control's `storage_rpc_metrics` owner
+method (`contracts/command_control_v1.json`) and exports it as
+`tofu_execution_storage_rpc_seconds` with the same labels and buckets, beside
+the API's own family; `tofu_execution_metrics_available` is 0 when that
+incarnation did not confirm, so a missing read is never a zero histogram. A
 healthy native deployment should alert on `ready` flipping false, growth in
 listener rejected/failed connections, failed maintenance or packer rounds,
 and checkpoint counters stalling while commits advance.
@@ -1703,6 +1858,51 @@ replicated durable sequence, copied bytes and local free space. These are
 reconstructible recovery-transfer artifacts; retention never deletes the local
 authority or retained source seed. Measurements must use disposable authorities
 and report foreground latency separately from copy/restore work.
+
+## Native authority placement
+
+The native authority (CONTROL, WAL, blocks and segments), its search
+projection and the native backup stay on the data volume. On this host that is
+DolphinFS: the local volumes are slower for every durable write and cold read
+and do not survive CodeLab pause/restart
+([measurements](TOFUDB_FASTPATH.md#automatic-selection-and-capacity-governance-2026-10-27)).
+Re-evaluate only when a new local volume appears, in this order, stopping at
+the first failure:
+
+1. Persistence. The volume must keep its contents across application and
+   container restarts, CodeLab pause/restart (which moves the pod to another
+   node) and image re-pulls. The system temporary directory is emptied at
+   boot, and node-local mounts such as `/opt/yourprovider/appdatas` do not follow a
+   rescheduled pod even though the mount table reports a local block
+   filesystem.
+2. Medium. From a shell that carries the production `LD_PRELOAD` and
+   `LIBBGFS_*` environment, run `python3 benchmarks/storage_medium_probe.py
+   <scratch-dir>` on the candidate and on DolphinFS in alternating rounds.
+   Then restore a backup into a disposable authority on DolphinFS and run
+   `tofu-db serve --data-dir <copy> --owner-id <id> --fastpath-dir <base>
+   --fastpath-admission required`; a `speedup-insufficient` refusal ends the
+   evaluation.
+3. Capacity. Bytes and inodes for twice the census in
+   `data/native-fastpath-auto.json`, plus growth.
+4. Rehearsal on a disposable copy, never the live authority: `tofu-db backup`,
+   `tofu-db restore` onto the candidate, `tofu-db verify` (same verdict,
+   durable sequence and page/semantic/history counters), identical client
+   read digests of every conversation and record, latency before and after,
+   then `tofu-db backup` of the copy and `tofu-db restore` back onto DolphinFS,
+   verifying and comparing again including the writes made while relocated.
+   Restore publishes one file per block with a file and a directory fsync;
+   time it on the candidate before planning a window.
+5. Activation is an owner-approved restart: set `TOFU_LOCAL_DIR` to the base
+   and restart from the update page. Readiness must report `nativeFastpath`
+   and `system.metrics.onlineBackup` must complete epochs. Rollback is the
+   stopped-server `tofu-db fastpath-export`, never removing the setting.
+
+Known blocker (engine as of 2026-11-08): explicit first activation with a
+search projection directory, which the supervisor always passes, exits before
+admission with a bare "No such file or directory", because
+`validate_projection_path` in `packages/tofu-db/src/daemon.rs` canonicalizes
+the front directory that native restore has not created yet. Fix it before any
+activation.
 
 ## Health session establishment failures
 

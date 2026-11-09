@@ -44,6 +44,8 @@ class CompactionSources:
     dispatch_target: int | None
     summary_output_budget: int | None
     continuity_handoff: dict | None = None
+    # Oldest observation keys the narrative carries instead of the packet.
+    continuity_fold: frozenset = frozenset()
 
 
 def plan_compaction_sources(
@@ -59,6 +61,7 @@ def plan_compaction_sources(
     originals = {id(projected): original
                  for projected, original in zip(messages, source_messages)}
     msg_count_before = len(messages)
+    preserve_allowance = budget_tokens
     boundary, recent_messages, cold_round_msgs = ports.plan_tail(
         messages, budget_tokens=budget_tokens, max_turns=max_turns)
 
@@ -112,9 +115,12 @@ def plan_compaction_sources(
         folded_ids = {id(m) for m in selected + cold_round_msgs + folded_handoffs}
         return [originals[id(m)] for m in messages if id(m) in folded_ids]
 
-    from lib.tasks_pkg.compaction._continuity import build_continuity, render_continuity
+    from lib.tasks_pkg.compaction._continuity import (
+        build_continuity, fold_continuity, render_continuity)
+    folded_observations = frozenset()
     def continuity_reserve():
-        return render_continuity(build_continuity(selected_sources(), task))
+        return render_continuity(fold_continuity(
+            build_continuity(selected_sources(), task), folded_observations))
 
     try:
         continuity = continuity_reserve()
@@ -146,6 +152,7 @@ def plan_compaction_sources(
             reserved_tokens = retained_tokens + summary_output_budget
             if reserved_tokens <= dispatch_target:
                 break
+            next_budget = max(1, budget_tokens // 2)
             if budget_tokens <= 1:
                 # Preferred transport allowance is not required state. At the
                 # smallest whole-unit tail, use the remaining room when the
@@ -158,14 +165,23 @@ def plan_compaction_sources(
                         summary_output_budget, available_summary_tokens)
                     reserved_tokens = retained_tokens + summary_output_budget
                     break
-                if isinstance(result_meta, dict):
-                    result_meta.update(compacted=False,
-                        summaryFailureReason='irreducible_prompt_floor',
-                        plannedPromptTokens=reserved_tokens,
-                        targetPromptTokens=dispatch_target)
-                return ('Context compaction refused before summary: required '
-                        'execution state and summary output cannot fit. Messages preserved as-is.')
-            budget_tokens = max(1, budget_tokens // 2)
+                # Folded state only grows; refusing here would end the
+                # conversation for good. The oldest observations move to the
+                # narrative so the newest fit the preservation allowance the
+                # verbatim tail uses, and the tail is planned again under it.
+                fold = frozenset() if folded_observations else _fold_unfit_continuity(
+                    build_continuity(selected_sources(), task), preserve_allowance,
+                    result_meta=result_meta, log_prefix=log_prefix)
+                if not fold:
+                    if isinstance(result_meta, dict):
+                        result_meta.update(compacted=False,
+                            summaryFailureReason='irreducible_prompt_floor',
+                            plannedPromptTokens=reserved_tokens,
+                            targetPromptTokens=dispatch_target)
+                    return ('Context compaction refused before summary: required '
+                            'execution state and summary output cannot fit. Messages preserved as-is.')
+                folded_observations, next_budget = fold, preserve_allowance
+            budget_tokens = next_budget
             boundary, recent_messages, cold_round_msgs = ports.plan_tail(
                 messages, budget_tokens=budget_tokens, max_turns=max_turns)
             recent_messages, cold_round_msgs = protect_skill_tail(recent_messages, cold_round_msgs)
@@ -192,4 +208,22 @@ def plan_compaction_sources(
         # Economic preflight is an optimistic floor: the packet is required;
         # recent-file/turn-diff decorations remain optional.
         continuity_handoff=make_compaction_handoff(continuity, phase=handoff_phase),
+        continuity_fold=folded_observations,
     )
+
+
+def _fold_unfit_continuity(state: dict, allowance: int, *, result_meta, log_prefix: str) -> frozenset:
+    """Oldest observation keys to fold so the packet fits ``allowance`` tokens."""
+    from lib.tasks_pkg.compaction._continuity import observations_to_fold, render_continuity
+    from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
+    fold = observations_to_fold(state, lambda candidate: _estimate_msg_tokens(
+        {'role': 'user', 'content': render_continuity(candidate)}) <= allowance)
+    if fold:
+        if isinstance(result_meta, dict):
+            result_meta['continuityFoldedObservations'] = len(fold)
+        logger.warning(
+            '%s [Compact] Continuity packet of %d observations cannot fit beside the '
+            'smallest execution tail; folding the oldest %d into the narrative so the '
+            'newest fit the %d-token preservation allowance',
+            log_prefix, len(state['observations']), len(fold), allowance)
+    return fold

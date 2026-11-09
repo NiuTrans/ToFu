@@ -135,7 +135,7 @@ from lib.task_replay.task_event_contract import (
     TASK_EVENT_STREAMING_RETENTION_MS,
     TASK_EVENT_STRUCTURAL_RETENTION_MS,
 )
-from lib.storage.storage_projection import project_event_usage_for_storage
+from lib.task_replay.persistence_projection import project_event_usage_for_storage
 
 # Tables whose row counts must match between the old and the compacted
 # authority.  These are the user-visible authorities; transport tables

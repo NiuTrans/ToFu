@@ -22,6 +22,7 @@ visible, while the canonical checkout keeps its ordinary semantics.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -85,21 +86,39 @@ def _data_workspace_root() -> Path:
 
 
 def _local_workspace_root(placement_root: str | Path) -> Path:
-    # One namespace per data root: deployments sharing a user state
-    # directory never see each other's checkouts.
-    namespace = hashlib.sha256(
-        str(Path(data_root()).resolve()).encode('utf-8')).hexdigest()[:12]
-    return Path(placement_root) / namespace
+    from serverctl_pkg.local_placement import workspace_namespace
+    return Path(placement_root) / workspace_namespace(data_root())
+
+
+def _local_workspace_roots() -> list[Path]:
+    """Every local root this data root's checkouts may live under, whatever placement chose."""
+    from serverctl_pkg.local_placement import local_workspace_roots
+    return [root.resolve() for root in local_workspace_roots(data_root())]
+
+
+def _is_local_checkout(path: str | Path) -> bool:
+    """Whether PATH is a checkout placed on a local volume rather than the data root.
+
+    Such a checkout is durable through Git, like a lane: it is locked against
+    pruning by hosts that cannot see its volume, its work in progress is saved
+    at its WIP ref, and binding restores it when it is missing.
+    """
+    resolved = Path(path).resolve()
+    return any(resolved.is_relative_to(root) and resolved != root
+               for root in _local_workspace_roots())
 
 
 def _placed_workspace_root() -> Path:
-    """Data-dir checkouts, or an operator-approved faster private local volume.
+    """Data-root checkouts, or an operator-approved private local volume.
 
     Decided once per process and environment by the shared placement policy
     (``serverctl_pkg.local_placement``). Off unless ``TOFU_LOCAL_WORKSPACES``
-    opts in: ``auto`` relocates only from a slow volume onto a provably
-    persistent local disk; ``on`` also accepts container overlays whose
-    persistence cannot be proven.
+    opts in: Git rebuilds a local checkout (WIP saves, restoration at binding,
+    worktree locks), but not the FileHistory undo history it holds, which also
+    keeps it from being reclaimed. ``on`` accepts any private local volume
+    other than the data volume, container overlays included; ``auto`` also
+    requires it to be decisively faster. Whether one checkout fits is decided
+    per checkout (``_checkout_root``).
     """
     default = _data_workspace_root()
     key = (str(default), *(os.environ.get(name, '') for name in _PLACEMENT_ENV_KEYS))
@@ -130,10 +149,61 @@ def _controlled_workspace_roots() -> list[Path]:
     Placement can change between launches (policy, free space, volume speed);
     checkouts created under an earlier choice must stay removable.
     """
-    from serverctl_pkg.local_placement import PURPOSE_WORKSPACES, candidate_roots
-    roots = [_workspace_root(), _data_workspace_root()]
-    roots += [_local_workspace_root(root) for root in candidate_roots(PURPOSE_WORKSPACES)]
+    roots = [_workspace_root(), _data_workspace_root(), *_local_workspace_roots()]
     return list(dict.fromkeys(root.resolve() for root in roots))
+
+
+def _placed_local_root() -> Path | None:
+    """The local root new checkouts are placed in, or None when they use the data root."""
+    if os.environ.get('TOFU_INTEGRATION_WORKSPACE_DIR', '').strip():
+        return None
+    root = _placed_workspace_root()
+    return None if root == _data_workspace_root() else root
+
+
+def _checkout_estimate(root: Path, revision: str) -> tuple[int, int]:
+    """Bytes and inodes a checkout of REVISION writes: its files and their directories."""
+    if not _rev(root, revision + '^{tree}'):
+        return 0, 0  # An unborn branch: the snapshot holds only working files.
+    listing = _git(root, ['ls-tree', '-r', '-l', '-z', '--full-tree', revision], check=True,
+                   stall_seconds=GIT_STALL_SECONDS).stdout
+    size, files, directories = 0, 0, set()
+    for entry in listing.split('\0'):
+        meta, _tab, path = entry.partition('\t')
+        if not path:
+            continue
+        fields = meta.split()
+        size += int(fields[3]) if fields[3].isdigit() else 0
+        files += 1
+        parent = os.path.dirname(path)
+        while parent and parent not in directories:
+            directories.add(parent)
+            parent = os.path.dirname(parent)
+    return size, files + len(directories)
+
+
+def _checkout_root(root: Path, revision: str) -> Path:
+    """The workspace root for a new checkout of REVISION.
+
+    A placed local root is used only when its volume holds the checkout above
+    the placement reserve. That is a correctness condition, not a preference:
+    a checkout that does not fit goes to the data root instead of failing its
+    task. The estimate is REVISION's file bytes and file plus directory count.
+    """
+    local = _placed_local_root()
+    if local is None:
+        return _workspace_root()
+    size, inodes = _checkout_estimate(root, revision)
+    from serverctl_pkg import local_placement
+    if local_placement.has_free_space(local, size, required_inodes=inodes):
+        local.mkdir(parents=True, exist_ok=True)
+        return local
+    fallback = _data_workspace_root()
+    logger.warning('[Integration] local checkout root %s cannot hold %s of %s (%d bytes, '
+                   '%d inodes); using the data root %s', local, revision, root, size, inodes,
+                   fallback)
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def _git(cwd: str | Path, args: list[str], *, env: dict[str, str] | None = None,
@@ -199,8 +269,15 @@ def _run_stall_supervised_git(argv: list[str], command: str, cwd: str | Path,
         raise IntegrationError(f'git {command} failed: {exc}') from exc
 
 
-def _materialize_worktree(root: Path, destination: Path, revision: str, *, cancel=None):
-    """Create only a not-yet-owned checkout; never replay a failed Git write."""
+def _materialize_worktree(root: Path, destination: Path, revision: str, *, cancel=None,
+                          replace_missing: bool = False):
+    """Create only a not-yet-owned checkout; never replay a failed Git write.
+
+    A checkout on a local volume is created locked: another host, which cannot
+    see that volume, would otherwise unregister it with any ``worktree prune``.
+    ``replace_missing`` rebuilds a registered checkout whose directory is gone;
+    Git then replaces that path's stale (and possibly locked) registration.
+    """
     from lib.project_mod.worktree_process import run_worktree_add
 
     from lib.project_mod.worktree_checkout_policy import checkout_worker_config
@@ -212,9 +289,13 @@ def _materialize_worktree(root: Path, destination: Path, revision: str, *, cance
         # Old Git lacks worktree-add --progress. Metadata-only creation plus
         # explicit checkout provides progress on both legacy and modern Git.
         # --force is safe ONLY here: this fresh checkout has no writer/row yet.
+        register = ['worktree', 'add', '--no-checkout', '--detach']
+        if replace_missing:
+            register += ['--force', '--force']
+        if _is_local_checkout(destination):
+            register.append('--lock')
         for cwd, args in [
-            (root, ['worktree', 'add', '--no-checkout', '--detach',
-                    str(destination), revision]),
+            (root, [*register, str(destination), revision]),
             (destination, ['checkout', '--force', '--detach', '--progress', revision]),
         ]:
             # Only registration changes shared Git metadata. Populating a
@@ -294,6 +375,19 @@ def _require_user_id(user_id: int) -> int:
 
 def _checkpoint_ref(user_id: int, task_id: str) -> str:
     return f'{_REF_ROOT}/checkpoints/u{user_id}/{_safe_task(task_id)}'
+
+
+def _input_ref(user_id: int, task_id: str) -> str:
+    return f'{_REF_ROOT}/inputs/u{user_id}/{_safe_task(task_id)}'
+
+
+def _wip_ref(user_id: int, task_id: str) -> str:
+    return f'{_REF_ROOT}/workspace-wip/u{user_id}/{_safe_task(task_id)}'
+
+
+def _lost_head_ref(user_id: int, task_id: str) -> str:
+    # A safe task name always ends in hex digits, so this never names a task's WIP ref.
+    return f'{_wip_ref(user_id, task_id)}.lost-head'
 
 
 def _quarantine_ref(user_id: int, task_id: str) -> str:
@@ -515,9 +609,7 @@ def create_workspace(project_path: str, task_id: str,
     task_id = str(task_id or '').strip()
     if not task_id:
         raise IntegrationError('workId is required')
-    repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
-    destination = (
-        _workspace_root() / repo_key / f'u{owner_user_id}' / _safe_task(task_id))
+    destination = _task_destination(root, owner_user_id, task_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with _destination_lock(destination):
         if destination.exists():
@@ -545,6 +637,27 @@ def create_workspace(project_path: str, task_id: str,
             raise
 
 
+def _start_storage(task, operation, *, label: str, effect_free: bool = False):
+    """Run one start-path state operation; a task waits out transient refusals.
+
+    The persistence-wait contract retains the exact operation until ACK, owner
+    Stop or server shutdown, with no count or deadline of its own. Integration
+    commands carry a payload-derived command ID, so a replay after an uncertain
+    ACK returns the recorded outcome. A start no longer fails because the
+    authority was briefly over its deadline (2026-11-06 18:03, 746148a3).
+    """
+    if task is None:
+        return operation()
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    from lib.llm.llm_errors import AbortedError
+    try:
+        return wait_for_persistence(task, operation, label=label, effect_free=effect_free)
+    except AbortedError as cancelled:
+        # Workspace admission reports the task's Stop, not the storage wait's,
+        # and callers treat AbortedError as a cooperative cancellation.
+        raise AbortedError('Task cancelled during workspace admission') from cancelled
+
+
 def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
                           conversation_id: str = '', title: str = '', task=None) -> dict:
     """Freeze current input without changing canonical bytes, index or HEAD.
@@ -558,22 +671,22 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
     task_id = str(task_id or '').strip()
     if not task_id:
         raise IntegrationError('workId is required')
-    repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
-    destination = _workspace_root() / repo_key / f'u{owner}' / _safe_task(task_id)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     from lib.project_mod.tool_admission import Cancellation
     cancel = Cancellation(task)
+    lookup = functools.partial(_state.find_workspace, str(root), task_id, user_id=owner)
     # Lost ACK / idempotent admission must not resnapshot a now-moving source.
-    existing = _state.find_workspace(str(root), task_id, user_id=owner)
+    existing = _start_storage(task, lookup, label='workspace lookup', effect_free=True)
     if existing is not None:
         return {'workspacePath': existing['workspace_path'], 'workId': task_id}
+    destination = _task_destination(root, owner, task_id)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     # Resolve the selected ref itself: a later HEAD switch cannot pair the
     # original branch with a different branch's commit. These are provenance,
     # not mutable prerequisites for reading an immutable input tree.
     with _destination_lock(destination, cancel=cancel):
         if cancel.is_set():
             raise IntegrationError('Task cancelled before workspace admission')
-        existing = _state.find_workspace(str(root), task_id, user_id=owner)
+        existing = _start_storage(task, lookup, label='workspace lookup', effect_free=True)
         if existing is not None:
             return {'workspacePath': existing['workspace_path'], 'workId': task_id}
         if destination.exists():
@@ -585,7 +698,7 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
         with measure_task_startup('workspace_snapshot', identity=identity):
             snapshot, head = _task_input_checkpoint(
                 root, head, task_id + ' input', cancel, source_ref=branch)
-        input_ref = f'{_REF_ROOT}/inputs/u{owner}/{_safe_task(task_id)}'
+        input_ref = _input_ref(owner, task_id)
         with _repo_lock(str(root), cancel=cancel):
             _git(root, ['update-ref', input_ref, snapshot, _rev(root, input_ref)], check=True)
         try:
@@ -594,16 +707,19 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
             if cancel.is_set():
                 raise IntegrationError('Task cancelled during workspace admission')
             from lib.project_dispatch.publication import workspace_origin
+            # One frozen payload: each replay carries the same command ID.
+            register = functools.partial(
+                _state.register_workspace,
+                project_root=str(root), task_id=task_id,
+                workspace_path=str(destination), title=title or task_id,
+                managed=True, base_sha=snapshot, user_id=owner, now=_now(),
+                origin={'conversationId': conversation_id,
+                    'inputBaseSha': snapshot, 'inputHeadSha': head,
+                    'channel': 'task-runtime', 'executionMode': 'isolated-task',
+                    'sourceHead': head, 'sourceSnapshot': snapshot, 'sourceRef': branch,
+                    **workspace_origin(task)})
             with measure_task_startup('workspace_registration', identity=identity):
-                _state.register_workspace(
-                    project_root=str(root), task_id=task_id,
-                    workspace_path=str(destination), title=title or task_id,
-                    managed=True, base_sha=snapshot, user_id=owner, now=_now(),
-                    origin={'conversationId': conversation_id,
-                        'inputBaseSha': snapshot, 'inputHeadSha': head,
-                        'channel': 'task-runtime', 'executionMode': 'isolated-task',
-                        'sourceHead': head, 'sourceSnapshot': snapshot, 'sourceRef': branch,
-                        **workspace_origin(task)})
+                _start_storage(task, register, label='workspace registration')
 
             return {'workspacePath': str(destination), 'workId': task_id}
         except BaseException:
@@ -617,6 +733,163 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
             if acknowledged is None:
                 _rollback_unowned_worktree(root, destination)
             raise
+
+
+def _task_destination(root: Path, owner: int, task_id: str) -> Path:
+    """Where a new managed checkout of ROOT goes for OWNER's TASK_ID."""
+    repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
+    return _checkout_root(root, 'HEAD') / repo_key / f'u{owner}' / _safe_task(task_id)
+
+
+_INTEGRATION_IDENTITY = {
+    'GIT_AUTHOR_NAME': 'Tofu Integration', 'GIT_AUTHOR_EMAIL': 'integration@tofu.local',
+    'GIT_COMMITTER_NAME': 'Tofu Integration', 'GIT_COMMITTER_EMAIL': 'integration@tofu.local',
+}
+_WIP_CHECKPOINT_TRAILER = 'Tofu-Checkpoint: '
+
+
+def save_workspace_wip(project_path: str, task_id: str, *, user_id: int) -> str:
+    """Save a local task checkout's current bytes at its WIP ref; '' when none applies.
+
+    A checkout on a local volume, whose persistence is unproven, keeps its work
+    in progress in Git as a lane does: one commit on the checkout's HEAD that
+    holds every tracked and nonignored untracked file, captured through a
+    private index (``lanes.capture_working_tree``). The checkout's HEAD, index
+    and files are never written, and the commit is not publication authority.
+    It names the checkpoint it saw, so restoration can tell whether a later
+    checkpoint is newer. A save that finishes after a newer one is dropped.
+    Checkouts on the data volume persist with it and are not saved.
+    """
+    owner = _require_user_id(user_id)
+    root = _repo_root(project_path)
+    task_id = str(task_id or '').strip()
+    row = _state.find_workspace(str(root), task_id, user_id=owner)
+    if row is None or not row.get('managed'):
+        return ''
+    workspace = Path(row['workspace_path'])
+    if not _is_local_checkout(workspace) or not (workspace / '.git').is_file():
+        return ''
+    ref = _wip_ref(owner, task_id)
+    previous = _rev(root, ref)
+    checkpoint = _rev(root, _checkpoint_ref(owner, task_id))
+    from lib.project_mod.lanes import capture_working_tree
+    head, tree = capture_working_tree(workspace)
+    commit = _git(workspace, ['commit-tree', tree, '-p', head,
+                              '-m', f'Tofu work in progress: {task_id}',
+                              '-m', f'{_WIP_CHECKPOINT_TRAILER}{checkpoint or "none"}'],
+                  env=_INTEGRATION_IDENTITY, check=True).stdout.strip()
+    if _git(root, ['update-ref', ref, commit, previous]).returncode:
+        logger.info('[Integration] a newer work-in-progress save won task=%s ref=%s', task_id, ref)
+        return ''
+    return commit
+
+
+def _restoration_source(root: Path, row: Mapping[str, Any], owner: int,
+                        task_id: str) -> tuple[str, str, str]:
+    """(kind, HEAD, saved commit) of the newest state Git holds for a lost checkout.
+
+    A WIP save names the checkpoint it saw, so a checkpoint captured after the
+    save is newer and wins. A checkpoint is replayed over the registered base:
+    the HEAD a checkpoint is taken on unless a repair re-anchored it, and a
+    re-anchor records its new base.
+    """
+    checkpoint = _rev(root, _checkpoint_ref(owner, task_id))
+    wip = _rev(root, _wip_ref(owner, task_id))
+    if wip:
+        message = _git(root, ['cat-file', 'commit', wip], check=True).stdout
+        seen = [line[len(_WIP_CHECKPOINT_TRAILER):].strip() for line in message.splitlines()
+                if line.startswith(_WIP_CHECKPOINT_TRAILER)]
+        head = _rev(root, wip + '^')
+        if seen == [checkpoint or 'none'] and head:
+            return 'wip', head, wip
+    base = str(row.get('base_sha') or '')
+    if checkpoint:
+        return 'checkpoint', base or _rev(root, checkpoint + '^') or checkpoint, checkpoint
+    saved = _rev(root, _input_ref(owner, task_id)) or base
+    if not saved:
+        raise IntegrationError('Git holds no saved state for the missing checkout')
+    return 'input', saved, saved
+
+
+def _registration_of(root: Path, destination: Path) -> dict[str, Any] | None:
+    """The registration Git still holds for DESTINATION, as ``worktree list`` reports it."""
+    for item in _worktree_inventory(root):
+        if item['path'] and Path(item['path']).resolve() == destination.resolve():
+            return item
+    return None
+
+
+def restore_task_workspace(project_path: str, task_id: str, *, user_id: int,
+                           task=None) -> dict[str, Any] | None:
+    """Rebuild a registered managed checkout whose directory is gone, at its registered path.
+
+    Registration stays authoritative, so the checkout returns where its row
+    says, in the newest state Git holds (``_restoration_source``): it is
+    created at that state's HEAD, the saved bytes are applied with
+    ``read-tree -m -u`` as ``lanes.restore_lane`` does, and the index is reset
+    to HEAD, so saved edits are uncommitted again and untracked files
+    untracked. Files Git never held (ignored outputs, dependency bridges,
+    FileHistory undo snapshots) do not return; binding re-links shared data
+    and runtime bridges are prepared again on demand. A detached HEAD that the
+    lost checkout had committed past its save is kept at a ``.lost-head`` ref.
+    Returns the restoration receipt, or None when there is nothing to restore.
+    """
+    owner = _require_user_id(user_id)
+    root = _repo_root(project_path)
+    task_id = str(task_id or '').strip()
+    from lib.project_mod.tool_admission import Cancellation
+    cancel = Cancellation(task)
+    lookup = functools.partial(_state.find_workspace, str(root), task_id, user_id=owner)
+    row = _start_storage(task, lookup, label='workspace lookup', effect_free=True)
+    if row is None or not row.get('managed'):
+        return None
+    destination = Path(row['workspace_path'])
+    with _destination_lock(destination, cancel=cancel):
+        if os.path.lexists(destination):
+            return None
+        kind, head, saved = _restoration_source(root, row, owner, task_id)
+        stale = _registration_of(root, destination)
+        size, inodes = _checkout_estimate(root, saved)
+        from serverctl_pkg import local_placement
+        if not local_placement.has_free_space(destination.parent, size, required_inodes=inodes):
+            raise IntegrationError(
+                f'The volume of {destination} cannot hold the restored checkout '
+                f'({size} bytes, {inodes} inodes) above its free-space reserve')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with measure_task_startup('workspace_materialize',
+                                      identity={'task_id': task_id, 'user_id': owner}):
+                _materialize_worktree(root, destination, head, cancel=cancel,
+                                      replace_missing=True)
+                if saved != head:
+                    for args in (['read-tree', '-m', '-u', head, saved], ['reset', '-q']):
+                        _git(destination, args, check=True, cancel=cancel,
+                             stall_seconds=GIT_STALL_SECONDS)
+        except BaseException:
+            _rollback_unowned_worktree(root, destination)
+            raise
+        lost = ''
+        if (stale and stale['detached'] and stale['head'] not in ('', head)
+                and _git(root, ['merge-base', '--is-ancestor', stale['head'],
+                                saved]).returncode == 1):
+            lost = stale['head']
+            if _git(root, ['update-ref', _lost_head_ref(owner, task_id), lost]).returncode:
+                logger.warning('[Integration] lost checkout HEAD %s left unpinned task=%s',
+                               lost, task_id)
+    receipt = {'workspacePath': str(destination), 'source': kind, 'sourceSha': saved,
+               'head': head, 'lostHead': lost}
+    logger.warning('[Integration] restored missing task checkout task=%s path=%s source=%s '
+                   'sha=%s head=%s lost_head=%s', task_id, destination, kind, saved, head,
+                   lost or '-')
+    try:
+        _record_event(str(root), task_id, 'workspace_restored',
+                      f'Restored missing checkout {destination} from {kind} {_short(saved)}',
+                      receipt, user_id=owner)
+    except Exception as error:
+        logger.warning('[Integration] workspace_restored event not recorded task=%s: %s',
+                       task_id, error)
+    _push(str(root), user_id=owner)
+    return receipt
 
 
 def _merge_tree_lacks_write_tree(cp: subprocess.CompletedProcess[str]) -> bool:
@@ -972,21 +1245,83 @@ def discard_workspace(
 ) -> dict[str, Any]:
     """Human discard — the terminal park for a row the queue must skip.
 
-    The Git refs (checkpoint / quarantine) and the worktree directory are
-    deliberately kept: discard is a queue decision, not data destruction.
+    The Git refs (checkpoint / quarantine) are deliberately kept: discard is a
+    queue decision, not data destruction. A checkout on the data volume keeps
+    its directory. A checkout on a local volume, which Tofu must be able to
+    reclaim, is removed once Git holds everything in it
+    (``_retire_discarded_checkout``).
     """
     owner_user_id = _require_user_id(user_id)
     root = _repo_root(project_path)
     now = _now()
+    registered = _state.find_workspace(str(root), task_id, user_id=owner_user_id)
+    # Admit the checkout the row names, not a path rebuilt from today's
+    # placement. Unregistered, a creation of this task may be in flight there.
+    destination = (Path(registered['workspace_path']) if registered is not None
+                   else _task_destination(root, owner_user_id, task_id))
     # Revocation and publication use the same cross-process admission. A
     # discard cannot land between the final checkpoint fence and git apply.
-    repo_key = hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:12]
-    destination = _workspace_root() / repo_key / f'u{owner_user_id}' / _safe_task(task_id)
-    with _destination_lock(destination), _repo_lock(str(root)):
-        _state.discard_workspace(
-            user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
+    with _destination_lock(destination):
+        with _repo_lock(str(root)):
+            _state.discard_workspace(
+                user_id=owner_user_id, project_root=str(root), task_id=task_id, now=now)
+        _retire_discarded_checkout(root, task_id, owner_user_id, admitted=destination)
     _push(str(root), user_id=owner_user_id)
     return {'ok': True, 'workId': task_id, 'state': 'discarded'}
+
+
+def retire_discarded_checkout(project_path: str, task_id: str, *, user_id: int) -> str:
+    """Remove a discarded local checkout whose last attempt has settled."""
+    owner = _require_user_id(user_id)
+    return _retire_discarded_checkout(_repo_root(project_path), task_id, owner)
+
+
+def _retire_discarded_checkout(root: Path, task_id: str, owner: int, *,
+                               admitted: Path | None = None) -> str:
+    """Remove a discarded checkout from its local volume once Git holds all it contains.
+
+    Its work in progress is saved first; the checkout goes only when that
+    commit and rebuildable files account for everything in it
+    (``task_delta_delivery.checkout_reconstructible``): FileHistory undo
+    history, other durable ignored files or a third staged version keep it.
+    An attempt still working in it keeps it too; that attempt's settlement
+    retires it. Removal unlocks and unregisters it. ``admitted`` is the
+    registered path whose destination admission the caller already holds.
+    Returns ``removed``, ``kept``, or '' when nothing applies.
+    """
+    row = _state.find_workspace(str(root), task_id, user_id=owner)
+    if row is None or row['state'] != 'discarded' or not row.get('managed'):
+        return ''
+    workspace = Path(row['workspace_path'])
+    if not _is_local_checkout(workspace) or not (workspace / '.git').is_file():
+        return ''
+    if admitted is not None and workspace != admitted:
+        return 'kept'
+    from lib.tasks_pkg.workspace_delivery import RESTART_INTERRUPTED
+    receipt = (row.get('origin') or {}).get('delivery') or {}
+    if receipt.get('state') == 'working' and receipt.get('taskOutcome') != RESTART_INTERRUPTED:
+        return 'kept'
+    try:
+        wip = save_workspace_wip(str(root), task_id, user_id=owner)
+        from lib.project_mod.task_delta_delivery import checkout_reconstructible
+        if not wip or not checkout_reconstructible(root, workspace, wip):
+            logger.info('[Integration] discarded checkout keeps content Git does not hold: %s',
+                        workspace)
+            return 'kept'
+        _remove_controlled_worktree(root, workspace, lifecycle_owned=admitted is not None)
+    except Exception as error:
+        logger.warning('[Integration] discarded checkout retained %s: %s', workspace, error)
+        return 'kept'
+    if workspace.exists():
+        return 'kept'
+    try:
+        _record_event(str(root), task_id, 'checkout_removed',
+                      f'Removed discarded checkout {workspace}; its work is at {_short(wip)}',
+                      {'path': str(workspace), 'wipSha': wip}, user_id=owner)
+    except Exception as error:
+        logger.warning('[Integration] checkout_removed event not recorded task=%s: %s',
+                       task_id, error)
+    return 'removed'
 
 
 def _set_meta(
@@ -1112,7 +1447,7 @@ def _evaluate_gate_commands(root: Path, old: str, target: str,
     if not python_files and not js_files and not json_files and not configured_command:
         return True, ''
 
-    gate_parent = _workspace_root() / '.gates'
+    gate_parent = _checkout_root(root, target) / '.gates'
     gate_parent.mkdir(parents=True, exist_ok=True)
     temp_path = Path(tempfile.mkdtemp(prefix='gate-', dir=str(gate_parent)))
     # `worktree add` requires the destination not to exist.
@@ -1223,7 +1558,9 @@ def _remove_controlled_worktree_owned(root: Path, path: Path) -> None:
     Git 2.11 has no ``worktree remove``.  The fallback used here was previously
     validated on this project's DolphinFS mount: delete the controlled checkout
     and then prune its missing administrative entry.  Arbitrary registered
-    external worktrees never flow through this helper.
+    external worktrees never flow through this helper. A local checkout is
+    locked against pruning, so removal forces past its lock, and the fallback
+    unlocks it before the prune drops its entry.
     """
     try:
         resolved = path.resolve()
@@ -1237,7 +1574,8 @@ def _remove_controlled_worktree_owned(root: Path, path: Path) -> None:
     from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_claims_lease
     try:
         with workspace_claims_lease([('metadata', root), ('tree', path)], timeout=0.0):
-            cp = _git(root, ['worktree', 'remove', '--force', str(path)], timeout=60.0)
+            cp = _git(root, ['worktree', 'remove', '--force', '--force', str(path)],
+                      timeout=60.0)
             if cp.returncode != 0 and path.exists():
                 for attempt in range(5):
                     try:
@@ -1251,6 +1589,8 @@ def _remove_controlled_worktree_owned(root: Path, path: Path) -> None:
                             logger.warning('[Integration] could not remove scratch worktree %s', path)
                             break
                         time.sleep(0.1 * (attempt + 1))
+            if cp.returncode != 0:
+                _git(root, ['worktree', 'unlock', str(path)], timeout=60.0)
             _git(root, ['worktree', 'prune'], timeout=60.0)
     except WorkspaceBusyError:
         # Cleanup is optional. Retain the reconstructible checkout rather than
@@ -1261,7 +1601,7 @@ def _remove_controlled_worktree_owned(root: Path, path: Path) -> None:
 def _scratch_merge(root: Path, candidate: str, checkpoint: str,
                    task_id: str) -> tuple[str, str]:
     """Git-2.11-compatible real 3-way merge in a throwaway worktree."""
-    merge_parent = _workspace_root() / '.merges'
+    merge_parent = _checkout_root(root, candidate) / '.merges'
     merge_parent.mkdir(parents=True, exist_ok=True)
     temp_path = Path(tempfile.mkdtemp(prefix='merge-', dir=str(merge_parent)))
     temp_path.rmdir()
@@ -1320,9 +1660,12 @@ def _merge_checkpoint(root: Path, candidate: str, checkpoint: str,
     return merged, ''
 
 
-def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
+def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> bool:
     owner_user_id = int(row['user_id'])
     checkpoint = row['checkpoint_sha']
+    if not _state.quarantine(
+            row_id=int(row['id']), reason=reason, now=_now()):
+        return False
     if checkpoint:
         _git(
             root,
@@ -1330,8 +1673,6 @@ def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
                 owner_user_id, str(row['task_id'])), checkpoint],
             check=True,
         )
-    _state.quarantine(
-        row_id=int(row['id']), reason=reason, now=_now())
     try:
         from lib.conversations.project_brain import record_integration_failure
         record_integration_failure(
@@ -1345,6 +1686,7 @@ def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
         _set_meta(
             str(root), str(row['task_id']),
             {'conflict_files': conflict_files}, user_id=owner_user_id)
+    return True
 
 
 def _integrate_row(row: Mapping[str, Any]) -> None:
@@ -1352,14 +1694,16 @@ def _integrate_row(row: Mapping[str, Any]) -> None:
     task_id = row['task_id']
     owner_user_id = int(row['user_id'])
     merged_origin: Mapping[str, Any] | None = None
+    changed = False
+    delivery_authority = None
     with _repo_lock(str(root)):
         fresh = _state.get_integrating(int(row['id']))
         if fresh is None:
             return
 
         owner_row = _state.get_workspace(str(root), str(task_id), user_id=owner_user_id)
-        delivery = (owner_row.get('origin') or {}).get('delivery') or {}
-        if delivery and delivery.get('taskOutcome') != 'completed':
+        delivery_authority = (owner_row.get('origin') or {}).get('delivery') or {}
+        if delivery_authority and delivery_authority.get('taskOutcome') != 'completed':
             _quarantine(root, fresh, 'Task has no successful publication authority')
             return
         try:
@@ -1388,37 +1732,49 @@ def _integrate_row(row: Mapping[str, Any]) -> None:
         # The system-scoped claim/get_integrating rows deliberately stay
         # narrow and do not join owner metadata. Fetch the owner-scoped row
         # before recording the merged package provenance.
-        origin = fresh.get('origin') or {}
-        if not origin:
-            owner_row = _state.get_workspace(
-                str(root), str(task_id), user_id=owner_user_id)
-            origin = owner_row.get('origin') or {}
-        acceptance = {}
-        passed, detail = _gate_commands(root, candidate, target, command, evidence_out=acceptance)
-        from lib.project_mod.delivery_acceptance import persist_gate_record
-        persist_gate_record(owner_row, acceptance, checkpoint=owner_row['checkpoint_sha'])
-        if not passed:
-            _quarantine(root, fresh, f'Gate failed:\n{detail}')
-            _push(str(root), user_id=owner_user_id)
+        origin = fresh.get('origin') or owner_row.get('origin') or {}
+
+    # An immutable target needs no repository admission while it is tested.
+    acceptance = {}
+    passed, detail = _gate_commands(root, candidate, target, command, evidence_out=acceptance)
+    with _repo_lock(str(root)):
+        fresh = _state.get_integrating(int(row['id']))
+        if fresh is None:
             return
-        try:
-            require_unchanged_gates(root, selected_policy)
-        except GatePolicyError as error:
-            _quarantine(root, fresh, str(error))
-            _push(str(root), user_id=owner_user_id)
-            return
-        cp = _git(root, ['update-ref', _CANDIDATE_REF, target, candidate])
-        if cp.returncode != 0:
-            # A different process advanced the ref despite our filesystem lock
-            # (e.g. a remote administrator). Requeue instead of losing work.
-            _state.requeue(
+        owner_row = _state.get_workspace(str(root), str(task_id), user_id=owner_user_id)
+        current_origin = owner_row.get('origin') or {}
+        superseded = (((current_origin.get('delivery') or {}) != delivery_authority
+                      or owner_row['checkpoint_sha'] != fresh['checkpoint_sha']))
+        if superseded:
+            # An explicit delivery retry starts a new checkpoint phase without
+            # changing the integrating row. Its pending receipt is the authority.
+            changed = _state.requeue(
                 row_id=int(fresh['id']),
-                error='Candidate moved concurrently; retrying', now=_now())
+                error='Delivery authority changed during verification; retrying', now=_now())
         else:
-            if _state.mark_merged(
-                    row_id=int(fresh['id']), candidate_sha=target, now=_now()):
-                merged_origin = origin
-    _push(str(root), user_id=owner_user_id)
+            from lib.project_mod.delivery_acceptance import persist_gate_record
+            persist_gate_record(owner_row, acceptance, checkpoint=owner_row['checkpoint_sha'])
+            if not passed:
+                changed = _quarantine(root, fresh, f'Gate failed:\n{detail}')
+            else:
+                try:
+                    require_unchanged_gates(root, selected_policy)
+                except GatePolicyError as error:
+                    changed = _quarantine(root, fresh, str(error))
+                else:
+                    cp = _git(root, ['update-ref', _CANDIDATE_REF, target, candidate])
+                    if cp.returncode != 0:
+                        # Reverify a new merged result instead of publishing this stale target.
+                        changed = _state.requeue(
+                            row_id=int(fresh['id']),
+                            error='Candidate moved concurrently; retrying', now=_now())
+                    else:
+                        if _state.mark_merged(
+                                row_id=int(fresh['id']), candidate_sha=target, now=_now()):
+                            changed = True
+                            merged_origin = origin
+    if changed:
+        _push(str(root), user_id=owner_user_id)
     if merged_origin is not None:
         _record_project_integration_after_merge(
             str(root), str(task_id), owner_user_id)
@@ -1555,7 +1911,8 @@ def _worker_loop() -> None:
                 claim_due = boot_claim_pending or _peek_ready() is not None
                 boot_claim_pending = False
                 progressed = process_ready_once() if claim_due else False
-                progressed = delivery.resume_due_workspace_deliveries() or progressed
+                # Row work runs on per-project lanes; this loop only dispatches.
+                progressed = delivery.resume_due_workspace_deliveries(lanes=True) or progressed
             except StorageError as exc:
                 delivery.request_workspace_delivery_scan(recovery=True)
                 logger.warning(
@@ -1601,9 +1958,15 @@ def notify_workspace_write_released() -> bool:
     """Wake only the existing lifecycle-owned worker; hints grant no authority.
 
     Release observers never import/start a worker, execute Git or touch storage.
-    The worker's own scratch/publication leases cannot keep waking itself.
+    The worker's own scratch/publication leases cannot keep waking itself, and
+    neither can its delivery lanes': a lane that changed a receipt already woke
+    the worker through that delivery-state commit, while one that changed
+    nothing would only start a pass that requeues its own unchanged rows.
     Cross-process/external writes remain covered by bounded recovery polling.
     """
+    delivery = sys.modules.get('lib.project_mod.delivery')
+    if delivery is not None and delivery.is_delivery_lane_thread():
+        return False
     return _wake_existing_worker()
 
 
@@ -1676,7 +2039,11 @@ def ensure_worker_started() -> bool:
 
 
 def stop_worker(timeout: float = 2.0) -> bool:
-    """Stop the exact integration owner without permitting a duplicate."""
+    """Stop the exact integration owner without permitting a duplicate.
+
+    The same budget then joins the owner's delivery lanes; True only when the
+    loop and every lane have stopped.
+    """
     global _WORKER, _WORKER_STOP_REQUESTED, _WORKER_WAKE_GENERATION
     global _WORKER_AUTHORITY_ARMED
     with _WORKER_CONDITION:
@@ -1691,6 +2058,7 @@ def stop_worker(timeout: float = 2.0) -> bool:
         wait_seconds = max(0.0, float(timeout))
     except (TypeError, ValueError, OverflowError):
         wait_seconds = 2.0
+    deadline = time.monotonic() + wait_seconds
     if worker is not threading.current_thread():
         worker.join(wait_seconds)
     stopped = not worker.is_alive()
@@ -1698,7 +2066,9 @@ def stop_worker(timeout: float = 2.0) -> bool:
         with _WORKER_CONDITION:
             if _WORKER is worker:
                 _WORKER = None
-    return stopped
+    from lib.project_mod import delivery
+    lanes_stopped = delivery.stop_project_lanes(max(0.0, deadline - time.monotonic()))
+    return stopped and lanes_stopped
 
 
 def reconcile_candidate_with_head(
@@ -1755,15 +2125,17 @@ def reconcile_candidate_with_head(
             selected_policy = select_gate_commands(root)
         except GatePolicyError as error:
             raise IntegrationError(str(error)) from error
-        passed, detail = _gate_commands(root, candidate, target, selected_policy.integration)
-        if not passed:
-            _record_event(
-                root_s, '', 'head_reconcile_failed',
-                'Canonical HEAD reconciliation gate failed', detail,
-                user_id=owner_user_id)
-            _push(root_s, user_id=owner_user_id)
-            raise IntegrationError(
-                f'Canonical HEAD reconciliation gate failed: {detail}')
+
+    passed, detail = _gate_commands(root, candidate, target, selected_policy.integration)
+    if not passed:
+        _record_event(
+            root_s, '', 'head_reconcile_failed',
+            'Canonical HEAD reconciliation gate failed', detail,
+            user_id=owner_user_id)
+        _push(root_s, user_id=owner_user_id)
+        raise IntegrationError(
+            f'Canonical HEAD reconciliation gate failed: {detail}')
+    with _repo_lock(root_s):
         if _rev(root, 'HEAD') != head:
             raise IntegrationError(
                 'Canonical HEAD moved during reconciliation; refresh and retry')
@@ -1823,13 +2195,25 @@ def promote_stable(
             selected_policy = select_gate_commands(root)
         except GatePolicyError as error:
             raise IntegrationError(str(error)) from error
-        passed, detail = _gate_commands(root, stable, candidate, selected_policy.stable)
-        if not passed:
-            _record_event(str(root), '', 'promotion_failed',
-                          'Stable promotion gate failed', detail,
-                          user_id=owner_user_id)
-            _push(str(root), user_id=owner_user_id)
-            raise IntegrationError(f'Stable promotion gate failed: {detail}')
+
+    passed, detail = _gate_commands(root, stable, candidate, selected_policy.stable)
+    if not passed:
+        _record_event(str(root), '', 'promotion_failed',
+                      'Stable promotion gate failed', detail,
+                      user_id=owner_user_id)
+        _push(str(root), user_id=owner_user_id)
+        raise IntegrationError(f'Stable promotion gate failed: {detail}')
+    with _repo_lock(str(root)):
+        if not acknowledge_head_divergence:
+            current_head = _rev(root, 'HEAD')
+            new_divergence = any(_git(
+                root, ['merge-base', '--is-ancestor', first, second]).returncode != 0
+                for first, second in ((head, current_head), (current_head, candidate)))
+            if new_divergence:
+                raise IntegrationError(
+                    'Canonical HEAD and candidate have diverged; promotion does not '
+                    'update the canonical branch. Refresh, review both histories, '
+                    'and explicitly acknowledge the divergence to promote stable')
         try:
             require_unchanged_gates(root, selected_policy)
         except GatePolicyError as error:
@@ -2378,22 +2762,26 @@ __all__ = [
 
 
 def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                        conversation_id: str = '', title: str = '') -> dict | None:
+                        conversation_id: str = '', title: str = '',
+                        cancel=None, executor_task_id: str = '') -> dict | None:
     from lib.project_mod.delivery import bind_task_workspace as bind
     return bind(project_path, task_id, user_id=user_id,
-                conversation_id=conversation_id, title=title)
+                conversation_id=conversation_id, title=title, cancel=cancel,
+                executor_task_id=executor_task_id)
 
 
 def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                          outcome: str) -> dict | None:
+                          outcome: str, executor_task_id: str = '') -> dict | None:
     from lib.project_mod.delivery import settle_task_workspace as settle
-    return settle(project_path, task_id, user_id=user_id, outcome=outcome)
+    return settle(project_path, task_id, user_id=user_id, outcome=outcome,
+                  executor_task_id=executor_task_id)
 
 
 def record_task_workspace_intent(project_path: str, task_id: str, *, user_id: int,
-                                  outcome: str) -> dict | None:
+                                  outcome: str, executor_task_id: str = '') -> dict | None:
     from lib.project_mod.delivery import record_task_workspace_intent as record
-    return record(project_path, task_id, user_id=user_id, outcome=outcome)
+    return record(project_path, task_id, user_id=user_id, outcome=outcome,
+                  executor_task_id=executor_task_id)
 
 
 def release_publication_hold(project_path: str, task_id: str, *, user_id: int) -> dict:

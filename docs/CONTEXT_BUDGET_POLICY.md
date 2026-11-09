@@ -278,6 +278,11 @@ complete-output adoption checks still reject partial or unusable summaries.
 Summaries have no cost ceiling; `compaction.summaryMaxCostUsd` is retired and
 ignored. The maximum quote at the admitted output allowance is still recorded so
 dispatch can refuse a higher re-quote.
+CNY quotes, a declared rate card or a maintained price alike, use the pricing
+owner's current `usdToCny` snapshot, the rate returned-usage pricing books with,
+never a separately hardcoded exchange rate; missing or invalid CNY exchange
+evidence leaves the route unpriced. This is a current-rate quote, not a
+fixed-FX bill guarantee.
 Explicit `main` and `disableModelFallback` prohibit auxiliary compiler/mint work.
 Dispatch still revalidates stable identity, quote and resource policy before
 optional spending; route drift or a higher quote refuses and keeps source.
@@ -338,7 +343,7 @@ second consumer). Specs: `tests/compaction/test_auxiliary_summary_integration.py
 
 **Model price fallback and no summary cost ceiling (owner decision
 2026-11-02).** Problem: Offerings seeded without their own request-name rate card
-(the Meituan gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
+(the YourProvider gateway's claude-opus-5.5 and kimi-k3.1-pro carry only a legacy
 blended `cost` hint) counted as unpriced in summary routing and settlement,
 although native main-turn settlement already priced them at their model's
 maintained price. An unpriced paid main therefore admitted no paid alternate and
@@ -609,7 +614,7 @@ A line's window belongs to the line: `deepseek-v4.1-flash` (catalogue
 identity), `deepseek-v4-1-flash`, `deepseek-v4-flash` (legacy wire spelling)
 and the versionless canonical `deepseek-flash` are one served model at 1M. The
 2026-09-21 gauge report (128K shown for a route enforcing 1M, live on
-sankuai/Meituan) came from spelling these as needles `deepseek-flash` /
+example-corp/YourProvider) came from spelling these as needles `deepseek-flash` /
 `deepseek-v4-flash`, neither of which is a substring of an id whose version is
 punctuated with a dot, so the V3-era 128K family estimate won silently. The
 max-output table (`_max_output._deepseek_max_output`) rides the same parser.
@@ -832,12 +837,40 @@ alongside the round recovery tests: both SQLite and TofuDB preserve original
 sources, program references and owner checks after restart, and raw UTF-8
 preview plus cursor continuation reconstructs the exact original text.
 
+Problem: after compacting long file paths to fit identity/status rows, preview
+search restored the larger layout and discarded every body despite available
+space. Decision: preview fitting uses the admitted identity layout, including
+its path/detail limits. Alternatives rejected: dropping file identities hides
+observations; expanding the budget bypasses admission. Verify
+`test_file_read_preview_layout.py` through single-result and aggregate fitting.
+
+Problem: mixed summary/item results stopped after the initial half-budget
+summary allowance, even when their small structured facts left usable space.
+Decision: the initial split admits items; the common pure fitter then expands
+the original summary within the final model-view budget while preserving those
+items. Typed cause identifiers retain priority over diagnostic prose, and
+canonical sources, explicit recovery and one-shot retention keep their owners.
+Alternatives rejected: raising the cap hides unused context; reallocating items
+inside the search changes already-admitted evidence; a caller-side text filler
+would bypass shared framing and final metadata accounting. Verify
+`test_mixed_result_budget_utilization.py` across source/artifact policies,
+success/error results and single/aggregate stages.
+
+In a controlled 24k round containing one typed failure and two source reads,
+this expansion changes final token shares from `[4059, 11949, 7992]` to
+`[8016, 7992, 7992]`. The diagnostic keeps 46,111 acquired characters instead of
+23,092, with the exact cause item and recovery advice intact. Warm local fitting
+increases from 72.5 to 97.3 ms and transient Python peak from 1.72 to 2.07 MB;
+there are no additional source queries or artifact publications. The cost buys
+additional diagnostic evidence within the same round limit, not lower provider
+invoices or proven live-model task quality.
+
 **Policy ceilings across stages.** Problem: a source read could use its 24k
 allowance in the first projection, then fall to the ordinary 8k ceiling when a
 small sibling pushed the round just over 24k. Decision: first projection,
 reprojection and aggregate fitting share `_result_policy_token_limit`; the
-aggregate allowance is the smaller of the current policy ceiling and remaining
-round space. Ordinary results retain their 8k ceiling and the whole round stays
+aggregate allowance is the smaller of the current policy ceiling and assigned
+round share. Ordinary results retain their 8k ceiling and the whole round stays
 bounded. Current declared policy overrides an earlier source-recovery view;
 application JSON cannot grant a higher ceiling. A larger failed-source diagnostic
 does not authorize source replay. Program references and required metadata are
@@ -857,14 +890,53 @@ projection costs, not full-task latency or invoice savings. Verify
 policy overrides, file identities, failure/cancellation, actual parallel dispatch
 and original program-input recovery after SQLite/TofuDB restart.
 
-**Unresolved allocation gap.** Largest-first reduction can spend nearly the
-entire allowance on the last large source: four equal large source views retain
-body text in only one result in the controlled measurement. This is an evidence
-distribution defect, not a guarantee callers should depend on. A replacement
-must reserve irreducible outcome/recovery facts and mandatory-retention failures,
-then allocate remaining space by actual demand, without repeating persistence
-or introducing source rereads. That allocation change still needs its own fault
-and end-to-end verification; per-policy ceiling parity alone does not solve it.
+**Evidence across concurrent results.** Problem: largest-first reduction spent
+nearly the entire allowance on the last large source, leaving earlier results
+with metadata alone. Decision: count original model projections once and keep
+fitting rounds unchanged. Under pressure, prepare only results that need to
+shrink, at most once per occurrence. Reserve their required outcome/recovery
+views before dividing optional space by actual demand and the shared policy
+ceilings. Small results release their unused share. Unknown producer recovery
+and failed mandatory retention keep the exact original view and reserve its
+cost before the remaining allocation.
+
+Pure fitting reuses acquired summaries, items and canonical identities. A
+bounded second pass offers discrete item/token gaps to results with the least
+optional evidence; it cannot read a source or retry publication. Stable call
+identity breaks ties independently of completion order. Shared materializer
+layouts and atomic items may use less than their assigned share, so equal
+grants do not promise equal final body lengths. Required facts may exceed an
+impossible round limit and remain subject to complete-prompt admission; the
+allocator never claims such a round fits. No new execution loop, replay right,
+worker, cache or persistent state is introduced.
+
+Alternatives rejected: increasing the round limit hides evidence starvation;
+equal division before reserving facts can erase recovery or force lossy
+replacement after retention failure; repeated artifact writes or source reads
+turn a pure allocation adjustment into new effects. Fixed character slices
+cannot enforce final model-token budgets or structured-item semantics.
+
+Controlled 24k-round measurements with the production `gpt-4o` counter checked
+against `o200k_base`: four equal source views change from body lengths
+`[0, 0, 0, 85294]` to `[21273, 21273, 21273, 21273]`, each using 6,000 tokens.
+Four already-retained results likewise each keep 21,101 characters; all four
+file batches retain previews. The mixed small/source/ordinary case is unchanged,
+including its 8k ordinary ceiling. Five fitting-round samples use 23,996–24,000
+tokens, with warm medians of 46.1–97.3 ms versus 11.3–85.6 ms before; their traced
+Python peaks are 0.44–2.07 MB versus 0.18–1.76 MB. A mandatory-retention case keeps
+the immutable original and fills both remaining 8k views instead of losing one
+body. Publication attempts are unchanged in these samples, but arbitrary raw
+batches may need to retain more distinct results once more are reduced. Each
+occurrence still prepares once; there are no source queries. This is local
+projection evidence, excluding storage latency and provider cost.
+
+Verify `test_round_evidence_allocation.py` for mixed policies, metadata floors,
+atomic items, completion order and failed publication. The backend suite runs
+the real shared root loop, tool parsing and parallel pipeline with a scripted
+provider: its next round receives all four observations without corrective
+reads. Both SQLite and TofuDB preserve exact original sources and program-input
+references after restart. This tests continuation boundaries, not live-model
+task quality or invoice savings.
 
 **Native artifact failure projection.** Problem: nested native query errors lost
 their explicit retry policy when the shared delivery path wrapped them as generic

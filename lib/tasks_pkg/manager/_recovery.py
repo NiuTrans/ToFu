@@ -87,6 +87,7 @@ def recover_stale_tasks_on_startup(
             "recoveredAttemptCount": 0,
             "recoveredTaskCount": 0,
             "conversationIds": [],
+            "recoveredTasks": [],
             "interruptedReason": _interruption_reason(prev_shutdown),
         }
     recovered_attempts = recover_running_attempts(created_before_ms=scope_ms)
@@ -94,6 +95,7 @@ def recover_stale_tasks_on_startup(
     recovered_tasks = 0
     conversation_ids: list[str] = []
     seen_conversations: set[str] = set()
+    recovered_rows: list[dict[str, str]] = []
     cursor = ""
 
     # Each storage command is a bounded transaction. The hard round cap is a
@@ -115,6 +117,8 @@ def recover_stale_tasks_on_startup(
             if conversation_id and conversation_id not in seen_conversations:
                 seen_conversations.add(conversation_id)
                 conversation_ids.append(conversation_id)
+                recovered_rows.append({"taskId": str(row.get("taskId") or ""),
+                                       "conversationId": conversation_id})
         if not (result or {}).get("remaining"):
             break
         next_cursor = str((result or {}).get("nextKey") or "")
@@ -134,6 +138,8 @@ def recover_stale_tasks_on_startup(
         "recoveredAttemptCount": recovered_attempts,
         "recoveredTaskCount": recovered_tasks,
         "conversationIds": conversation_ids,
+        # Task identities let the post-ready restart resume pass read each owner.
+        "recoveredTasks": recovered_rows,
         "interruptedReason": reason,
     }
 

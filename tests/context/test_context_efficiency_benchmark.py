@@ -400,7 +400,7 @@ def test_analyzer_selects_only_predeclared_passing_arms():
 
 def test_benchmark_can_explicitly_trust_authenticated_proxy_probe_block():
     from lib import proxy
-    from lib.subscription_routes import Route
+    from lib.network_routes import Route
 
     routes = [
         Route('direct', 'direct', 'direct'),
@@ -409,9 +409,9 @@ def test_benchmark_can_explicitly_trust_authenticated_proxy_probe_block():
     ]
     with mock.patch.dict('os.environ', {
             'TOFU_SUBSCRIPTION_TRUST_CONFIGURED_PROXY': '1'}), \
-            mock.patch.object(proxy, 'subscription_route_specs',
+            mock.patch.object(proxy, 'network_route_specs',
                               return_value=routes), \
-            mock.patch('lib.subscription_routes.manager.candidates') as pick:
+            mock.patch('lib.network_routes.manager.candidates') as pick:
         selected = proxy.subscription_route_candidates(
             'https://chatgpt.com/backend-api/codex/responses')
     assert [route.route_id for route in selected] == ['pool:bench']

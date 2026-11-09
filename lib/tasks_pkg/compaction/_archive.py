@@ -223,7 +223,7 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
         return None
     logger.info('[Compact] Transcript archived conv=%s  id=%s  trigger=%s  '
                 'messages=%d  tokens=%d→%d',
-                conv_id[:8] if conv_id else '?',
+                conv_id if conv_id else '?',
                 archive_id, trigger,
                 len(messages),
                 int(tokens_before or 0), int(tokens_after or 0))
@@ -240,7 +240,7 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
                 archive_conv_id, keep, user_id=user_id, **scoped)
     except Exception as e_gc:
         logger.debug('[Compact] archive prune skipped conv=%s: %s',
-                     conv_id[:8] if conv_id else '?', e_gc)
+                     conv_id if conv_id else '?', e_gc)
 
     # Emit SSE event so the frontend can render an inline marker.  We guard
     # against missing task / archive_id so the archival path never breaks

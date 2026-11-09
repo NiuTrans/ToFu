@@ -17,7 +17,7 @@ from lib.llm._transport import classify_request_transport_error
 from lib.llm.llm_errors import (
     EndpointUnreachableError, RequestUploadTimeoutError, ResponseReadTimeoutError,
 )
-from lib.subscription_routes import is_safe_connect_failure
+from lib.network_routes import is_safe_connect_failure
 
 pytestmark = pytest.mark.unit
 URL = 'https://model.example/v1/responses'
@@ -76,7 +76,7 @@ def test_actual_response_read_timeout_keeps_read_retry_policy(monkeypatch):
     monkeypatch.setattr(HTTPSConnection, 'connect', connect)
     try:
         with pytest.raises(requests.exceptions.ReadTimeout) as caught:
-            adapter.send(request, timeout=(10, None))
+            adapter.send(request, timeout=(10, None), proxies={'no_proxy': '*'})
         assert not is_safe_connect_failure(caught.value)
         error = classify_request_transport_error(caught.value, base_url=URL)
         assert isinstance(error, ResponseReadTimeoutError)

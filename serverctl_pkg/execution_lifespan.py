@@ -33,7 +33,8 @@ async def run_execution_lifespan(app, stopped, publish_ready, *, before_shutdown
         if boot is not None:
             await boot
         if runner.status != 'ready':
-            raise RuntimeError(f'Execution bootstrap did not become ready: {runner.status}')
+            detail = runner.snapshot().get('error') or runner.status
+            raise RuntimeError(f'Execution bootstrap did not become ready: {detail}')
         ready = publish_ready()
         if inspect.isawaitable(ready):
             await ready

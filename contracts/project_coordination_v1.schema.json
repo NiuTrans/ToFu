@@ -397,7 +397,35 @@
       "properties": {
         "title": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"},
         "status": {"enum": ["pending", "in_progress", "completed", "cancelled"]},
-        "progress": {"type": "string", "minLength": 1, "maxLength": 280, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"}
+        "progress": {"type": "string", "minLength": 1, "maxLength": 280, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"},
+        "due": {"type": "string", "minLength": 16, "maxLength": 40, "pattern": "^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d{1,6})?)?(Z|[+-]\\d{2}:?\\d{2})?$", "description": "ISO 8601 date-time (with offset; without one it is the server's local time) by which the Coordinator committed to the owner that this task is done or reported. A task carrying it while pending or in_progress is an open commitment (docs/PROJECT_COORDINATION.md, Commitments on the task board)."}
+      }
+    },
+    "progressCommitment": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Platform-written receipt of one board task carrying due, kept in the board head beside the board: reconstructible from board writes, never evidence or authority. state open: pending or in_progress; kept: completed by its due; late: completed after it; cancelled: dropped. wake names the due time it woke the Coordinator for, once per due time.",
+      "required": ["title", "firstDueAt", "dueAt", "slips", "createdAt", "state"],
+      "properties": {
+        "title": {"$ref": "#/$defs/progressTask/properties/title"},
+        "firstDueAt": {"type": "integer", "minimum": 0},
+        "dueAt": {"type": "integer", "minimum": 0},
+        "slips": {"type": "integer", "minimum": 0},
+        "createdAt": {"type": "integer", "minimum": 0},
+        "state": {"enum": ["open", "kept", "late", "cancelled"]},
+        "closedAt": {"type": "integer", "minimum": 0},
+        "wake": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dueAt", "at", "via", "commandId"],
+          "properties": {
+            "dueAt": {"type": "integer", "minimum": 0},
+            "at": {"type": "integer", "minimum": 0},
+            "via": {"enum": ["notice", "continuation"]},
+            "commandId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "disposition": {"type": "string", "minLength": 1, "maxLength": 32}
+          }
+        }
       }
     },
     "progressRequest": {
@@ -450,7 +478,8 @@
       "properties": {
         "scope": {"$ref": "#/$defs/reportScope"},
         "board": {"$ref": "#/$defs/progressBoard"},
-        "translation": {"$ref": "#/$defs/progressTranslation"}
+        "translation": {"$ref": "#/$defs/progressTranslation"},
+        "commitments": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/progressCommitment"}}
       }
     },
     "progressState": {
@@ -458,6 +487,7 @@
       "additionalProperties": false,
       "required": ["projectPath", "conversationId", "bindingRevision", "board"],
       "properties": {
+        "commitments": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/progressCommitment"}},
         "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
         "conversationId": {"type": "string", "maxLength": 256},
         "bindingRevision": {"type": "integer", "minimum": 0},

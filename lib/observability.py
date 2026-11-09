@@ -62,7 +62,7 @@ _TASK_STARTUP_STAGES = frozenset({
     'registration_route', 'registration_mint', 'registration_checkpoint',
     'worker_entry', 'cleanup', 'workspace_binding', 'input_translation',
     'startup_config', 'startup_resume', 'startup_project', 'startup_tools',
-    'startup_memory', 'startup_context', 'startup_history',
+    'startup_resume_view', 'startup_memory', 'startup_context', 'startup_history',
     'memory_list', 'memory_rank', 'memory_hydrate',
     'workspace_provision', 'workspace_roots', 'workspace_identity',
     'workspace_root_binding', 'workspace_persist',
@@ -481,6 +481,21 @@ def record_storage_rpc(
     }
     _STORE.observe('tofu_storage_rpc_seconds', seconds, _STORAGE_BUCKETS,
                    **labels)
+
+
+def storage_rpc_snapshot() -> list[dict[str, Any]]:
+    """This process's ``tofu_storage_rpc_seconds`` series for another exporter.
+
+    The resident execution host has no HTTP listener; the API host's
+    ``/metrics`` reads this through the private execution control. Counts are
+    cumulative per declared bucket, as rendered here.
+    """
+    with _STORE.lock:
+        series = [(labels, state.snapshot()) for (name, labels), state in _STORE.histograms.items()
+                  if name == 'tofu_storage_rpc_seconds']
+    return [{'labels': dict(labels), 'buckets': list(state['buckets']),
+             'counts': list(state['counts']), 'sum': state['sum'], 'count': state['count']}
+            for labels, state in sorted(series, key=lambda item: item[0])]
 
 
 _ROUTE_SELECTION_SCOPES = frozenset({'pinned', 'shared'})
@@ -1105,7 +1120,7 @@ def reset_for_tests() -> None:
 __all__ = [
     'InstrumentedThreadPoolExecutor', 'connection_close', 'connection_open',
     'background_job_finished', 'background_job_started',
-    'instrument_sse', 'normalize_route_template', 'prometheus_lines',
+    'instrument_sse', 'normalize_route_template', 'prometheus_lines', 'storage_rpc_snapshot',
     'record_http_request', 'record_llm_first_token', 'record_llm_task',
     'observe_executor_queue_wait', 'publish_executor_state',
     'record_executor_abandonment', 'record_executor_idle_retirement',

@@ -9329,6 +9329,85 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* Delivery receipt: how a fired timer's continuation reached the conversation. */
 .timer-panel-item .tpi-decision.steered { background: var(--info-text); }
 .timer-panel-item .tpi-decision.queued { background: var(--warning-text); }
+/* Inside an open grouped tool panel a watch is one call of the card, like a
+ * parallel run or a tool search (23-reading-tool-panel.css): no frame, fill,
+ * radius or inset. The state label takes the intent edge; the copyable id
+ * (monospace: the exact identity) and the condition tier follow as quiet
+ * metadata; the caret closes the row after any outcome, inside the rows'
+ * --space-6 end lane; the checks hang from the title's edge to the card's
+ * side. Lines beneath the row hang on the same edge. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-block > .timer-watcher-header {
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--conversation-process-inset);
+  border-radius: var(--radius-sm);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+/* One row per call on phones too: the label wraps beside its metadata. An
+ * attention step still breaks its identity onto a line of its own. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) .timer-watcher-block > .timer-watcher-header {
+  flex-wrap: nowrap;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-icon {
+  order: -2;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--tool-row-glyph-ink);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-active .timer-watcher-icon {
+  color: var(--tool-row-glyph-ink-live);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.timer-watcher-orphaned, .timer-watcher-warn) .timer-watcher-icon {
+  color: var(--tool-row-glyph-ink-attention);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-label {
+  flex: 1 1 auto;
+  order: -1;
+  color: var(--tool-row-intent-ink);
+  font-weight: var(--weight-regular);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-active .timer-watcher-label {
+  color: var(--tool-row-intent-ink-live);
+  font-weight: var(--weight-medium);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > :is(.timer-id-chip, .timer-kind-badge) {
+  min-block-size: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--tool-row-meta-ink);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-id-chip:is(:hover, .copied) {
+  color: var(--text-primary);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-toggle {
+  order: 3;
+  width: var(--space-3);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-toggle svg {
+  width: 100%;
+  height: auto;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > :is(.ptool-error-reason, .conversation-tool-identity) {
+  margin-inline-start: calc(var(--space-4) + var(--space-2));
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-body {
+  margin-inline-start: calc(var(--space-4) + var(--space-2));
+  padding: var(--space-1) 0 var(--space-2);
+}
 /* Timer instruction, predicate, verifier and cadence. Complete instruction survives its explicit disclosure. */
 .timer-watcher-meta {
   display: grid;
@@ -25168,7 +25247,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
  * The caret is a pseudo-element of the FLEX ROW, so it is an atomic flex item
  * that can never wrap onto a line of its own — the failure the edit card had
  * while its caret was inline text inside the wrapping label. */
-.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after {
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header, .conversation-tool-card__summary)::after {
   content: '';
   box-sizing: border-box;
   flex: 0 0 var(--space-2);
@@ -25180,7 +25259,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   transform: rotate(-45deg);
   color: var(--text-secondary);
 }
-.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after,
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header, .conversation-tool-card__summary)::after,
 .conversation-surface .ptool-results-header[aria-expanded="true"]::after {
   transform: rotate(45deg);
 }
@@ -25194,7 +25273,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   color: var(--text-secondary);
 }
 .conversation-surface .ptool-results-header > .ptool-results-toggle,
-.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header) .ptool-text::after {
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header) .ptool-text::after {
   display: none;
 }
 .conversation-surface .ptc-head::before,
@@ -25238,7 +25317,12 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
 .conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
   margin-inline-start: auto;
 }
+/* Project, motion and memory receipts hang their bodies the same way (no
+ * tinted sheet of their own); a body inside an accepted work card's request
+ * details keeps that card's own layout. */
 .conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
+.conversation-surface .ptool-convmeta-block > :is(.ptool-convmeta-body, .ptool-motion-body),
+.conversation-surface .ptool-memory-block > .ptool-memory-body,
 .conversation-surface .ptool-results-block.expanded > .ptool-results-content {
   margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
   padding: var(--space-1) 0 var(--space-1) calc(var(--space-4) - var(--control-edge-inset));
@@ -25247,6 +25331,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   border-radius: 0;
   background: transparent;
 }
+.conversation-surface .ptool-memory-content { border-block-start-color: var(--turn-rule); }
 /* A program result already sits on the card spine, and settled edit rows carry
    their own bordered chrome; neither gets a second rail or inset. */
 .conversation-surface :is(.ptc-result, .ptool-batch-done-block) > .ptool-result-body {
@@ -27976,6 +28061,13 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   background: var(--turn-process-panel);
 }
 
+/* A call row also holds its body's own margins (flow-root): a nested
+ * receipt's spacing stays inside the row instead of collapsing through it
+ * into an unpainted gap in the card's sides. */
+.conversation-surface .conversation-turn-blocks > .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([hidden]) {
+  display: flow-root;
+}
+
 .conversation-surface .conversation-turn-blocks > .conversation-tool-panel[data-tool-panel-state="open"] + [data-turn-zone="process"] {
   padding-block-start: var(--space-1);
 }
@@ -28111,9 +28203,11 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   height: 100%;
 }
 
-/* Programs and generic tool cards have no SVG slot: their `{}` marker takes
- * the same glyph column, plain like the line glyphs (no wash or halo). */
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.ptc-head, .conversation-tool-card__summary)[data-action-summary]::before {
+/* Programs, generic tool cards, guidance questions and the summary that
+ * tool-summary.ts adds above a custom body have no SVG slot: a text marker
+ * takes the same glyph column, plain like the line glyphs (no wash or
+ * halo): `?` for a question to the reader, `{}` for any other body. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.ptc-head, .conversation-tool-card__summary, .conversation-tool-summary, .hg-header)[data-action-summary]::before {
   content: '{}' / '';
   display: inline-flex;
   flex: 0 0 var(--space-4);
@@ -28128,8 +28222,12 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   font: var(--weight-medium) var(--conversation-font-size-meta) var(--font-mono);
 }
 
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.hg-header, [data-renderer-mode="native-choice"] > .conversation-tool-summary)[data-action-summary]::before {
+  content: '?' / '';
+}
+
 /* The accent marks liveness, on the glyph alone. */
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="active"] :is(.ptc-head, .conversation-tool-card__summary)[data-action-summary]::before {
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="active"] :is(.ptc-head, .conversation-tool-card__summary, .conversation-tool-summary, .hg-header)[data-action-summary]::before {
   color: var(--tool-row-glyph-ink-live);
 }
 
@@ -28137,14 +28235,15 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   color: var(--tool-row-glyph-ink-live);
 }
 
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="attention"] [data-action-summary] > :is(.ptool-icon, .ptool-cmd-icon) {
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="attention"] [data-action-summary] > :is(.ptool-icon, .ptool-cmd-icon),
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="attention"] :is(.ptc-head, .conversation-tool-card__summary, .conversation-tool-summary, .hg-header)[data-action-summary]::before {
   color: var(--tool-row-glyph-ink-attention);
 }
 
 /* Lines beneath a call (a failure's reason, an attention step's exact
  * identity) hang on the intent's text column, not under the glyph. */
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] [data-action-summary]:is(:has(> .ptool-icon, > .ptool-cmd-icon), .ptc-head, .conversation-tool-card__summary) > .ptool-error-reason,
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="attention"] [data-action-summary]:is(:has(> .ptool-icon, > .ptool-cmd-icon), .ptc-head, .conversation-tool-card__summary) > .conversation-tool-identity {
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] [data-action-summary]:is(:has(> .ptool-icon, > .ptool-cmd-icon), .ptc-head, .conversation-tool-card__summary, .conversation-tool-summary, .hg-header) > .ptool-error-reason,
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"][data-action-state="attention"] [data-action-summary]:is(:has(> .ptool-icon, > .ptool-cmd-icon), .ptc-head, .conversation-tool-card__summary, .conversation-tool-summary, .hg-header) > .conversation-tool-identity {
   margin-inline-start: calc(var(--space-4) + var(--space-2));
 }
 
@@ -28246,6 +28345,120 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
 
 .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .sw-panel .sw-agent-grid > .sw-a-err {
   margin-inline: 0 var(--space-6);
+}
+
+/* ---- Tool search: one call of the card -------------------------------- */
+/* The matched-tool grid is one call's result, so it draws no sheet of its
+ * own either (owner report 2026-11-03: a tinted frame does not suit it;
+ * full width like a parallel run reads better). Its header is the call row,
+ * the candidate count is quiet metadata ending on the outcome column, and
+ * the matched tools hang from the title's edge to the card's side. Outside
+ * an open panel the block keeps 08-tool-search-catalog.css. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .ptool-tool-search-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .ptool-tool-search-header > :is(.ptool-tool-search-count, .ptool-tool-search-more) {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--tool-row-meta-ink);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .ptool-tool-search-results {
+  margin-inline-start: calc(var(--space-4) + var(--space-2));
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+/* Timer watches follow the same rule from their sole style owner,
+ * 08-timer-receipt-shell.css (tests/timer_style_ownership.test.cjs). */
+
+/* ---- Questions and rich bodies: calls of the card --------------------- */
+/* Every custom body follows the same rule (owner report 2026-11-03: find the
+ * other tool UIs that box themselves inside the card). A guidance question,
+ * a native rich surface (a choice form, structured results) and a search's
+ * vertical-source group draw no frame, fill or radius of their own. The
+ * question's header is the call row, its outcome on the rows' outcome
+ * column; its body and a rich surface hang from the title's edge to the
+ * card's side. Controls (options, inputs, buttons, metric tiles), code,
+ * media and an approval's warning sheet keep their surfaces. Outside an open
+ * panel each keeps its owner (09-guidance-*.css, 03-rich-response.css,
+ * 01-message-surfaces.css). */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.hg-card, .vertical-card) {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+/* A search's group heads (a query, a vertical source) keep their hairline
+ * and ink but paint no band; heads and rows start on the results' edge. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.search-query-group-header, .vertical-card-header) {
+  background: transparent;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.search-query-group-header, .vertical-card-header, .vertical-row, .vertical-card-more) {
+  padding-inline: 0;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .hg-card > .hg-header[data-action-summary] {
+  padding-inline-end: var(--space-6);
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.hg-card > :not(.hg-header), .rich-response) {
+  margin-inline: calc(var(--space-4) + var(--space-2)) 0;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .hg-card > :not(.hg-header, .hg-translating-indicator) {
+  padding-inline: 0;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .rich-response {
+  padding-block: var(--space-1) var(--space-2);
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .rich-response .rich-block {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Items of a body that already hangs on the spine draw no frame, fill,
+ * stripe or radius either: an injection receipt's reports (a sub-agent's
+ * update, a peer or steer message, a finished background command, a stall
+ * note), a board's cards and a commit's files. A report's head row carries
+ * its identity and outcome and consecutive reports part on a hairline; a
+ * lane or group head carries its items' state. An error line, raw output,
+ * count chips and media keep their surfaces. Outside an open panel each
+ * keeps its owner (08-injection-receipts.css, 09-tool-project.css). */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.sw-card, .ptool-board-mini-card, .ptool-commit-file) {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Without a frame the report's last paragraph must not leave a blank line
+ * before the next call: the light foundation's paragraph margin
+ * (10-light-foundation.css) outranks the owner's last-child reset. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .sw-card-preview > :last-child {
+  margin-block-end: 0;
+}
+
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .sw-card + .sw-card {
+  padding-block-start: var(--space-2);
+  border-block-start: var(--control-edge-inset) solid var(--turn-rule);
 }
 
 /* ---- In-card boundaries: calls the window hides ---------------------- */

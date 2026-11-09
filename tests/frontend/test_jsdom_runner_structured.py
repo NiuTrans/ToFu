@@ -12,13 +12,10 @@
 node -backed 用例在无 node 的车道按既有约定 skip（单元车道无 node）。
 """
 
-import os
-
 import pytest
 
 from tests import _jsdom
 from tests._jsdom import (
-    JS_DIR,
     frontend_required,
     is_frontend_dep_skip,
     parse_harness_result,
@@ -28,9 +25,13 @@ from tests._jsdom import (
 
 pytestmark = pytest.mark.unit
 
-# run_harness 需要 target_js 作 argv[2]，但下面的 body 用 targets=[] 不 eval 它，
-# 传任意真实路径即可。
-_TARGET = os.path.join(JS_DIR, 'core', 'icons.js')
+@pytest.fixture
+def harness_target(tmp_path):
+    # These bodies exercise the runner with targets=[], not application code.
+    # Keep its required argv[2] independent of the generated application view.
+    target = tmp_path / 'runner-target.js'
+    target.write_text('// Runner contract fixture; intentionally not evaluated.\n')
+    return str(target)
 
 _BODY_TWO_CHECKS = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -135,21 +136,21 @@ class TestFrontendModuleGuard:
 
 
 class TestRunHarnessExpectPass:
-    def test_exact_match_green_and_trailer_visible(self):
-        out = run_harness(_TARGET, _BODY_TWO_CHECKS, expect_pass=2)
+    def test_exact_match_green_and_trailer_visible(self, harness_target):
+        out = run_harness(harness_target, _BODY_TWO_CHECKS, expect_pass=2)
         assert '__JSDOM_RESULT__' in out
 
-    def test_neuter_declaring_more_than_actual_is_red(self):
+    def test_neuter_declaring_more_than_actual_is_red(self, harness_target):
         # NEUTER:申报 3 实际 2 必须红——这正是「地板虚报」的反面锁。
         with pytest.raises(AssertionError, match='expect_pass=3'):
-            run_harness(_TARGET, _BODY_TWO_CHECKS, expect_pass=3)
+            run_harness(harness_target, _BODY_TWO_CHECKS, expect_pass=3)
 
-    def test_neuter_declaring_fewer_than_actual_is_red(self):
+    def test_neuter_declaring_fewer_than_actual_is_red(self, harness_target):
         # 申报少于实际也红：精确语义,防「申报 1 躺平」。
         with pytest.raises(AssertionError, match='expect_pass=1'):
-            run_harness(_TARGET, _BODY_TWO_CHECKS, expect_pass=1)
+            run_harness(harness_target, _BODY_TWO_CHECKS, expect_pass=1)
 
-    def test_structured_fail_count_red_even_without_fail_lines(self):
+    def test_structured_fail_count_red_even_without_fail_lines(self, harness_target):
         body = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
 const { check, out, report } = setup({
@@ -161,15 +162,15 @@ out.length = 0;  // 抹掉 FAIL 行,只剩尾行计数——尾行也必须咬�
 report();
 '''
         with pytest.raises(AssertionError):
-            run_harness(_TARGET, body, expect_pass=1)
+            run_harness(harness_target, body, expect_pass=1)
 
 
 class TestRunHarnessLegacyPath:
-    def test_legacy_body_without_trailer_counts_pass_lines(self):
-        out = run_harness(_TARGET, "console.log('PASS a');\nconsole.log('PASS b');", min_pass=2)
+    def test_legacy_body_without_trailer_counts_pass_lines(self, harness_target):
+        out = run_harness(harness_target, "console.log('PASS a');\nconsole.log('PASS b');", min_pass=2)
         assert 'PASS a' in out
 
-    def test_neuter_substring_inflation_killed(self):
+    def test_neuter_substring_inflation_killed(self, harness_target):
         # 旧实现 count('PASS') 会把这行当 2 个 PASS → 绿;行锚定后必红。
         with pytest.raises(AssertionError):
-            run_harness(_TARGET, "console.log('BYPASS note PASSword');", min_pass=1)
+            run_harness(harness_target, "console.log('BYPASS note PASSword');", min_pass=1)

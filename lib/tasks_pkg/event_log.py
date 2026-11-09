@@ -24,13 +24,13 @@ import time
 from lib.conversation_sync.generated_contract import (
     STREAM_POLICY as CONVERSATION_SYNC_POLICY,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.event_envelope import (
     EventFormatError,
     check_event_readable,
 )
 from lib.storage.deadline_policy import storage_write_deadline
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     project_event_usage_for_storage,
 )
 from lib.task_replay.task_event_contract import (
@@ -256,14 +256,14 @@ def project_persistent_event(task_id, event):
     """
     projected = _project_usage_diagnostics_for_storage(event)
     event_type = projected.get('type') if isinstance(projected, dict) else ''
-    if event_type == 'messages_snapshot':
+    if event_type in ('messages_snapshot', 'tool_wire_projection'):
         try:
             from lib.tasks_pkg.snapshot_delta import get_projector
             projected = get_projector().project(str(task_id), projected)
         except Exception as exc:
             logger.warning(
                 '[EventLog] snapshot projection failed task=%s: %s; '
-                'persisting the full snapshot', str(task_id)[:8], exc)
+                'persisting the full snapshot', task_log_tag(task_id), exc)
     elif event_type in TERMINAL_EVENT_TYPES:
         # The previous snapshot can be large. Terminal projection is the
         # earliest safe release point and keeps the bounded projector from
@@ -455,7 +455,7 @@ def read_events(
         raise
     except Exception as exc:
         logger.warning(
-            '[EventLog] cold replay failed task=%s: %s', str(task_id)[:8], exc)
+            '[EventLog] cold replay failed task=%s: %s', task_log_tag(task_id), exc)
         if raise_on_error:
             raise
         return []
@@ -501,7 +501,7 @@ def has_terminal_event(task_id) -> bool:
             row and (row.get('event') or {}).get('type') in TERMINAL_EVENT_TYPES)
     except Exception as exc:
         logger.debug(
-            '[EventLog] terminal probe failed task=%s: %s', str(task_id)[:8], exc)
+            '[EventLog] terminal probe failed task=%s: %s', task_log_tag(task_id), exc)
         return False
 
 

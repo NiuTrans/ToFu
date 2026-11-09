@@ -19,18 +19,37 @@ from lib.project_dispatch import admission
 from lib.project_dispatch.repository import LIMITS, NAMESPACE, DispatchContention
 from lib.storage.errors import StorageError
 from tests.project_mod.test_project_dispatch_repository import context
-from tests.project_mod.test_project_dispatch_runtime import _lease, runtime
+from tests.project_mod.test_project_dispatch_runtime import _lease, runtime as dispatch_runtime
 from tests.project_mod.test_coordinator_workers import (
-    _worker_task, base_runtime, runtime as worker_runtime,
+    _worker_task, base_runtime, runtime as coordinator_runtime,
 )
 from tests.project_mod.test_coordinator_request_budget import bind, spend, usage
+from tests.project_mod.test_coordinator_continuation import run as _continuation_run
 
-__all__ = ('base_runtime', 'context', 'runtime', 'worker_runtime')
+__all__ = ('base_runtime', 'context')
 pytestmark = pytest.mark.unit
 
 # More than one repository call's bounded CAS attempts: the loser must outlast
 # several DispatchContention verdicts, not merely one lost compare-and-swap.
 RACES = 2 * LIMITS['casAttempts'] + 1
+
+
+@pytest.fixture
+def runtime(context, monkeypatch):
+    """The Worker dispatch runtime, defined here so its dependencies resolve."""
+    return dispatch_runtime.__wrapped__(context, monkeypatch)
+
+
+@pytest.fixture
+def worker_runtime(base_runtime, monkeypatch):
+    """The Coordinator worker runtime, with its own continuation helpers."""
+    return coordinator_runtime.__wrapped__(base_runtime, monkeypatch)
+
+
+@pytest.fixture
+def continuation_run(worker_runtime, monkeypatch):
+    """A live request with a Coordinator continuation, from the continuation suite."""
+    return _continuation_run.__wrapped__(worker_runtime, monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -255,3 +274,119 @@ def test_an_unacknowledged_tool_settlement_is_named_not_reported_as_a_budget(wor
     message = str(refused.value)
     assert 'not a call budget' in message and 'run_command #1 lost-ack phase=intent' in message
     assert 'exhausted' not in message
+
+
+@pytest.mark.parametrize('boundary', ['read', 'commit'])
+def test_review_project_work_rereads_through_contention(continuation_run, monkeypatch, boundary):
+    """A contended review is re-read and recorded, never returned as 'uncertain'.
+
+    Incident 2026-11-06 16:15 CST: with about 17 Workers live,
+    review_project_work returned {"error": "Concurrent/uncertain dispatch
+    update; read before retrying"} and the Coordinator replayed it by hand.
+    """
+    from tests.project_mod.test_coordinator_continuation import activate, ready
+    r = continuation_run
+    worker = ready(r)
+    activate(r)
+    arguments = {'assignment_id': worker['id'], 'result_revision': 1,
+                 'decision': 'accept', 'note': 'Verified evidence'}
+    if boundary == 'read':
+        torn = torn_snapshots(monkeypatch, r.c.repo, 3)
+    else:
+        RacingWriters(r.c.client, monkeypatch, RACES, write=foreign_commit(r.c.client, r.c.repo.key))
+    reviewed = r.call('review_project_work', **arguments)
+    assert reviewed.get('decision') == 'accept', reviewed
+    assert r.c.repo.read(worker['id'])['review'] == {
+        'actor': 'coordinator', 'decision': 'accept', 'note': 'Verified evidence', 'resultRevision': 1}
+    assert not r.task.get('aborted')
+    # Replaying the identical review is a no-op; a different one is immutable.
+    assert r.call('review_project_work', **arguments) == reviewed
+    assert 'immutable' in r.call('review_project_work', **{**arguments, 'note': 'Changed'})['error']
+
+
+def test_a_real_verdict_during_a_contended_review_still_wins(continuation_run, monkeypatch):
+    """Contention is never a licence to keep reviewing a revoked grant."""
+    from tests.project_mod.test_coordinator_continuation import activate, ready
+    r = continuation_run
+    worker = ready(r)
+    activate(r)
+    arguments = {'assignment_id': worker['id'], 'result_revision': 1,
+                 'decision': 'accept', 'note': 'Verified evidence'}
+
+    def revoke_meanswhile():
+        r.c.repo.revoke(worker['id'], worker['grant']['revision'])
+
+    torn = torn_snapshots(monkeypatch, r.c.repo, 1, meanwhile=revoke_meanswhile)
+    result = r.call('review_project_work', **arguments)
+    assert 'Grant revoked' in result.get('error', ''), result
+    assert r.c.repo.read(worker['id'])['review'] is None
+    assert torn == [True]
+
+
+@pytest.mark.parametrize('boundary', ['read', 'commit'])
+def test_cancel_project_work_rereads_through_contention(continuation_run, monkeypatch, boundary):
+    from tests.project_mod.test_coordinator_continuation import activate, delegate, ready
+    r = continuation_run
+    cancelled_worker = ready(r)
+    activate(r)
+    other = delegate(r, 'other')
+    stopped = []
+    monkeypatch.setattr(r.service, '_cancel_execution',
+                        lambda attempt_id, owner, provenance: stopped.append((attempt_id, provenance)))
+    if boundary == 'read':
+        torn = torn_snapshots(monkeypatch, r.c.repo, 3)
+    else:
+        RacingWriters(r.c.client, monkeypatch, RACES, write=foreign_commit(r.c.client, r.c.repo.key))
+    result = r.call('cancel_project_work', assignment_id=cancelled_worker['id'])
+    assert result.get('revoked') is True, result
+    grant = r.c.repo.read(cancelled_worker['id'])['grant']
+    assert grant['revoked'] is True and grant['revision'] == cancelled_worker['grant']['revision'] + 1
+    assert [attempt for attempt, _ in stopped] == [cancelled_worker['execution']['attemptId']]
+    assert all('cancel_project_work' in provenance for _, provenance in stopped)
+    # A replay is the same cancellation retried: the grant does not advance again.
+    replay = r.call('cancel_project_work', assignment_id=cancelled_worker['id'])
+    assert replay == result
+    assert r.c.repo.read(cancelled_worker['id'])['grant'] == grant
+    # Another assignment's authority is untouched.
+    assert r.c.repo.read(other['id'])['grant']['revoked'] is False
+
+
+def test_finish_project_request_rereads_through_contention(continuation_run, monkeypatch):
+    from tests.project_mod.test_coordinator_continuation import activate, ready, report
+    r = continuation_run
+    worker = ready(r)
+    activate(r)
+    arguments = report(r)
+    reviewed = r.call('review_project_work', assignment_id=worker['id'],
+                      result_revision=1, decision='accept', note='Verified')
+    assert reviewed['decision'] == 'accept'
+    torn = torn_snapshots(monkeypatch, r.c.repo, 4)
+    done = r.call('finish_project_request', **arguments)
+    assert done.get('reason') == 'complete', done
+    assert len(torn) == 4
+    # The receipt is immutable and its replay is a no-op.
+    assert r.call('finish_project_request', **arguments) == done
+    assert 'settled' in r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'late'})['error']
+
+
+def test_request_user_decision_rereads_through_contention(continuation_run, monkeypatch):
+    from tests.project_mod.test_coordinator_continuation import (
+        _bound_request, _decision_report, delegate,
+    )
+    r = continuation_run
+    _bound_request(r)
+    delegate(r)
+    report_id = _decision_report(r)
+    timers = []
+    monkeypatch.setattr('lib.project_dispatch.continuation.schedule_wake',
+                        lambda owner, project, due, **kw: timers.append(due))
+    torn = torn_snapshots(monkeypatch, r.c.repo, 4)
+    result = r.call('request_user_decision', report_turn_id=report_id,
+                    recommendation='Use option A', wait_seconds=600)
+    assert 'error' not in result, result
+    assert len(torn) == 4
+    due = result['pending_decision']['dueAt']
+    assert timers == [due] and due == pytest.approx(r.c.now[0] + 600)
+    # The replay keeps the FIRST due time rather than renewing the deadline.
+    assert r.call('request_user_decision', report_turn_id=report_id,
+                  recommendation='Use option A', wait_seconds=60)['pending_decision']['dueAt'] == due

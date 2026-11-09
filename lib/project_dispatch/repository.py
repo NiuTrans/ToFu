@@ -49,6 +49,14 @@ class DispatchGrantRevoked(ProjectDispatchError):
     """The grant was revoked, or withdrawn by a durable conversation Stop."""
 
 
+class CommandReused(ProjectDispatchError):
+    """A command identity already authorized another request; ``assignment_id`` names it."""
+
+    def __init__(self, message, assignment_id):
+        super().__init__(message)
+        self.assignment_id = assignment_id
+
+
 class DispatchContention(ProjectDispatchError):
     """Bounded CAS attempts ended in conflicts or uncertain ACKs; retry the same command.
 
@@ -826,7 +834,7 @@ class ProjectDispatchRepository:
             old = next((a for a in value['assignments'] if a['id'] == assignment_id), None)
             if old is not None:
                 if old['request'] != request or any(old['grant'].get(k) != v for k, v in granter.items()):
-                    raise ProjectDispatchError('Command identity reused with changed request/granter')
+                    raise CommandReused('Command identity reused with changed request/granter', old['id'])
                 return old
             if check is not None:
                 check(value)
@@ -889,6 +897,22 @@ class ProjectDispatchRepository:
 
     def list(self):
         return copy.deepcopy(self._load()[0]['assignments'])
+
+    def request_rows(self, source_attempt_id):
+        """Passive evidence of one Coordinator request: its rows and whether it is settled.
+
+        A request's Workers share ``request.delegation.attemptId``; the source
+        cohort index selects exactly them in one bounded snapshot. Rows keep
+        admission order. ``settled`` means the Coordinator finished the request.
+        """
+        _identifier(source_attempt_id)
+        value, _ = self._load(self._selection(sources=[source_attempt_id], cohort=False,
+                                              include_policy=False))
+        rows = [row for row in value['assignments']
+                if (row['request'].get('delegation') or {}).get('attemptId') == source_attempt_id]
+        settled = any(row.get('sourceAttemptId') == source_attempt_id
+                      for row in value.get('coordinatorSettlements', []))
+        return {'rows': copy.deepcopy(rows), 'settled': settled}
 
     def history_page(self, cursor=None):
         from .history import page

@@ -62,6 +62,9 @@ def bind_conversation_worker(task, context):
         return True
 
     task['_conversationWorkerContext'] = context
+    # Recovery joins this carrier to prove physical exit; reclamation must
+    # wait until a durable exit receipt records that evidence.
+    task['_exitReceiptPending'] = True
     task['_invocationAbortCheck'] = ChildCancellationScope(aborted)
     task['_executionModelDispatchAuthority'] = lambda actor: admit_model_dispatch(actor, context)
 
@@ -93,7 +96,7 @@ def admit_model_dispatch(task, context):
             if error.code == 'database_conflict':
                 # Read the existing authoritative verdict only to distinguish
                 # human Stop from lost execution ownership; this grants nothing.
-                _observe_current_claim(context)
+                _observe_current_claim(task, context)
             raise
         if result is None and task.get('id') != context.claim.task_id:
             # A detached Swarm descendant outlives its settled root Turn while
@@ -101,7 +104,7 @@ def admit_model_dispatch(task, context):
             # (swarm/turn_handoff.hold_detached_swarm). The settled Attempt can
             # no longer acknowledge entry, so admit only on the current,
             # unstopped claim itself.
-            _observe_current_claim(context)
+            _observe_current_claim(task, context)
             return
         if (not isinstance(result, dict) or result.get('status') != 'running'
                 or result.get('taskId') != context.claim.task_id
@@ -114,11 +117,15 @@ def admit_model_dispatch(task, context):
         raise ModelAdmissionRefused('Model execution authority ended') from error
 
 
-def _observe_current_claim(context):
+def _observe_current_claim(task, context):
     from lib.durable_worker import StorageWorkerJobStore
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
     import time
-    context.observe_claim_state(StorageWorkerJobStore().claim_state(
-        context.claim, now_ms=time.time_ns() // 1_000_000))
+    store = StorageWorkerJobStore()
+    state = wait_for_persistence(task,
+        lambda: store.claim_state(context.claim, now_ms=time.time_ns() // 1_000_000),
+        label='worker claim proof', effect_free=True)
+    context.observe_claim_state(state)
     context.checkpoint()
 
 

@@ -6,11 +6,10 @@ Turns.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 
 from .registry import block_spec
-from ._sections import _canonical_section, _strip_to_body
+from ._sections import block_content_hash, _strip_to_body
 
 _MIGRATABLE_POLICY_IDS = (
     'platform_static', 'parallel_execution', 'delegate_mode',
@@ -66,10 +65,7 @@ def _verified_spans(message: dict, block_id: str) -> dict:
         # reduced to the same form before comparison.
         matches = [match for match in _ENVELOPE.finditer(text)
                    if match.group(1) == block_id
-                   and hashlib.sha256(
-                       _canonical_section(
-                           block_id, _strip_to_body(match.group(0)))
-                       .encode('utf-8')).hexdigest()[:16]
+                   and block_content_hash(block_id, _strip_to_body(match.group(0)))
                    in digests]
         if matches:
             spans[index] = matches
@@ -116,9 +112,7 @@ def _migrate_policy_block(messages: list[dict], block_id: str) -> None:
     spec = block_spec(block_id)
     insert_policy(normalized, policy_carrier([{
         'id': block_id,
-        'hash': hashlib.sha256(
-            _canonical_section(block_id, _strip_to_body(rendered))
-            .encode('utf-8')).hexdigest()[:16],
+        'hash': block_content_hash(block_id, _strip_to_body(rendered)),
         'stability': spec.stability, 'lifecycle': spec.lifecycle,
         '_rendered': rendered}]))
     messages[:] = normalized

@@ -192,14 +192,17 @@ def load_site_observation(
     """Best-effort lookup; storage failure must never break page research."""
     try:
         from lib.storage import get_storage_client
+        from lib.storage.retry import decline_storage_wait, storage_wait_owner
 
         identity = site_observation_identity(url, operation=operation)
-        return get_storage_client().query(
-            "browser.site_observation.get",
-            {"owner_user_id": _owner_id(owner_user_id), **identity,
-             "now_ms": int(time.time() * 1000)},
-            deadline=_STORAGE_DEADLINE_SECONDS,
-        )
+        # Advisory: never wait out a slow live authority inside the client.
+        with storage_wait_owner(decline_storage_wait):
+            return get_storage_client().query(
+                "browser.site_observation.get",
+                {"owner_user_id": _owner_id(owner_user_id), **identity,
+                 "now_ms": int(time.time() * 1000)},
+                deadline=_STORAGE_DEADLINE_SECONDS,
+            )
     except Exception as exc:
         logger.debug("[BrowserResearch] site observation lookup unavailable: %s", exc)
         return None
@@ -216,6 +219,7 @@ def record_site_observation(
     """Best-effort bounded update after a live research outcome."""
     try:
         from lib.storage import get_storage_client
+        from lib.storage.retry import decline_storage_wait, storage_wait_owner
 
         identity = site_observation_identity(url, operation=operation)
         payload = {
@@ -226,10 +230,11 @@ def record_site_observation(
         }
         if observation is not None:
             payload["observation"] = observation
-        return get_storage_client(write=True).command(
-            "browser.site_observation.record", payload, command_id=None,
-            deadline=_STORAGE_DEADLINE_SECONDS,
-        )
+        with storage_wait_owner(decline_storage_wait):
+            return get_storage_client(write=True).command(
+                "browser.site_observation.record", payload, command_id=None,
+                deadline=_STORAGE_DEADLINE_SECONDS,
+            )
     except Exception as exc:
         logger.debug("[BrowserResearch] site observation write unavailable: %s", exc)
         return None

@@ -42,7 +42,7 @@ import uuid
 
 from lib.identity import require_user_id
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 logger = get_logger(__name__)
 
@@ -473,7 +473,7 @@ def cancel_conversation_waits(owner: int, conversation_id: str) -> list[str]:
         return DeviceWaits(owner).cancel_conversation(conversation_id, reason='conversation_deleted')
     except Exception:
         logger.warning('[DeviceWait] waits of deleted conversation %s stay pending; their wake '
-                       'finds no conversation and closes them', conversation_id[:12], exc_info=True)
+                       'finds no conversation and closes them', conversation_id, exc_info=True)
         return []
 
 

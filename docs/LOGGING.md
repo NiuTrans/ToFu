@@ -137,7 +137,8 @@ so never add them to `registration`. The physical
 worker records worker entry, its nested workspace binding and `input_translation`
 (the join of a deferred send translation). Before the first round the root
 invocation records `startup_config` (prelude, provider binding, model config),
-`startup_resume`, `startup_project`, `startup_tools`, `startup_memory`,
+`startup_resume`, `startup_project`, `startup_tools`, `startup_resume_view`
+(a Continue restoring its Turn's checkpointed working view), `startup_memory`,
 `startup_context` (context injection) and `startup_history`; a stage skipped by an
 abort gate emits nothing. Inside `startup_memory` the prefetch records
 `memory_list` (the time startup spent obtaining the eligible metadata listing,
@@ -219,8 +220,18 @@ Terminal trace settlement (`lib.tasks_pkg.turn_trace.finalize_trace_projection`)
 logs exactly one INFO `[TurnTraceSummary]` record per task (one physical line):
 
 ```text
-[TurnTraceSummary] task=<full task id> conv=<conversation id> status=done totalMs=191521 llmMs=110377 toolMs=21631 waitMs=36194 admissionWaitMs=33000 retryWaitMs=0 compactionMs=0 approvalWaitMs=0 unattributedMs=0 ttftMs=71258 rounds=6 spawnWaitMs=3194 flowStepMs=0 orchestrationMs=23319 startupMs=17200 roundPrepMs=3600 roundSettleMs=2400 finalizeMs=119 coverage=full
+[TurnTraceSummary] task=<full task id> conv=<conversation id> status=done totalMs=191521 llmMs=110377 toolMs=21631 waitMs=36194 admissionWaitMs=33000 retryWaitMs=0 compactionMs=0 approvalWaitMs=0 unattributedMs=0 ttftMs=71258 rounds=6 spawnWaitMs=3194 flowStepMs=0 orchestrationMs=23319 startupMs=17200 roundPrepMs=3600 roundSettleMs=2400 finalizeMs=119 failedAttemptMs=0 coverage=full
 ```
+
+`ttftMs` and `failedAttemptMs` are informational windows inside `llmMs`, never
+added to the bucket sum. `ttftMs` counts first-token windows whose attempt
+showed its first token; `failedAttemptMs` counts the pre-first-token wait of
+attempts that failed, were retried or were stopped, so a gateway that holds the
+status line for 2,000 s and then answers HTTP 504 shows there, not as
+first-token time. A window whose first token was never observed (lost events)
+counts in neither. Lines written before `failedAttemptMs` existed lack the key,
+and `--logs` reads it as 0. The rules are owned by
+`docs/contracts/TURN_TRACE_CONTRACT.md` ("首 token 窗口与失败尝试").
 
 Every number comes from the fold that is frozen into the attempt's Turn Trace
 (`docs/contracts/TURN_TRACE_CONTRACT.md`): the buckets and the `waitMs` split
@@ -441,6 +452,27 @@ reusing the parent's Turn/Attempt with the composite id for every child round
 second capture policy without an owner decision). A failure-only capture for
 child rounds is the smallest follow-up.
 
+## Context provenance shares request diagnostics
+
+Context provenance follows existing request evidence ownership:
+`messages_snapshot.contextLineage` and
+`tool_wire_projection.contextLineage` contain only source IDs, hashes, ranges,
+transformation stages and request/transport identity. No prompt body is copied
+into the map or `CacheRoundRecord`. The latter adds only the sealed request's
+semantic/prefix IDs and its transport trace ID, preserving the existing verdict
+owner. `_wire_context_lineage` is transient usage evidence and is removed by
+the existing `_wire_*` storage projection. Source arrays use the existing
+snapshot delta/replay owner; its [growth measurement](FRONTEND_ARCHITECTURE.md)
+also covers wire projection rows. There is no new log family or retention knob.
+An isolated synthetic 200-event, 11,929-byte request measured 1.23 ms CPU before
+source mapping and 14.07 ms with it (seven warm builds/seals, median);
+direct range lookup avoids rescanning all sibling parts per source.
+This is instrumentation cost, not a model-latency or cache-hit improvement.
+Seventy-two before/after cases across Chat, Anthropic and Responses, gateway
+rewrites, Unicode, repeated events, blank parts and tool exchanges retained
+identical sealed provider bytes. Native final transport lacks these maps;
+its missing evidence must not be replaced with a Python projection guess.
+
 ## Raw archives are reclaimed oldest-first
 
 Problem: raw archives left the native authority only through conversation
@@ -454,43 +486,104 @@ every later archive was a placeholder, and the owner ceiling refused from
 conversation ceiling 0). With the writer pause above, the Request Inspector
 recorded nothing.
 
+Problem (2026-11-08): long Turns still lost their newest, most valuable
+requests. The 16 MiB per-Attempt stored-byte budget only scrubbed: once an
+Attempt held it, nothing was reclaimed and every later round became a
+body-less placeholder. Attempt `030ce391-…` (about 600k tokens, 27 rounds,
+each request about 5.2 MB raw and 3.1 MB stored) kept rounds 2-6
+(15,676,930 stored bytes) and lost rounds 7-27, the last requests before its
+interruption. Those placeholders said `quota_exhausted` because the tenant
+budget was checked first, although the Attempt budget had stopped
+reclamation. Separately, byte reclamation walked the owner age index, whose
+oldest rows can be body-less placeholders that free nothing yet use the
+64-archive bound. A read-only survey of 664 archives written 2026-11-07
+23:00 to 2026-11-08 06:20 through the Request Inspector API found the
+smallest stored body at 36,655 bytes, 52 Attempt-budget placeholders (all but
+one mislabeled `quota_exhausted`), and two puts scrubbed while their Attempt
+had room. One of them (23:44, about 230 KB, between stored neighbours of
+226-232 KB) failed after retiring up to 64 of the oldest archives, so at most
+six of those can have held a body; the other was round 1 of the Attempt above.
+
 Decision: raw archives are reconstructible diagnostic evidence, not durable
 user state. Before a live `raw_archive.put` would meet the conversation
-ceiling (1,792), it retires that conversation's oldest archives. Before it
-would meet the owner ceiling, or scrub a body that fits the budget once older
-bodies go, it retires the owner's oldest archives in
-`(created_at_ms, archive_id)` order from the owner age index
-`raw_archives_by_owner_created`. Reclamation, the new archive and every
-counter commit in the put's transaction, at most 64 archives per put; what is
-still exceeded keeps the previous refusal or scrub, and the next put continues.
-Bodies scrubbed regardless (free-space floor, 16 MiB per-Attempt budget,
-parts above the budget) never reclaim for bytes; replays and offline restores
-never reclaim. Archives written before the age index existed are indexed from
-the conversation removal index by a persistent owner cursor, 512 rows per live
-put (128 puts cover 65,536), before that put reclaims. An owner whose first
-archive arrives with this index needs no backfill. Reading a reclaimed archive
-through `GET /api/v4/tasks/{taskId}/raw-archives/{archiveId}/{part}` returns an
-empty chunk with `state: "expired"`; retained chunks carry
-`state: "retained"`. The SQL sidecar keeps its scrub-only budget; it has no
-count ceiling, so it never refuses. The byte budget is tenant-wide while an
-owner reclaims only its own archives (TODO(enterprise): per-owner budgets).
+ceiling (1,792), it retires that conversation's oldest archives. Before its
+Attempt's stored bytes plus the new body would exceed the 16 MiB per-Attempt
+budget, it retires that Attempt's own oldest archives (Attempt index order):
+each request of an Attempt carries its predecessors, because prior responses
+reappear in the next request, so the newest archive dominates the Attempt's
+diagnostic value. Before it would meet the owner ceiling, it retires the
+owner's oldest archives in `(created_at_ms, archive_id)` order from the owner
+age index `raw_archives_by_owner_created`. Before it would scrub a body that
+fits the tenant budget once older bodies go, it retires the owner's oldest
+bodies from the owner body age index `raw_archive_bodies_by_owner_created`,
+which has the same keys but holds only archives with stored bytes, so every
+retirement for bytes frees bytes; placeholders leave through the count
+ceilings, conversation deletion and Attempt cleanup. Reclamation, the new
+archive and every counter commit in the put's transaction, at most 64
+archives per put across all four steps; what is still exceeded keeps the
+previous refusal or scrub, and the next put continues. Bodies scrubbed
+regardless (free-space floor, parts above the budget) never reclaim for
+bytes, and neither does a body whose Attempt is still above its budget after
+its own reclamation; replays and offline restores never reclaim. A scrubbed
+placeholder names the constraint that bound: `quota_exhausted` for free space
+or parts above the whole budget, else `attempt_limit` while the Attempt is
+still above its budget, else `quota_exhausted` for the tenant budget. A
+request/response pair whose compressed parts exceed 16 MiB never reaches the
+engine whole: the capture stores a compressed prefix marked `attempt_limit`
+(`lib/raw_archive.py`).
+
+Archives written before the age index existed are indexed from the
+conversation removal index by a persistent owner cursor, and bodies written
+before the body age index existed are indexed from the complete age index by
+a second cursor; each live put advances one of them by at most 512 rows (128
+puts cover 65,536 each) before it reclaims, and until the body age index is
+complete the tenant budget reclaims by the age index as before. An owner whose
+first archive arrives with these indexes needs no backfill. Reading a
+reclaimed archive through
+`GET /api/v4/tasks/{taskId}/raw-archives/{archiveId}/{part}` returns an empty
+chunk with `state: "expired"`; retained chunks carry `state: "retained"`. The
+SQL sidecar keeps its scrub-only budgets: it never evicts implicitly and has
+no count ceiling, so it never refuses; it applies the same placeholder
+reason order, but a long Attempt there still loses rounds after 16 MiB. The
+byte budget is tenant-wide while an owner reclaims only its own archives
+(TODO(enterprise): per-owner budgets).
 
 Measured with `raw_archive::tests::lifecycle::measure_reclaiming_put_cost`
 (debug build, in-memory deterministic VFS, loaded 4-CPU host): 9.5 ms per put
 below the bounds, 13.7 ms per put that reclaims one archive, both one WAL write
-per commit; the first backfill put (512 rows) took 45 ms and 2 writes. The
-native put prepares these reads off the authority writer and commits with
+per commit; the first backfill put (512 rows) took 45 ms and 2 writes.
+Paired against the previous engine on one host (same test, debug build,
+load average 23-58 on 70 CPUs, so wall time is noisy): plain puts took
+11.4-13.5 ms in both. Over 3,000 puts that each reclaim one archive at the
+owner ceiling, the change performs 2.4% more VFS operations (17,442 against
+17,028; 5,814 against 5,676 writes) and took 109-125 ms per put against
+81-104 ms; both engines slow from about 18 ms over the first 300 such puts.
+The first body backfill put (512 age rows) costs what the first age backfill
+put costs: 2 writes, 48-197 ms across these runs. The body age index adds one
+row per archive with stored bytes, with the same key and value as its age row
+(about 320 bytes), so at most 65,536 rows (about 21 MB before page overhead).
+The native put prepares these reads off the authority writer and commits with
 ordinary OCC
 ([command preparation lane](TOFUDB_PUBLICATION_LATENCY.md#raw-archive-puts-and-log-aggregate-flushes-on-the-command-preparation-lane-2026-11-04)).
 
-Alternatives rejected: raising the ceilings moves the cliff and lets the store
-grow without a lifecycle; a TTL or maintenance-driven prune operation adds an
-operation, a schedule and a second policy, and still refuses between passes;
-ordering owner reclamation by the existing conversation index would retire
-evidence in conversation-ID order rather than by age; refusing until the
-backfill completes would never complete it, because a refused put rolls back
-its backfill. Specs: `raw_archive::tests::lifecycle`,
-`raw_archive::migration::tests`, `tests/storage/test_raw_archive.py`.
+Alternatives rejected: raising the ceilings, the 16 MiB per-Attempt budget,
+the 4 GiB budget or the 64-archive bound moves the cliff, lets the store grow
+without a lifecycle, or tunes a knob (design principle 5); a TTL or
+maintenance-driven prune operation adds an operation, a schedule and a second
+policy, and still refuses between passes; ordering owner reclamation by the
+existing conversation index would retire evidence in conversation-ID order
+rather than by age; refusing until the backfill completes would never complete
+it, because a refused put rolls back its backfill. For the Attempt budget,
+retiring the owner's oldest archives instead of the Attempt's own cannot cure
+it, and keeping the oldest rounds keeps the least informative evidence. For
+placeholders, exempting them from the 64-archive bound makes one put's work
+unbounded; skipping them in a bounded scan of the age index still starves
+behind a long run; not indexing them by age would leave the owner ceiling
+unable to retire them; dropping placeholders entirely loses the record that a
+request happened. Extending the SQL sidecar with Attempt-only reclamation
+would contradict its scrub-only lifecycle without its owner reclamation.
+Specs: `raw_archive::tests::lifecycle`, `raw_archive::migration::tests`,
+`tests/storage/test_raw_archive.py`.
 
 ## 搜索诊断与统计
 
@@ -848,9 +941,42 @@ does not prove that an existing browser tab has adopted it.
   stable event name or structured fields materially improve diagnosis.
 - Bind background correlation once with `bind_log_context` or
   `set_log_context`; do not interpolate entire payloads into messages.
+- Log conversation, task and attempt ids whole, never a prefix
+  (`conv_id[:8]`, `task_id[:8]`, `%.8s`). Tag task lines and the task's
+  `[rid:…]` seed with `lib.log.task_log_tag(task_id)`: a durable attempt's
+  whole attempt UUID (only the constant `conversation-attempt:` namespace is
+  dropped; a swarm child keeps its `#agent:…` suffix), any other id whole.
+  Persisted ids, event payloads and API fields keep the full task id; HTTP
+  request ids stay short (8 hex, or `<page>-<n>` from the browser), so a UUID
+  `[rid:]` is a task's attempt. `tests/log/test_log_full_ids.py` rejects a
+  logging call that shortens one. Problem: every Worker id starts with
+  `worker-`, every Coordinator id with `coordinator-` and every durable task id
+  with `conversation-attempt:`, so an 8-character prefix named about one Worker
+  in sixteen; `debug/inspect_conversation.py --logs` showed other Workers'
+  lines, and an analysis blamed 42 cache misses on checkpoint rebuilds that
+  belonged to other Workers (2026-11-09). Decision: whole ids in log text, read
+  by the inspector as described in
+  [CONVERSATION_DIAGNOSTICS.md](contracts/CONVERSATION_DIAGNOSTICS.md). They add
+  about 7.7% to app.log bytes (2026-11-08 file: an estimated 2.11 of 27.3 MB,
+  1.43 MB of it the `[rid:]` prefix), which the byte-bounded rotation absorbs
+  as a correspondingly shorter retention window. Rejected: a longer prefix (any
+  fixed length is a tuned knob, and the shared `worker-`/`coordinator-` stems
+  consume most of it) and fixing only the inspector (a prefix cannot be
+  attributed to one conversation). Log tool call ids whole too: provider ids
+  share their first bytes (`toolu_01…`, `call_…`).
 - Do not log request/response bodies, authorization headers, cookies, provider
   keys, full prompts, or base64 data. Log sizes, counts, hashes, status,
   operation names, and safe identifiers instead.
+- Tool-call log lines (the handler's call line and a handler exception) show
+  a tool's arguments, except those its handler declares content when it
+  registers its tool names (`content_args`, for example `channel_send`'s text
+  and attachments: messages for other people); those show only their UTF-8
+  size and sha256 (`ToolRegistry.log_arguments`). The model's own tool result
+  is unchanged. *Problem:* the call line logged the first 300 characters of
+  every argument, so a message to a colleague reached `app.log`.
+  *Alternatives rejected:* summarizing every tool's arguments (loses the
+  paths, queries and URLs that make the line useful); a name check inside
+  the log helper (a hidden per-tool rule the next content tool would miss).
 - Message-wire repair warnings follow the same rule: retain role/index and
   content shape or length, never a user/assistant text preview.
 - If a subprocess must retain an append-only stdout file, add its stream to
@@ -924,10 +1050,13 @@ count, byte and record totals:
   prefetch brackets the same steps.
 - `project_guidance`, nested in it: acquisition of the applicable root and
   `AGENTS.md` rules for the call's targets; `records` counts rule files.
-- `coordinator_policy`: the durable Coordinator-role lookup that admits a call.
-  Ordinary dispatch runs it before its scope opens, the prefetch inside it.
-- `dispatch_authority`: a project-dispatch worker's durable grant validation
-  and owned-workspace lookup, at every admission inside the scope.
+- `coordinator_policy`: the Coordinator-role lookup that admits a call (a
+  bound dispatch task reads its pinned role, no storage). Ordinary dispatch
+  runs it before its scope opens, the prefetch inside it.
+- `dispatch_authority`: a project-dispatch worker's live grant validation and
+  owned-workspace lookup: once per tool-batch admission (or per call without a
+  batch) and once per call after its durable tool intent
+  ([PROJECT_COORDINATION.md](PROJECT_COORDINATION.md#one-live-validation-per-tool-batch-admission)).
 - `path_resolution`: `rootname:path` resolution of `read_files`,
   `search_files` and `find_files` targets.
 - `file_read`: each `read_files` source (descriptor-pinned snapshot, media or

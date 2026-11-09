@@ -52,11 +52,19 @@ def test_pyproject_owns_worksteal_without_enabling_bare_pytest():
     assert addopts.index('no:anyio') < addopts.index('anyio.pytest_plugin')
 
 
-def test_auto_workers_follow_the_probe_with_personal_ceiling(monkeypatch):
+@pytest.mark.parametrize(('cpus', 'available_mb'), [
+    (12, 32 * 1024),
+    # The measured development host: lowered priority did not keep its live
+    # server responsive at 16 workers (docs/TESTING_STRATEGY.md, "The
+    # four-worker default stays").
+    (63, 167 * 1024),
+])
+def test_auto_workers_follow_the_probe_with_personal_ceiling(
+        monkeypatch, cpus, available_mb):
     monkeypatch.delenv('PYTEST_XDIST_AUTO_NUM_WORKERS', raising=False)
     # The runtime task ceiling is unlimited, so it can never size test workers.
     monkeypatch.setenv('TOFU_MAX_INFLIGHT_TASKS', '1')
-    _probe(monkeypatch, cpus=12, available_mb=32 * 1024)
+    _probe(monkeypatch, cpus=cpus, available_mb=available_mb)
 
     assert shared_pytest.pytest_xdist_auto_num_workers(_config('tests')) == 4
 
@@ -96,6 +104,12 @@ def test_auto_worker_probe_failure_falls_back_lean(monkeypatch):
 
 
 def test_official_auto_worker_override_remains_authoritative(monkeypatch):
+    # The dedicated-host path: neither the ceiling nor the probe applies.
     monkeypatch.setenv('PYTEST_XDIST_AUTO_NUM_WORKERS', '7')
+
+    def _unused_probe(*_args, **_kwargs):
+        raise AssertionError('an explicit worker count never consults the probe')
+
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources', _unused_probe)
 
     assert shared_pytest.pytest_xdist_auto_num_workers(_config('tests')) == 7

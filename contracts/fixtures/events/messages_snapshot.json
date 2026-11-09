@@ -3,6 +3,7 @@
   "agentRole": "s",
   "attemptId": "s",
   "autopilotRunId": "s",
+  "contextLineage": {},
   "contextManifest": [],
   "conversationId": "s",
   "emits": "s",

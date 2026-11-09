@@ -8,6 +8,10 @@
   },
   "contracts": [
     {
+      "path": "contracts/context_lineage_v1.schema.json",
+      "guard": "tests/context/test_context_lineage.py"
+    },
+    {
       "path": "contracts/site_knowledge_v1.schema.json",
       "guard": "tests/llm_dispatch/test_site_knowledge_repository.py"
     },
@@ -121,6 +125,10 @@
     {
       "path": "contracts/device_waits_v1.schema.json",
       "guard": "tests/desktop/test_device_waits.py"
+    },
+    {
+      "path": "contracts/myday_goals_v1.schema.json",
+      "guard": "tests/myday/test_myday_goals.py"
     },
     {
       "path": "contracts/research_model_budget_v1.schema.json",
@@ -510,6 +518,10 @@
       "path": "contracts/channels_v1.schema.json",
       "generator": "scripts/gen_channels_contract.py",
       "guard": "tests/channels/test_github_account.py"
+    },
+    {
+      "path": "contracts/channel_protocol_v1.schema.json",
+      "guard": "tests/channels/conformance/test_protocol_contract.py"
     }
   ],
   "authority": [
@@ -521,6 +533,8 @@
     "docs/DESKTOP_CLIENTS.md",
     "docs/PROJECT_COORDINATION.md",
     "docs/CHANNELS.md",
+    "docs/CHANNEL_PROTOCOL.md",
+    "docs/NETWORK.md",
     "docs/ROUTER.md",
     "docs/README.md",
     "docs/DEVELOPER_RUNTIME.md",
@@ -649,6 +663,9 @@
     "docs/DSH_GO_ANDROID_ANALYSIS.md"
   ],
   "operator_guides": [
+    "android/README.md",
+    "android/docs/SUPERVISOR_DESIGN.md",
+    "ios/README.md",
     "docs/INSTALL.md",
     "docs/runbooks/RELIABILITY_RUNBOOK.md",
     "docs/ROOTLESS_VM_SANDBOX.md",

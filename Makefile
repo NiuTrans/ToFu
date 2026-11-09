@@ -4,6 +4,9 @@
 #
 #  Usage:
 #    make lint          — Run ruff linter + format check
+#    make test          — Verify current changes; TESTS="tests/owner/..." selects a scope
+#    make test-plan     — Explain the same verification selection without execution
+#    make test-full     — Run all existing release gates unconditionally
 #    make test-unit     — Run unit tests only
 #    make test-api      — Run API integration tests only
 #    make test-slow     — Run expensive deterministic tests
@@ -23,7 +26,7 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint architecture-check contracts-check monorepo-check test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
+.PHONY: lint architecture-check contracts-check monorepo-check test test-plan test-affected test-full test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -98,13 +101,27 @@ suite-health: ## Gate: test-suite health must not regress (one-way ratchet)
 	$(PYTEST) $(PYTEST_BASE) tests/meta/test_suite_health_ratchet.py --timeout=600 --tb=short -q
 
 # ── Tests ──────────────────────────────────────────────────────
+# The development loop shares the landing engine. Test scope is explicit work,
+# not a worker/quality tuning parameter; release and coverage recipes stay below.
+VERIFY = $(if $(wildcard .venv/bin/python3),.venv/bin/python3,python3) scripts/verify.py
+VERIFY_SCOPE = $(if $(strip $(TESTS)),$(TESTS),--changed)
+
+test: ## Default development verification (current changes, or TESTS="test files/directories")
+	$(VERIFY) run $(VERIFY_SCOPE)
+
+test-plan: ## Explain the default verification scope without running tests
+	$(VERIFY) plan $(VERIFY_SCOPE)
+
 #
 # JOBS controls test parallelism (pytest-xdist). ``auto`` is NOT raw host CPU
 # count: tests/conftest.py derives a 1..4 default from the same affinity/cgroup
-# CPU and live-memory probe used by the personal runtime. Each worker imports
-# the full server stack (measured ~170-205 MB RSS) and can spawn Node/browser
-# children, so this bound preserves headroom for the OS and a live Tofu server.
-# Dedicated hosts may choose an explicit JOBS=N; JOBS=0 runs serially.
+# CPU and live-memory probe used by the personal runtime (one CPU and 1 GiB of
+# memory headroom per worker). Each worker imports the full server stack
+# (measured ~170-205 MB RSS) and can spawn Node/browser children. Every test
+# process runs at nice 19 in the idle I/O class, yielding to a live Tofu
+# server; the four-worker bound stays because priority cannot order requests
+# to a shared network volume (docs/TESTING_STRATEGY.md, "Parallel execution
+# policy"). Dedicated hosts may choose an explicit JOBS=N; JOBS=0 runs serially.
 # ``--dist worksteal`` is owned once by pyproject.toml.
 JOBS ?= auto
 PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS))
@@ -252,14 +269,15 @@ test-frontend: frontend-build ## Run Vite ESM source, artifact and serving contr
 
 test-all: test-unit test-api test-frontend test-e2e ## Run all current backend, ESM frontend and browser gates
 
+test-full: test-all ## Run the complete existing release gate without evidence reuse
+
 test-coverage: ## Run unit + api tests with coverage report
 	$(PYTEST) $(PYTEST_BASE) -m "unit or api" --cov=lib --cov=routes --cov-report=term-missing --tb=short -q
 
 smoke: ## Run smoke tests only (import validation, cross-platform, syntax)
 	$(PYTEST) $(PYTEST_BASE) tests/smoke/test_smoke.py -m unit --tb=short -v
 
-test-affected: ## Iteration loop: run only tests that can see your changes (static reverse index — full tier stays the gate, P2-3)
-	python scripts/test_select.py --run
+test-affected: test ## Alias of the default incremental verification entrypoint
 
 # ── Diagnostics ────────────────────────────────────────────────
 

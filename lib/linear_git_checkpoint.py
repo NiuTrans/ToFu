@@ -5,19 +5,26 @@ rejected by Git state. After a task reaches a terminal state, the existing
 commit-round daemon may ask this module to record the checkout's current bytes
 as one immutable checkpoint ref. A short cross-process lock serializes only
 Git index/ref updates; the shared checkout writer lease additionally excludes
-cooperative file and command writers during capture and publication. The checked-
-out branch remains at its last published revision until verification passes.
+cooperative Tofu writers during capture. Publication writes no checkout file.
+The checked-out branch remains at its last published revision until
+verification passes.
 
 Concurrent edits are intentionally coalesced workspace state, not task-owned
 attribution.  Bytes written after a snapshot remain dirty for a later task.
+When such a coalesced capture fails verification, the task's own paths (the
+integration radar's record for its conversation, or a delivered delta) are
+retried alone so another writer's unfinished change cannot hold them back.
 Checkpoint failure is observable in the settlement receipt and logs, while the
 task result remains unchanged.  No worktree, merge, stash, reset, checkout,
 clean, push, or model-issued Git command is involved.
 
 ``refs/tofu/stable`` is a publication pointer, not a synonym for development
-``HEAD``.  It advances only when the exact stable-to-checkpoint delta passes a
-configured gate and the canonical checkout remains identical to that snapshot
-before and after verification.
+``HEAD``.  It advances with the branch only when the checkpoint's own delta,
+from the commit it was captured on, passes the gate on a private checkout of
+exactly the captured bytes. Writers keep editing the shared checkout
+meanwhile: publication moves only the index entries of the paths it changes
+and the refs, never a checkout file, and bytes written after capture stay
+dirty for the next checkpoint.
 """
 
 from __future__ import annotations
@@ -42,7 +49,7 @@ from lib.git_checkpoint_policy import (
     require_unchanged_gates,
     PublicationRefError, retire_unrelated_publication_refs, unrelated_publication_refs,
 )
-from lib.git_runtime import git_executable
+from lib.git_runtime import GIT_STALL_SECONDS, git_executable
 from lib.log import get_logger
 
 from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_write_lease
@@ -69,7 +76,16 @@ def _git(
     timeout: float = 30.0,
     check: bool = False,
     input_text: str | None = None,
+    whole_tree: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    """Run Git; ``whole_tree`` commands have no wall-clock deadline.
+
+    Their duration follows the tree and the volume, so like the integration
+    snapshot they run under the shared stall window: only a whole window in
+    which no Git thread ran ends them.
+    """
+    from lib.project_mod.activity_supervised_process import (
+        ProcessRetirementUnproven, ProcessStalled, run_activity_supervised)
     from lib.project_mod.git_inspection_execution import (
         GitInspectionPreparationError, prepare_git_index_read)
     merged_env = git_policy_environment()
@@ -78,14 +94,19 @@ def _git(
     try:
         executable = git_executable()
         with prepare_git_index_read(executable, args, str(cwd), environment=merged_env) as (arguments, environment):
-            process = subprocess.run(
-                [executable, '-c', 'core.fsmonitor=false', *arguments],
-                cwd=str(cwd), env=environment, text=True,
-                input=input_text,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=timeout, check=False,
-            )
-    except (OSError, subprocess.TimeoutExpired, GitInspectionPreparationError) as error:
+            argv = [executable, '-c', 'core.fsmonitor=false', *arguments]
+            if whole_tree:
+                process = run_activity_supervised(
+                    argv, cwd=cwd, env=environment, stall_seconds=GIT_STALL_SECONDS)
+            else:
+                process = subprocess.run(
+                    argv, cwd=str(cwd), env=environment, text=True,
+                    input=input_text,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=timeout, check=False,
+                )
+    except (OSError, subprocess.TimeoutExpired, GitInspectionPreparationError,
+            ProcessStalled, ProcessRetirementUnproven) as error:
         raise LinearCheckpointError(
             f'git {args[0] if args else "command"} failed: {error}') from error
     if check and process.returncode != 0:
@@ -542,10 +563,10 @@ def _stage_working_tree(root: Path, base_sha: str) -> tuple[str, str, dict[str, 
     os.unlink(index_path)
     env = _commit_environment(index_path)
     try:
-        _git(root, ['read-tree', base_sha], env=env, check=True)
-        _git(root, ['add', '-A', '--', '.'], env=env, timeout=120.0,
-             check=True)
-        tree_sha = _git(root, ['write-tree'], env=env, check=True).stdout.strip()
+        _git(root, ['read-tree', base_sha], env=env, check=True, whole_tree=True)
+        _git(root, ['add', '-A', '--', '.'], env=env, check=True, whole_tree=True)
+        tree_sha = _git(root, ['write-tree'], env=env, check=True,
+                        whole_tree=True).stdout.strip()
         return index_path, tree_sha, env
     except Exception:
         with contextlib.suppress(OSError):
@@ -599,41 +620,13 @@ def _changed_paths(root: Path, old_sha: str, target_sha: str) -> list[str]:
 
 def _worktree_matches_index(root: Path, env: dict[str, str]) -> bool:
     tracked = _git(root, ['diff-files', '--quiet', '--ignore-submodules'],
-                   env=env)
+                   env=env, whole_tree=True)
     if tracked.returncode != 0:
         return False
     untracked = _git(root, [
         'ls-files', '--others', '--exclude-standard', '-z',
-    ], env=env, check=True)
+    ], env=env, check=True, whole_tree=True)
     return not bool(untracked.stdout)
-
-
-def _checkout_matches_snapshot(root: Path, target_sha: str) -> bool:
-    """Return whether HEAD, index, tracked bytes, and untracked bytes match."""
-    if _revision(root, 'HEAD') != target_sha:
-        return False
-    return _workspace_matches_snapshot(root, target_sha)
-
-
-def _workspace_matches_snapshot(root: Path, target_sha: str) -> bool:
-    """Return whether current index/worktree bytes equal an immutable tree.
-
-    Unlike ``_checkout_matches_snapshot``, HEAD intentionally remains at the
-    last published revision until verification succeeds.
-    """
-    index_path = ''
-    try:
-        index_path, workspace_tree, _ = _stage_working_tree(root, target_sha)
-        target_tree = _git(
-            root, ['rev-parse', f'{target_sha}^{{tree}}'], check=True,
-        ).stdout.strip()
-        return workspace_tree == target_tree
-    except (OSError, LinearCheckpointError):
-        return False
-    finally:
-        if index_path:
-            with contextlib.suppress(OSError):
-                os.unlink(index_path)
 
 
 def _task_succeeded(task: dict[str, Any]) -> bool:
@@ -734,6 +727,12 @@ def _run_verification_gate(
     paths: list[str],
     task: dict[str, Any],
 ) -> tuple[str, str]:
+    """Verify the checkpoint's own bytes on a private checkout of them.
+
+    ``verification_base`` is the commit the checkpoint was captured on, so the
+    gate covers exactly the delta publication adds. Writers that keep editing
+    the shared checkout can neither invalidate the result nor leak into it.
+    """
     if not _task_succeeded(task):
         return 'task_failed', 'Task did not settle successfully'
     diff_check = _git(root, [
@@ -741,10 +740,20 @@ def _run_verification_gate(
     ])
     if diff_check.returncode != 0:
         return 'failed', (diff_check.stdout or diff_check.stderr).strip()[:3000]
-    syntax_ok, syntax_detail = _syntax_check(root, paths)
+    from lib.project_mod.landing_verification import verification_checkout
+    try:
+        with verification_checkout(root, probe_sha) as tree:
+            return _gate_checkout(root, tree, verification_base, probe_sha, paths)
+    except OSError as error:
+        return 'failed', f'Verification checkout failed: {error}'[:3000]
+
+
+def _gate_checkout(root: Path, tree: Path, verification_base: str,
+                   probe_sha: str, paths: list[str]) -> tuple[str, str]:
+    syntax_ok, syntax_detail = _syntax_check(tree, paths)
     if not syntax_ok:
         return 'failed', syntax_detail[:3000]
-    ruff_ok, ruff_detail = _ruff_check(root, paths)
+    ruff_ok, ruff_detail = _ruff_check(tree, paths)
     if not ruff_ok:
         return 'failed', ruff_detail[:3000]
     try:
@@ -777,10 +786,12 @@ def _run_verification_gate(
     environment.update({
         'TOFU_LINEAR_CHECKPOINT_BASE_SHA': verification_base,
         'TOFU_LINEAR_CHECKPOINT_TARGET_SHA': probe_sha,
+        # Imports resolve to the verified checkout, never an inherited path.
+        'PYTHONPATH': str(tree),
     })
     try:
         process = subprocess.run(
-            argv, cwd=str(root), env=environment, text=True,
+            argv, cwd=str(tree), env=environment, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=_bounded_float(
                 'TOFU_LINEAR_GIT_CHECKPOINT_TEST_TIMEOUT',
@@ -791,17 +802,58 @@ def _run_verification_gate(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return 'failed', str(error)[:3000]
+    rewritten = _git(tree, ['status', '--porcelain=v1', '--untracked-files=no'],
+                     whole_tree=True)
+    if rewritten.returncode != 0 or rewritten.stdout.strip():
+        return 'workspace_changed', (
+            'The verification command rewrote tracked files in its checkout, so the '
+            'verified bytes are not the checkpoint; nothing was published: '
+            + (rewritten.stdout or rewritten.stderr).strip())[:3000]
+    attribution = ''
     if process.returncode != 0:
         output = '\n'.join(
-            part for part in (process.stdout, process.stderr) if part)
-        return 'failed', output.strip()[-3000:]
+            part for part in (process.stdout, process.stderr) if part).strip()
+        verdict, attribution = _attribute_gate_failure(
+            root, tree, verification_base, probe_sha, output)
+        if verdict != 'passed':
+            return verdict, attribution
 
     try:
         if select_gate_commands(root) != selected_policy:
             return 'failed', 'Git gate policy changed during verification'
     except GatePolicyError as error:
         return 'failed', str(error)
-    return 'passed', ''
+    return 'passed', attribution
+
+
+def _attribute_gate_failure(root: Path, tree: Path, base_sha: str, probe_sha: str,
+                            output: str) -> tuple[str, str]:
+    """Only a reproduced regression of the checkpoint's own delta blocks it.
+
+    The configured gate reports pass or fail. The repository's test selector,
+    through landing verification's merged-result attribution, decides whether
+    its failures are new: tests already failing on the base, and failures that do not
+    reproduce, never block publication. Without that evidence the failure stands.
+    """
+    from lib.project_mod.landing_verification import verify_merge
+    try:
+        verdict = verify_merge(root, base_sha, probe_sha, tree)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return 'failed', f'{output}\n(failure attribution unavailable: {error})'[-3000:]
+    if verdict.status == 'passed':
+        notes = [verdict.reason]
+        if verdict.preexisting:
+            notes.append('already failing on the base: ' + ', '.join(verdict.preexisting))
+        if verdict.flaky:
+            notes.append('not reproducible: ' + ', '.join(verdict.flaky))
+        return 'passed', ('The configured gate failed, but landing verification '
+                          'attributes none of its failures to this checkpoint: '
+                          + '; '.join(notes))[:3000]
+    if verdict.status == 'regressed':
+        return 'failed', ('Tests that pass on the base fail on the checkpoint: '
+                          + ', '.join(verdict.regressions) + '\n' + verdict.evidence)[:3000]
+    return 'failed', (f'{output}\n(failure attribution {verdict.status}: '
+                      f'{verdict.reason})')[-3000:]
 
 
 def _publish_verified_refs(
@@ -930,8 +982,6 @@ def _capture_repository_leased(task: dict[str, Any], user_id: int,
             if current_head != base_sha:
                 tree_sha = _carry_captured_tree_over_head(
                     root, base_sha, current_head, tree_sha)
-                capture_consistent = _workspace_matches_snapshot(
-                    root, tree_sha)
                 base_sha = current_head
                 stable_sha = _ensure_checkpoint_baseline(root, base_sha)
 
@@ -955,7 +1005,7 @@ def _capture_repository_leased(task: dict[str, Any], user_id: int,
             if ref_update.returncode != 0:
                 logger.warning(
                     '[LinearCheckpoint] checkpoint evidence ref failed '
-                    'task=%s root=%s: %s', task_id[:12], root,
+                    'task=%s root=%s: %s', task_id, root,
                     (ref_update.stderr or ref_update.stdout).strip()[:600])
                 checkpoint_ref = ''
 
@@ -981,22 +1031,22 @@ def _capture_repository_leased(task: dict[str, Any], user_id: int,
 
 def _verify_captured_checkpoint(task: dict[str, Any],
                                 row: dict[str, Any]) -> dict[str, Any]:
-    """Verify after releasing the Git lock; never affect task execution."""
+    """Verify the captured bytes, then publish them; never affect task execution.
+
+    The gate covers the delta from the commit the checkpoint was captured on:
+    commits already on that base reached the branch through their own
+    verification (a landing, an earlier checkpoint, a reviewed delivery).
+    Concurrent writers do not invalidate the result; bytes they write after
+    capture stay in the workspace for the next checkpoint.
+    """
     if row.get('status') != 'committed':
         return row
     root = Path(str(row['projectRoot']))
     target_sha = str(row['checkpointSha'])
+    base_sha = str(row.get('baseSha') or '')
     if not _task_succeeded(task):
         row['verification'] = 'task_failed'
         row['verificationDetail'] = 'Task did not settle successfully'
-        return row
-    if not row.get('captureConsistent') or not _workspace_matches_snapshot(
-            root, target_sha):
-        row['verification'] = 'workspace_changed'
-        row['verificationDetail'] = (
-            'The canonical workspace changed during or immediately after '
-            'capture. The checkpoint is preserved, later bytes remain dirty, '
-            'and stable was not moved.')
         return row
 
     stable_sha = _revision(root, STABLE_REF)
@@ -1019,80 +1069,234 @@ def _verify_captured_checkpoint(task: dict[str, Any],
         row['verification'] = 'failed'
         row['verificationDetail'] = str(error)
         return row
-    verification_paths = _changed_paths(root, stable_sha, target_sha)
+    verification_paths = _changed_paths(root, base_sha, target_sha)
     verification, detail = _run_verification_gate(
-        root, stable_sha, target_sha, verification_paths, task)
-    if not _workspace_matches_snapshot(root, target_sha):
-        row['verification'] = 'workspace_changed'
-        row['verificationDetail'] = (
-            'The canonical workspace changed during checkpoint verification. '
-            'Those bytes remain available for the next task-end checkpoint; '
-            'stable was not moved.')
-        return row
-
+        root, base_sha, target_sha, verification_paths, task)
     row['verification'] = verification
     row['verificationDetail'] = detail[:3000]
     if verification != 'passed':
         return row
-    try:
-        with workspace_write_lease(root):
-            return _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, selected_policy)
-    except WorkspaceBusyError as error:
-        row['verification'] = 'promotion_deferred'
-        row['verificationDetail'] = str(error)
-        return row
+    return _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, selected_policy)
+
+
+class _PublicationDeferred(LinearCheckpointError):
+    """A transient condition (busy index, moved branch, operation in progress)."""
+
+
+_OPERATIONS_IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+                           'rebase-merge', 'rebase-apply', 'BISECT_LOG')
+
+
+def _index_info(records, oid_length: int) -> str:
+    """``update-index --index-info`` input; a None entry removes the path."""
+    zero = '0' * oid_length
+    return ''.join(f'{entry[0]} {entry[1]}\t{path}\0' if entry else f'0 {zero}\t{path}\0'
+                   for path, entry in records)
+
+
+def _git_bytes(root: Path, args: list[str], data: bytes) -> bytes:
+    process = subprocess.run(
+        [git_executable(), '-c', 'core.fsmonitor=false', *args], cwd=str(root),
+        env=git_policy_environment(), input=data, capture_output=True, check=False)
+    if process.returncode != 0:
+        raise LinearCheckpointError(
+            f'git {args[0]} failed: {process.stderr.decode(errors="replace").strip()[:600]}')
+    return process.stdout
+
+
+def _tree_blobs(root: Path, tree_sha: str, scopes: list[str]) -> tuple[dict, dict]:
+    """(path -> (mode, oid), path -> bytes) for the blobs of TREE_SHA under SCOPES."""
+    listed = _git(root, ['--literal-pathspecs', 'ls-tree', '-r', '-z', tree_sha, '--', *scopes],
+                  check=True).stdout
+    entries = {}
+    for record in listed.split('\0'):
+        meta, _, path = record.partition('\t')
+        if path:
+            mode, kind, oid = meta.split()
+            if kind == 'blob':
+                entries[path] = (mode, oid)
+    data = _git_bytes(root, ['cat-file', '--batch'],
+                      ''.join(oid + '\n' for _mode, oid in entries.values()).encode())
+    contents, offset = {}, 0
+    for path in entries:
+        header_end = data.index(b'\n', offset)
+        _oid, kind, size = data[offset:header_end].split()
+        if kind != b'blob':
+            raise LinearCheckpointError(f'Unexpected object for {path}')
+        start = header_end + 1
+        contents[path] = data[start:start + int(size)]
+        offset = start + int(size) + 1
+    return entries, contents
+
+
+def _own_checkpoint_tree(root: Path, base_sha: str, captured_sha: str,
+                         selected: set[str]) -> str:
+    """BASE plus the captured changes of SELECTED paths only.
+
+    Generated outputs never come from the shared checkout, whose copies follow
+    every writer's sources: the affected families are rebuilt from this tree's
+    own sources, as git_land does.
+    """
+    from lib.project_mod.generated_integration import (
+        affected_families, build_outputs, family_roots, output_family)
+    changes = [(path, new) for path, _old, new in _tree_changes(root, base_sha, captured_sha)
+               if path in selected and not output_family(path)]
+    if not changes:
+        return ''
+    families = affected_families(path for path, _new in changes)
+    with tempfile.TemporaryDirectory(prefix='tofu-linear-own-') as directory:
+        env = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
+        _git(root, ['read-tree', base_sha], env=env, check=True)
+        _git(root, ['update-index', '-z', '--index-info'], env=env, check=True,
+             input_text=_index_info(changes, len(base_sha)))
+        tree = _git(root, ['write-tree'], env=env, check=True).stdout.strip()
+        if not families:
+            return tree
+        entries, files = _tree_blobs(root, tree, family_roots(families))
+        outputs = build_outputs(root, families, files, committed=True)
+        records = []
+        for path in sorted({path for path in entries if output_family(path) in families}
+                           | outputs.keys()):
+            if path in outputs:
+                oid = _git_bytes(root, ['hash-object', '-w', '--stdin'],
+                                 outputs[path]).decode().strip()
+                records.append((path, (entries.get(path, ('100644',))[0], oid)))
+            else:
+                records.append((path, None))
+        _git(root, ['update-index', '-z', '--index-info'], env=env, check=True,
+             input_text=_index_info(records, len(base_sha)))
+        return _git(root, ['write-tree'], env=env, check=True).stdout.strip()
+
+
+def _own_paths_retry(task: dict[str, Any], root: Path, whole: dict[str, Any],
+                     own_paths: set[str]) -> dict[str, Any] | None:
+    """Retry a failed whole-workspace checkpoint with only the task's own changes.
+
+    The whole capture coalesces every writer's uncommitted bytes, so one writer's
+    unfinished change would keep every other task's work out of history. The
+    retry commits, on the same base, only the captured changes of paths the
+    task's conversation wrote (integration radar) or its caller delivered, and
+    verifies and publishes them like any checkpoint. Everything else stays in
+    the workspace for later checkpoints. None when no narrower set exists.
+    """
+    base_sha, captured_sha = str(whole['baseSha']), str(whole['checkpointSha'])
+    changed = set(_changed_paths(root, base_sha, captured_sha))
+    selected = changed & own_paths
+    if not selected or selected == changed:
+        return None
+    tree = _own_checkpoint_tree(root, base_sha, captured_sha, selected)
+    if not tree or tree == _git(root, ['rev-parse', f'{base_sha}^{{tree}}'],
+                                check=True).stdout.strip():
+        return None
+    commit = _commit_tree(root, tree, base_sha, task=task, verification='pending_settlement_gate')
+    checkpoint_ref = str(whole.get('checkpointRef') or '')
+    if checkpoint_ref:
+        checkpoint_ref += '-own'
+        if _git(root, ['update-ref', '-m', 'tofu: own-paths checkpoint',
+                       checkpoint_ref, commit]).returncode != 0:
+            checkpoint_ref = ''
+    row = dict(whole, checkpointSha=commit, checkpointRef=checkpoint_ref,
+               changedPaths=sorted(selected)[:128], verification='pending',
+               verificationDetail='', wholeWorkspace={
+                   'checkpointSha': captured_sha, 'changedPathCount': len(changed),
+                   'verification': whole.get('verification'),
+                   'verificationDetail': str(whole.get('verificationDetail') or '')[:1500]})
+    return _verify_captured_checkpoint(task, row)
+
+
+def _tree_changes(root: Path, old_sha: str, new_sha: str):
+    tokens = _git(root, ['diff-tree', '-r', '-z', '--no-renames', '--no-abbrev',
+                         old_sha, new_sha], check=True).stdout.split('\0')
+    changes = []
+    for meta, path in zip(tokens[0::2], tokens[1::2]):
+        old_mode, new_mode, old_oid, new_oid, _status = meta.lstrip(':').split(' ')
+        changes.append((path,
+                        None if not old_mode.strip('0') else (old_mode, old_oid),
+                        None if not new_mode.strip('0') else (new_mode, new_oid)))
+    return changes
+
+
+def _index_entries(root: Path, paths: list[str]) -> dict[str, list[list[str]]]:
+    if not paths:
+        return {}
+    listed = _git(root, ['--literal-pathspecs', 'ls-files', '-s', '-v', '-z', '--', *paths],
+                  check=True).stdout
+    entries: dict[str, list[list[str]]] = {}
+    for record in listed.split('\0'):
+        meta, _, path = record.partition('\t')
+        if path:
+            entries.setdefault(path, []).append(meta.split(' '))
+    return entries
+
+
+def _operation_in_progress(root: Path) -> bool:
+    arguments = [part for name in _OPERATIONS_IN_PROGRESS for part in ('--git-path', name)]
+    paths = _git(root, ['rev-parse', *arguments], check=True).stdout.splitlines()
+    return any((root / path).exists() for path in paths)
 
 
 @contextlib.contextmanager
 def _prepared_index_publication(root, base_sha, target_sha):
-    """Reserve Git's real index lock; preserve any pre-existing staged work.
+    """Hold Git's index.lock and prepare only the entries this publication moves.
 
-    Prepare new bytes privately. A failed ref CAS only removes our lock file;
-    it never read-trees a stale revision back over another writer's index.
+    For each path base->target changes, an entry still holding the base version
+    moves to the target and one already at the target stays. An entry another
+    writer staged differently, flagged assume-unchanged/skip-worktree or left
+    unmerged is preserved, so their staged work survives and never blocks
+    publication. The prepared index is installed only after the caller moved
+    the refs and HEAD is the target; a refused CAS removes only our lock. A
+    busy index or an operation in progress raises ``_PublicationDeferred``.
+    Yields whether every changed path's entry now matches the target.
     """
     raw = _git(root, ['rev-parse', '--git-path', 'index'], check=True).stdout.strip()
     index_path = (root / raw).resolve()
     lock_path = Path(str(index_path) + '.lock')
     try:
         descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as error:
+        raise _PublicationDeferred(f'The Git index is busy ({lock_path} exists)') from error
     except OSError as error:
-        raise LinearCheckpointError(f'Real index is busy: {error}') from error
+        raise LinearCheckpointError(f'Real index is unavailable: {error}') from error
     temporary = ''
     lock_owned = True
+    install = False
     try:
         with os.fdopen(descriptor, 'wb') as stream:
-            # Diffing the index is read-only. Never assume it represents HEAD.
-            staged = _git(root, ['diff', '--cached', '--quiet', base_sha, '--'])
-            if staged.returncode not in (0, 1):
-                raise LinearCheckpointError('Cannot establish real index preimage; publication refused')
-            flags = _git(root, ['ls-files', '-v'], check=True).stdout.splitlines()
-            ordinary_index = all(line.startswith('H ') for line in flags)
-            synchronized = index_path.is_file() and ordinary_index
-            if synchronized:
+            if _operation_in_progress(root):
+                raise _PublicationDeferred('A Git operation is in progress in the checkout')
+            changes = _tree_changes(root, base_sha, target_sha)
+            entries = (_index_entries(root, [path for path, _old, _new in changes])
+                       if index_path.is_file() else None)
+            moves, preserved = [], []
+            for path, old, new in changes:
+                records = [] if entries is None else entries.get(path, [])
+                actual = None
+                if records:
+                    tag, mode, oid, stage = records[0]
+                    if len(records) > 1 or tag != 'H' or stage != '0':
+                        preserved.append(path)
+                        continue
+                    actual = (mode, oid)
+                if entries is not None and actual == new:
+                    continue
+                if entries is not None and actual == old:
+                    moves.append((path, new))
+                else:
+                    preserved.append(path)
+            if moves:
                 fd, temporary = tempfile.mkstemp(prefix='tofu-linear-index-')
                 os.close(fd)
-                with index_path.open('rb') as source, open(temporary, 'wb') as prepared:
-                    shutil.copyfileobj(source, prepared)
-                if staged.returncode != 0:
-                    # A concurrent commit leaves an ordinary index against
-                    # its parent. Compare trees privately while index.lock is
-                    # held; staged content differences still refuse sync.
-                    index_tree = _git(root, ['write-tree'], env={
-                        'GIT_INDEX_FILE': temporary,
-                    }, check=True).stdout.strip()
-                    base_tree = _git(root, [
-                        'rev-parse', f'{base_sha}^{{tree}}',
-                    ], check=True).stdout.strip()
-                    synchronized = index_tree == base_tree
-                if synchronized:
-                    _git(root, ['read-tree', target_sha],
-                         env={'GIT_INDEX_FILE': temporary}, check=True)
-                    with open(temporary, 'rb') as prepared:
-                        shutil.copyfileobj(prepared, stream)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-        yield synchronized
-        if synchronized and _revision(root, 'HEAD') == target_sha:
+                shutil.copyfile(index_path, temporary)
+                _git(root, ['update-index', '-z', '--index-info'],
+                     input_text=_index_info(moves, len(base_sha)),
+                     env={'GIT_INDEX_FILE': temporary}, check=True)
+                with open(temporary, 'rb') as prepared:
+                    shutil.copyfileobj(prepared, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+                install = True
+        yield not preserved
+        if install and _revision(root, 'HEAD') == target_sha:
             os.replace(lock_path, index_path)
             lock_owned = False
     finally:
@@ -1103,6 +1307,39 @@ def _prepared_index_publication(root, base_sha, target_sha):
         if temporary:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
+
+
+def _carry_verified_checkpoint(root: Path, base_sha: str, head_sha: str,
+                               target_sha: str) -> tuple[str, str]:
+    """Publish a verified checkpoint over a branch that moved since capture.
+
+    The moved commits arrived through their own verification. When they touch
+    none of the checkpoint's paths, its delta replays onto them; only their
+    interaction across different files goes unverified, the same exposure as a
+    landing whose verdict still covers a newer tip. When the branch already
+    holds the same bytes, nothing is left to publish. Changes to the same files
+    were never verified together: the bytes stay in the workspace, and the next
+    checkpoint captures and verifies them on the new branch tip.
+    """
+    try:
+        merged = _carry_captured_tree_over_head(root, base_sha, head_sha, target_sha)
+    except LinearCheckpointError as error:
+        return '', f'{error}; its bytes remain in the workspace for the next checkpoint.'
+    if merged == _git(root, ['rev-parse', f'{head_sha}^{{tree}}'], check=True).stdout.strip():
+        return head_sha, ''
+    landed = _git(root, ['diff', '--name-only', '--no-renames', '-z', base_sha, head_sha],
+                  check=True).stdout.split('\0')
+    moved = sorted(set(filter(None, landed)) & set(_changed_paths(root, base_sha, target_sha)))
+    if moved:
+        return '', ('The branch moved over paths this checkpoint changes since capture ('
+                    + ', '.join(moved) + '). The checkpoint stays recoverable and its bytes '
+                    'remain in the workspace; the next checkpoint verifies them on the new '
+                    'branch tip.')
+    environment = _commit_environment('')
+    environment.pop('GIT_INDEX_FILE', None)
+    message = _git(root, ['log', '-1', '--format=%B', target_sha], check=True).stdout
+    return _git(root, ['commit-tree', merged, '-p', head_sha, '-F', '-'], env=environment,
+                input_text=message, check=True).stdout.strip(), ''
 
 
 def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, selected_policy):
@@ -1118,6 +1355,7 @@ def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, select
             'Verification passed, but another checkpoint owns the Git lock; '
             'the immutable checkpoint ref is preserved for a later promotion.')
         return row
+    promoted_sha = target_sha
     try:
         branch_ref = str(row.get('branchRef') or '')
         try:
@@ -1131,39 +1369,56 @@ def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, select
         if (
             current_branch.returncode != 0
             or current_branch.stdout.strip() != branch_ref
-            or _revision(root, branch_ref) != base_sha
             or _revision(root, STABLE_REF) != stable_sha
             or stable_sha != row.get('stableSha')
             or _revision(root, 'refs/tofu/candidate')
-            or not _workspace_matches_snapshot(root, target_sha)
         ):
             row['verification'] = 'workspace_changed'
             row['verificationDetail'] = (
-                'Branch, stable ref, or workspace changed after verification; '
-                'the checkpoint remains recoverable and was not published.')
+                'The branch was switched, or the stable or candidate ref moved, after '
+                'verification; the checkpoint remains recoverable and was not published.')
             return row
-        with _prepared_index_publication(root, base_sha, target_sha) as index_prepared:
+        head_sha = _revision(root, branch_ref)
+        if head_sha != base_sha:
+            promoted_sha, detail = _carry_verified_checkpoint(root, base_sha, head_sha, target_sha)
+            if not promoted_sha:
+                row['verification'] = 'workspace_changed'
+                row['verificationDetail'] = detail[:3000]
+                return row
+            if promoted_sha == head_sha:
+                row['verificationDetail'] = (
+                    'The branch already contains these bytes; nothing was left to publish.')
+                row['headAfter'] = head_sha
+                return row
+        with _prepared_index_publication(root, head_sha, promoted_sha) as index_prepared:
             # Recheck HEAD after preparing under index.lock as well as CAS refs.
-            if (_revision(root, 'HEAD') != base_sha
+            if (_revision(root, 'HEAD') != head_sha
                     or _git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip() != branch_ref):
-                raise LinearCheckpointError('HEAD changed before publication')
+                raise _PublicationDeferred('HEAD moved before publication')
             _publish_verified_refs(
-                root, branch_ref=branch_ref, base_sha=base_sha,
-                stable_sha=stable_sha, target_sha=target_sha)
+                root, branch_ref=branch_ref, base_sha=head_sha,
+                stable_sha=stable_sha, target_sha=promoted_sha)
 
             # Ref publication is irreversible here. If index installation
             # subsequently fails, report the published state, never rollback.
-            row.update({'stableSha': target_sha, 'stableUpdated': True,
-                        'headAfter': target_sha})
+            row.update({'stableSha': promoted_sha, 'stableUpdated': True,
+                        'headAfter': promoted_sha})
+            if promoted_sha != target_sha:
+                row['publishedSha'] = promoted_sha
         row['indexSynchronized'] = index_prepared
-        promoted_sha = target_sha
-        if _revision(root, 'HEAD') != target_sha:
+        if _revision(root, 'HEAD') != promoted_sha:
             row['indexSynchronized'] = False
             row['verification'] = 'workspace_changed'
             row['verificationDetail'] = (
                 'HEAD moved immediately after atomic verified publication; '
                 'the checkpoint and stable ref remain recoverable.')
             return row
+    except _PublicationDeferred as error:
+        row['verification'] = 'promotion_deferred'
+        row['verificationDetail'] = (
+            f'{error}; the verified checkpoint stays recoverable and its bytes remain '
+            'in the workspace for the next checkpoint.')
+        return row
     except (LinearCheckpointError, OSError) as error:
         row['indexSynchronized'] = False
         row['verification'] = 'failed'
@@ -1177,19 +1432,48 @@ def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, select
     return row
 
 
+def publish_commit(root: str | Path, *, branch_ref: str, base_sha: str, target_sha: str,
+                   reflog: str) -> dict[str, Any] | None:
+    """Move BRANCH_REF from BASE_SHA to TARGET_SHA without writing a checkout file.
+
+    The checkpoint's own publication: only the index entries of the paths the
+    commit changes move, and entries other writers staged are preserved.
+    Returns None while the index is busy, the branch moved or an operation is
+    in progress, so the caller retries; raises LinearCheckpointError when Git
+    refuses the reference update.
+    """
+    root = Path(root)
+    try:
+        with _prepared_index_publication(root, base_sha, target_sha) as synchronized:
+            current = _git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip()
+            if current != branch_ref or _revision(root, branch_ref) != base_sha:
+                raise _PublicationDeferred('The branch moved')
+            moved = _git(root, ['update-ref', '-m', reflog, branch_ref, target_sha, base_sha])
+            if moved.returncode != 0:
+                raise LinearCheckpointError(
+                    f'{branch_ref} did not move from {base_sha}: '
+                    + (moved.stderr or moved.stdout).strip()[:600])
+    except _PublicationDeferred:
+        return None
+    return {'indexSynchronized': synchronized}
+
+
 def settle_task_checkpoint(
     task: dict[str, Any], *, user_id: int, project_path: str | None,
-    project_paths: list[str] | None = None,
+    project_paths: list[str] | None = None, own_paths: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort checkpoint enabled repositories after task settlement.
 
     This API is intentionally absent from tool dispatch. Every failure is
     represented as receipt data and logs; callers must not rewrite task/tool
-    outcomes from it.
+    outcomes from it. OWN_PATHS (repository-relative, in PROJECT_PATH's
+    repository) add to the paths the integration radar recorded for the task's
+    conversation when a failed whole-workspace capture is narrowed to them.
     """
     roots = _enabled_repository_roots(project_path, project_paths)
     if not roots:
         return None
+    primary = _repository_root(project_path) if project_path else None
     try:
         validated_user_id, task_id = _checkpoint_identity(
             user_id, str(task.get('id') or ''))
@@ -1207,10 +1491,15 @@ def settle_task_checkpoint(
         try:
             row = _capture_repository(task, validated_user_id, root)
             row = _verify_captured_checkpoint(task, row)
+            if row.get('status') == 'committed' and row.get('verification') == 'failed':
+                from lib.project_mod.integration_radar import recorded_paths
+                own = recorded_paths(task, root) | set(
+                    own_paths if root == primary and own_paths else ())
+                row = _own_paths_retry(task, root, row, own) or row
         except Exception as error:
             logger.warning(
                 '[LinearCheckpoint] settlement failed task=%s root=%s: %s',
-                task_id[:12], root, error, exc_info=True)
+                task_id, root, error, exc_info=True)
             row = {
                 'projectRoot': str(root), 'status': 'error',
                 'baseSha': _revision(root, 'HEAD'),

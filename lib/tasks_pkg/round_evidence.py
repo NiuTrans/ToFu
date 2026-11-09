@@ -39,15 +39,16 @@ def round_evidence_turn(task: dict, round_num: int | None) -> str:
 
 def build_round_evidence(task: dict, messages: list, *, ref: dict,
                          kind: str, model: str, prepared_messages=None,
-                         params=None, tools=None) -> dict:
+                         params=None, tools=None, prepared_lineage=None) -> dict:
     from lib.conversation_sync.settled_rows import settle_items
     from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
     canonical = isinstance(prepared_messages, list)
+    lineage = prepared_lineage if canonical else {}
     wire = prepared_messages if canonical else apply_wire_sanitize(
         messages, conv_id=task.get('convId', ''),
         provider_id=task.get('provider_id') or '',
-        user_id=task.get('_userId') or None)
+        user_id=task.get('_userId') or None, lineage=lineage)
     # Snapshot messages are settled and an unchanged message keeps the previous
     # snapshot's twin, whose memoized digest the event-log delta projector
     # (snapshot_delta) reuses instead of re-encoding the whole history.
@@ -60,6 +61,11 @@ def build_round_evidence(task: dict, messages: list, *, ref: dict,
         roundNum=ref['roundNum'], turn=ref['turn'], inspectorRef=dict(ref),
         label=f'Round {ref["roundNum"]} {label} · {len(snapshot)}条',
         messages=snapshot, contextManifest=list(task.get('_contextManifest') or []))
+    if lineage and lineage.get('sources'):
+        from copy import deepcopy
+        from lib.llm_sanitize.lineage import verify_lineage
+        event['contextLineage'] = deepcopy(lineage)
+        verify_lineage(event['contextLineage'], {'messages': snapshot}, 'snapshot_projection')
     if params is not None:
         event['params'] = params
     if tools:

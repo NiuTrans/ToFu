@@ -1234,8 +1234,9 @@ phase and the row names the announced call. A compaction runs inside another
 activity, so its `compaction_done` resumes the phase it interrupted (for
 example “Analyzing results and planning next step…”) instead of leaving no
 phase until the next one arrives. Wait labels whose `detailArgs.elapsed`
-counts up between sampled frames (`waitingForResponse`, `waitingQuotaReset`,
-`preparingToolCall`) tick locally once per second; the renderer locates the
+counts up between sampled frames (`waitingForResponse`,
+`waitingForProviderResponse`, `waitingQuotaReset`, `preparingToolCall`) tick
+locally once per second; the renderer locates the
 counter by composing the label with a marker in place of `elapsed`, so locales
 that place `{model}` or `{tool}` first never tick a digit inside that name.
 
@@ -1689,6 +1690,12 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   `tests/visual/test_visual_swarm_card_in_tool_panel.py` (three themes, desktop
   and phone, live and settled), `swarm-agent-presentation.test.ts` and
   `tests/swarm/test_swarm_card_phase_words.py`.
+- **Every rich call is one call of the tool panel (owner report 2026-11-03).**
+  The same rule covers the other rich calls: inside an open tool panel, timer
+  watches, tool search, guidance questions, rich response bodies, injection
+  reports and memory/project receipts drop their own frame, fill and radius and
+  sit on the panel's row band like ordinary calls; outside a panel they keep
+  their sheets. Spec: `tests/visual/test_visual_rich_calls_in_tool_panel.py`.
 - **A failing agent opens itself.** Problem: the card opens running and failed
   agents by default, but rich-card reconciliation let that default win only on
   the transition into running, so an agent mounted while it waited and then

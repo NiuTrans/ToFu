@@ -175,7 +175,8 @@ def _restart_protection(router_conversation_id: str, interrupt: bool) -> list[st
                        f'Restart refused: {len(conversations)} other conversation(s) are running and a '
                        f'restart would interrupt them ({", ".join(conversations)}). Restart anyway only if '
                        'the owner asked for it even while work runs (interrupt_running_conversations=true); '
-                       'interrupted conversations resume with Continue afterwards.')
+                       'interrupted conversations resume from their checkpoint by themselves after the '
+                       'restart, and the restart-complete notice lists each one\u2019s resume result.')
     return conversations
 
 
@@ -223,29 +224,66 @@ def restart_server(task: dict, scope: dict, arguments: dict) -> dict:
     return _restart_view(record, replayed=replayed)
 
 
+def _restart_next_step(status: str) -> str:
+    """What happens next for a restart in ``status``; never a promise the server does not keep."""
+    if status in ('accepted', 'restarting'):
+        return ('The restart runs detached from this turn: the builds run first and the old server stops '
+                'only after they succeed. Tell the owner it is under way, then end your turn. When the restart '
+                'ends, whether completed, refused or failed, this conversation receives one nonhuman '
+                'restart-complete notice as a new turn, with the outcome, the old and new commit, the build '
+                'results and the resume result of each interrupted conversation; interrupted conversations '
+                'resume from their checkpoint by themselves. Report the outcome to the owner from that notice. '
+                'The owner sees every step in the main coordinator\u2019s "Act for me" log. Never call '
+                'restart_server again for the same request.')
+    if status == 'refused':
+        return ('This request was refused before anything ran: nothing restarted and no notice follows. Tell '
+                'the owner why; a new restart needs a new request once the cause is fixed.')
+    return (f'This restart already ended ({status}). Its one nonhuman restart-complete notice reaches this '
+            'conversation as a new turn if it has not already; report the outcome to the owner from it. Never '
+            'call restart_server again for the same request.')
+
+
 def _restart_view(record: dict, *, replayed: bool) -> dict:
     return {'action_id': record['id'], 'status': record['status'], 'replayed': replayed,
             'execution_started': record['status'] in ('accepted', 'restarting', 'completed'),
             'code': record.get('code'), 'detail': record.get('detail'),
-            'next_step': ('The restart runs detached from this turn: the frontend is built first and the '
-                          'old server stops only after that succeeds. This conversation is interrupted by '
-                          'the restart and resumes afterwards; the owner sees every step in the main '
-                          'coordinator\u2019s "Act for me" log. Never call restart_server again for the '
-                          'same request.')}
+            'next_step': _restart_next_step(record['status'])}
+
+
+def _prepare(action_id: str) -> tuple[str, dict]:
+    """The Settings preparation, observed for the restart-complete notice's build results."""
+    from lib.server import server_reexec
+    from serverctl_pkg.native_engine import observe_preparation
+    phases: list[str] = []
+
+    def observe(progress):
+        phase = progress.get('phase') if isinstance(progress, dict) else None
+        if isinstance(phase, str) and phase not in phases:
+            phases.append(phase)
+    started = time.monotonic()
+    with observe_preparation(observe):
+        error = server_reexec.prepare_server_reexec_frontend()
+    return error, {'ok': not error, 'phases': phases, 'seconds': round(time.monotonic() - started, 1),
+                   'detail': (error or '')[:2000] or None}
 
 
 def _restart_after_acceptance(owner: int, action_id: str, requester: dict, requested_at: float,
                               interrupt: bool) -> None:
+    from lib import boot_identity
     from lib import lifecycle_approval as gate
     from lib.server import server_reexec
+    from lib.server.restart_notice import deliver_restart_notice
+    old_code = boot_identity.code_fingerprint()
     try:
-        error = server_reexec.prepare_server_reexec_frontend()
+        error, preparation = _prepare(action_id)
         if error:
+            gate.note_restart_notice(action_id, preparation=preparation, oldCode=old_code)
             gate.settle_delegated_action(owner, action_id, status='failed',
                                          code='restart_preparation_failed', detail=error)
             return
         interrupted = _restart_protection(requester['conversationId'], interrupt)
-        accepted = gate.accept_delegated_restart(owner, action_id, requester, interrupted=interrupted)
+        accepted = gate.accept_delegated_restart(owner, action_id, requester, interrupted=interrupted,
+                                                 old_code=old_code, preparation=preparation)
         if accepted.get('status') != 'restarting':
             return
         if not server_reexec.perform_server_reexec(RESTART_REASON, frontend_prevalidated=True,
@@ -253,12 +291,17 @@ def _restart_after_acceptance(owner: int, action_id: str, requester: dict, reque
             gate.settle_delegated_action(owner, action_id, status='failed', code='restart_bridge_refused',
                                          detail='Every restart bridge refused; the server keeps running')
     except gate.DelegationRefused as refusal:
+        gate.note_restart_notice(action_id, oldCode=old_code)
         gate.settle_delegated_action(owner, action_id, status='failed', code=refusal.code,
                                      detail=str(refusal))
     except Exception as error:  # a detached thread has no caller to report to
         logger.exception('[Router] delegated restart %s failed', action_id)
         gate.settle_delegated_action(owner, action_id, status='failed', code='restart_failed',
                                      detail=f'{type(error).__name__}: {error}')
+    finally:
+        # Every refusal above left the old server serving: tell the requester now.
+        # A handed-over restart has no outcome yet, so this delivers nothing.
+        deliver_restart_notice(action_id)
 
 
 def delegated_conversation_control(task: dict, scope: dict, arguments: dict, *, control):
@@ -282,7 +325,8 @@ def delegated_conversation_control(task: dict, scope: dict, arguments: dict, *, 
     action = arguments.get('action')
     if action not in ('continue', 'checkpoint_resume', 'stop'):
         raise ValueError('Under the owner\u2019s delegation, only continue, checkpoint_resume and stop are '
-                         'available; regenerate needs the owner\u2019s own request')
+                         'available; regenerate needs the owner\u2019s own request, and follow_up belongs '
+                         'to the Worker\u2019s own Project Coordinator')
     owner = scope['user_id']
     requester = router_requester(task, scope)
     target = {'kind': 'conversation', 'conversationId': arguments['conversation_id'],

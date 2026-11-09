@@ -109,11 +109,8 @@ def guard_url_blocked(url, domains):
     return url_is_blocked(url, domains)
 
 
-def test_tofu_config_keeps_the_product_defaults_and_only_adds_answer_sources():
-    from lib import _DEFAULT_SKIP_DOMAINS
-
+def test_tofu_config_bans_only_answer_sources():
     domains = set(guard.tofu_server_config()["search"]["skip_domains"])
-    assert set(_DEFAULT_SKIP_DOMAINS) <= domains
     assert set(guard.ANSWER_HOSTS) <= domains
     # Shared hosts stay open as hosts: only their answer-source paths are refused.
     assert not {"github.com", "raw.githubusercontent.com", "huggingface.co"} & domains
@@ -164,6 +161,9 @@ PARITY_URLS = [
     "https://pypi.org/project/terminal-notes/",
     "https://github.com/pytorch/pytorch/blob/main/torch/distributed/pipelining/README.md",
     "https://huggingface.co/datasets/stanfordnlp/imdb",
+    # Product fetch-quality skips are not bans: the other arms reach these too.
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "https://www.tiktok.com/@tofu",
 ]
 
 

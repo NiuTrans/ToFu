@@ -11,13 +11,23 @@ import struct
 import time
 import uuid
 
+from lib.log import get_logger
 from tofu_db._loopback import create_connection
 
+logger = get_logger(__name__)
+
 from lib.tasks_pkg.generated_command_control import (
-    ACKNOWLEDGEMENT_SECONDS, FORMAT, METHODS, REQUEST_FIELDS, RESPONSE_FIELDS,
+    ACKNOWLEDGEMENT_SECONDS, FORMAT, METHODS, OWNER_METHODS, REQUEST_FIELDS, RESPONSE_FIELDS,
 )
 
 _LENGTH = struct.Struct('!I')
+# The boolean outcome of each task-addressed method and its optional fields.
+_RESULT_FIELDS = {
+    'interrupt': ('interrupted', {'reason', 'pid'}),
+    'background': ('backgrounded', {'reason'}),
+    'swarm_abort': ('aborted', {'reason'}),
+    'swarm_agent_stop': ('stopped', {'reason', 'status'}),
+}
 
 
 class CommandControlUnavailable(RuntimeError):
@@ -47,16 +57,38 @@ def _read_exact(connection, count, deadline):
     return bytes(chunks)
 
 
+def _valid_histogram(row):
+    return (isinstance(row, dict) and set(row) == {'labels', 'buckets', 'counts', 'sum', 'count'}
+            and isinstance(row['labels'], dict)
+            and all(isinstance(key, str) and isinstance(value, str)
+                    for key, value in row['labels'].items())
+            and isinstance(row['buckets'], list) and isinstance(row['counts'], list)
+            and len(row['buckets']) == len(row['counts'])
+            and all(type(bound) in (int, float) for bound in row['buckets'])
+            and all(type(count) is int and count >= 0 for count in row['counts'])
+            and type(row['count']) is int and row['count'] >= 0
+            and type(row['sum']) in (int, float))
+
+
 def _valid_result(method, result):
+    if method == 'storage_rpc_metrics':
+        return (isinstance(result, dict) and set(result) == {'histograms'}
+                and isinstance(result['histograms'], list)
+                and all(_valid_histogram(row) for row in result['histograms']))
+    if method in OWNER_METHODS:
+        return (isinstance(result, dict) and set(result) == {'swarms', 'backgroundCommands'}
+                and all(isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+                        for rows in result.values()))
     if result is None:
-        return True  # The authenticated owner has no such task.
-    key = 'interrupted' if method == 'interrupt' else 'backgrounded'
+        return True  # The authenticated owner has no such task or session.
+    key, optional = _RESULT_FIELDS[method]
     if (not isinstance(result, dict) or type(result.get(key)) is not bool
-            or set(result) - {key, 'reason', 'pid'}
-            or ('reason' in result and not isinstance(result['reason'], str))):
+            or set(result) - {key, *optional}
+            or any(name in result and not isinstance(result[name], str)
+                   for name in optional - {'pid'})):
         return False
-    if method == 'background':
-        return 'pid' not in result
+    if method != 'interrupt':
+        return True
     return (type(result.get('pid')) is int and result['pid'] > 0
             if result[key] else 'pid' not in result)
 
@@ -95,16 +127,22 @@ def _valid_request(request):
     if (not isinstance(request, dict) or set(request) != set(REQUEST_FIELDS)
             or request['format'] != FORMAT or request['method'] not in METHODS
             or type(request['ownerId']) is not int or request['ownerId'] <= 0
-            or not isinstance(request['taskId'], str) or not request['taskId']
+            or not isinstance(request['taskId'], str)
+            # Owner methods address no task; every other method names one.
+            or (request['taskId'] == '') != (request['method'] in OWNER_METHODS)
             or not isinstance(request['requestId'], str) or not request['requestId']
             or type(request['deadlineUnixMs']) is not int
             or not isinstance(request['params'], dict)):
         return False
-    params = request['params']
-    return (params == {} if request['method'] == 'interrupt' else (
-        set(params) == {'round_num', 'tool_call_id'}
-        and type(params['round_num']) is int and params['round_num'] >= 1
-        and isinstance(params['tool_call_id'], str) and bool(params['tool_call_id'])))
+    params, method = request['params'], request['method']
+    if method == 'background':
+        return (set(params) == {'round_num', 'tool_call_id'}
+                and type(params['round_num']) is int and params['round_num'] >= 1
+                and isinstance(params['tool_call_id'], str) and bool(params['tool_call_id']))
+    if method == 'swarm_agent_stop':
+        return (set(params) == {'agent_id'}
+                and isinstance(params['agent_id'], str) and bool(params['agent_id']))
+    return params == {}
 
 
 async def _join_owned(awaitable):
@@ -116,7 +154,8 @@ async def _join_owned(awaitable):
             await asyncio.shield(future)
         except asyncio.CancelledError as error:
             interrupted = interrupted or error
-        except BaseException:
+        except BaseException as error:
+            logger.debug('execution control joined observer failed: %s', error)
             break
     try:
         result = future.result()
@@ -185,7 +224,8 @@ class CommandControlServer:
                 error = None
         except (OSError, ValueError, TypeError, asyncio.IncompleteReadError):
             error = 'control_refused'
-        except Exception:
+        except Exception as exc:
+            logger.debug('execution control request failed: %s', exc)
             error = 'control_failed'
         finally:
             try:

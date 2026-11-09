@@ -16,6 +16,8 @@ from lib.project_mod import integration_radar as radar
 
 pytestmark = pytest.mark.unit
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/shared.py', 'lib/other.py', 'lib/third.py', 'lib/new.py', 'lib/x.py'}
+
 
 def git(cwd, *args) -> str:
     env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
@@ -158,7 +160,8 @@ def test_landing_notifies_writers_with_live_changes_and_retires_landed_records(r
     notices = radar.take_notices(task('conv-b'), str(right_root))
     assert len(notices) == 1
     assert 'feature-a landed on trunk' in notices[0] and 'lib/shared.py' in notices[0]
-    assert 'Merge trunk into your branch and rerun your tests' in notices[0]
+    assert 'Merge trunk into your branch before you verify or land' in notices[0]
+    assert 'git_land runs no tests' in notices[0]
     assert radar.take_notices(task('conv-c'), str(third_root)) == []
     assert sorted(item['conversation'] for item in records(repo)) == ['conv-b', 'conv-c']
 

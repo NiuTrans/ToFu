@@ -76,7 +76,7 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
         'tasks': [
             {'title': 'Fix folder creation in the sidebar', 'status': 'completed', 'progress': 'Merged and verified in the browser.'},
             {'title': 'Research New Year homestays in Tianyu Creek', 'status': 'in_progress',
-             'progress': 'Comparing Xiaohongshu, Ctrip, Meituan and Douyin listings.'},
+             'progress': 'Comparing Xiaohongshu, Ctrip, YourProvider and Douyin listings.'},
             {'title': 'Summarize the WeChat article', 'status': 'pending'},
         ]})
     page.wait_for_function('document.querySelector("#projectCoordinatorEntry .coordination-leader-meta")?.textContent === "In progress: 1"')
@@ -681,3 +681,136 @@ def test_manage_work_reads_server_history_rows(page, monkeypatch, tmp_path, asse
     expect(scope_changes).to_contain_text(f'{notes} · r1 · Check the release notes')
     workspace.get_by_role('button', name='Back to conversation', exact=True).click()
     expect(workspace).to_have_count(0)
+
+
+def test_coordinator_progress_writes_refresh_the_pinned_board_live(page, flask_app, monkeypatch, tmp_path,
+                                                                   assert_no_js_errors):
+    """Owner report 2026-11-08: the board changed only after leaving its chat and coming back.
+
+    A Coordinator's tools run in the resident execution host, whose ``project``
+    push reaches no browser socket; this journey drops that push the same way.
+    A real Coordinator turn (stubbed model; real tools, Turn commits and
+    conversation stream) writes progress with both tools while its chat stays
+    open: the pinned board and the checklist rail show every write, as one list.
+    """
+    import json
+    import threading
+
+    import lib.tasks_pkg.llm_fallback._transport as transport
+    from lib.conversations.coordinator_progress import CoordinatorTaskProgress
+    from lib.conversations.project_identity import normalize_project_path
+    from lib.durable_worker.runtime import ensure_workers_started, stop_workers
+    from tests.conftest import _dismiss_onboarding_modals
+    from tests.support.model_routing import install_native_test_model_route
+    import routes.api_v1.folders as folders
+
+    monkeypatch.setattr(folders, '_FOLDERS_PATH', str(tmp_path / 'folders.json'))
+    monkeypatch.setattr(CoordinatorTaskProgress, '_notify', lambda self: None)
+    origin = page.url.split('/?', 1)[0].rstrip('/')
+    suffix = uuid.uuid4().hex
+    (tmp_path / 'Live').mkdir()
+    project = normalize_project_path(str(tmp_path / 'Live'))
+    folder_id = page.request.post(origin + '/api/v4/folders', data={
+        'name': 'Live', 'projectPaths': [project]}).json()['data']['id']
+    binding = page.request.get(origin + '/api/v4/project/coordination', params={'path': project}).json()['data']
+    created = page.request.post(origin + '/api/v4/project/coordination/create',
+                                headers={'Idempotency-Key': 'live-board-' + suffix},
+                                data={'path': project, 'folderId': folder_id, 'expectedRevision': binding['revision']})
+    assert created.ok, created.text()
+    leader = created.json()['data']['conversationId']
+
+    board_write = {'summary': 'Release is underway; the notes come next.', 'tasks': [
+        {'title': 'Release 0.19.0', 'status': 'in_progress', 'progress': 'Pushing to the three remotes.'},
+        {'title': 'Write the release notes', 'status': 'pending'}]}
+    checklist_write = {'todos': [
+        {'content': 'Release 0.19.0', 'status': 'completed'},
+        {'content': 'Write the release notes', 'status': 'in_progress'},
+        {'content': 'Announce the release', 'status': 'pending'}]}
+    gate, calls = threading.Event(), []
+    usage = {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}
+
+    def model(task, body, tag='', on_tool_call_ready=None):
+        if task.get('convId') != leader:
+            return {'role': 'assistant', 'content': 'Title', 'tool_calls': []}, 'stop', usage
+        step = task['_liveBoardStep'] = task.get('_liveBoardStep', 0) + 1
+        calls.append(step)
+        if step >= 3:
+            from lib.agent_core.events import EventType, build_event
+            from lib.tasks_pkg.manager._events import append_event
+            text = 'Both writes are on the board.'
+            with task['content_lock']:
+                task['content'] += text
+            append_event(task, build_event(EventType.DELTA, content=text))
+            return {'role': 'assistant', 'content': text, 'tool_calls': []}, 'stop', usage
+        if step == 2:
+            # Hold the turn open until the browser has shown the first write.
+            assert gate.wait(60), 'the page never showed the first board write'
+        name, arguments = ('update_task_progress', board_write) if step == 1 else ('todo_write', checklist_write)
+        call = {'id': f'call-live-board-{step}', 'index': 0, 'type': 'function',
+                'function': {'name': name, 'arguments': json.dumps(arguments)}}
+        if on_tool_call_ready:
+            on_tool_call_ready(call)
+        return {'role': 'assistant', 'content': '', 'tool_calls': [call]}, 'tool_calls', usage
+
+    install_native_test_model_route(owner_user_id=1, capabilities=('text', 'thinking'))
+    saved = transport.stream_llm_response
+    transport.stream_llm_response = model
+    ensure_workers_started(flask_app)
+    output = Path(__file__).resolve().parents[2] / 'output/playwright/project-coordinator-live'
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        page.evaluate('localStorage.setItem("tofu_ui_lang", "en")')
+        page.reload()
+        _dismiss_onboarding_modals(page)
+        page.set_viewport_size({'width': 1440, 'height': 960})
+        page.locator(f'.folder-tab[data-folder-id="{folder_id}"]').click()
+        page.locator('#projectCoordinatorEntry .coordination-leader[data-coordinator-id]').click()
+        page.wait_for_function('(id) => window.activeConvId === id', arg=leader)
+        board = page.locator('#presenceStrip .coordinator-progress')
+        expect(board).to_have_attribute('data-state', 'empty')
+        selector = '#presetDropdown .preset-dropdown-item[data-value="stub-model"]'
+        page.wait_for_selector(selector, state='attached', timeout=15000)
+        page.locator('#presetToggle').click()
+        page.locator(selector).first.click()
+        # Any navigation away and back would also re-read the board; record it.
+        page.evaluate('''(id) => { window.__leftCoordinator = false;
+            window.__watchConversation = setInterval(() => {
+                if (window.activeConvId !== id) window.__leftCoordinator = true; }, 20); }''', leader)
+        page.locator('#userInput').fill('Keep the task board current while you release.')
+        page.locator('#sendBtn').click()
+
+        # update_task_progress: the board and the checklist rail show it while the turn runs.
+        expect(board).to_have_attribute('data-state', 'board', timeout=30000)
+        expect(board.locator('.coordinator-progress-summary')).to_have_text(board_write['summary'])
+        expect(board.locator('.coordinator-progress-tally')).to_have_text('In progress: 1')
+        rail = page.locator('.chat-container .user-msg[data-turn-id] > .turn-ctx [data-tctx-todo] .tctx-todo-item')
+        expect(rail).to_have_count(2)
+        assert sorted(rail.evaluate_all('(items) => items.map((item) => item.title)')) == [
+            'Release 0.19.0', 'Write the release notes']
+        board.locator('summary.coordinator-progress-head').click()
+        page.screenshot(path=str(output / 'live-1-update_task_progress.png'), animations='disabled')
+        # Still mid-turn: the model has not been answered past the first write.
+        assert calls in ([1], [1, 2]) and not page.evaluate('window.__leftCoordinator')
+        gate.set()
+
+        # todo_write writes the same board: tasks replaced, the summary kept.
+        titles = board.locator('.coordinator-progress-task-title')
+        expect(titles).to_have_count(3, timeout=30000)
+        expect(board.locator('.coordinator-progress-content > .coordinator-progress-tasks .coordinator-progress-task-title')
+               ).to_have_text(['Write the release notes', 'Announce the release'])
+        expect(board.locator('.coordinator-progress-summary')).to_have_text(board_write['summary'])
+        expect(rail).to_have_count(3)
+        assert sorted(rail.evaluate_all('(items) => items.map((item) => item.title)')) == sorted(
+            item['content'] for item in checklist_write['todos'])
+        page.locator('#chatInner').get_by_text('Both writes are on the board.').wait_for(timeout=30000)
+        page.screenshot(path=str(output / 'live-2-todo_write.png'), animations='disabled')
+        board.screenshot(path=str(output / 'live-2-board.png'), animations='disabled')
+        assert not page.evaluate('window.__leftCoordinator')
+        shown = CoordinatorTaskProgress(1, project).read()['board']
+        assert shown['revision'] == 2 and [task['title'] for task in shown['tasks']] == [
+            item['content'] for item in checklist_write['todos']]
+    finally:
+        gate.set()
+        page.evaluate('() => clearInterval(window.__watchConversation)')
+        transport.stream_llm_response = saved
+        stop_workers(flask_app)

@@ -20,10 +20,10 @@ from typing import BinaryIO
 from urllib.parse import urlparse
 
 import requests
-from requests.adapters import HTTPAdapter
+from lib.http_transport.outbound import RoutingHTTPAdapter, managed_session
+from lib.http_transport.connection_setup import connection_http_adapter
 
 from lib.log import get_logger
-from lib.proxy import proxies_for
 
 logger = get_logger(__name__)
 
@@ -118,7 +118,7 @@ def validate_public_url(url: str, *, allow_hosts_env: str,
                 f'host {host!r} resolves to blocked IP {address}')
 
 
-class _PublicEgressAdapter(HTTPAdapter):
+class _PublicEgressAdapter(RoutingHTTPAdapter):
     """Validate the concrete request URL for the initial and redirect hops."""
 
     def __init__(self, allow_hosts_env: str):
@@ -142,10 +142,9 @@ def _session_for(allow_hosts_env: str) -> requests.Session:
         _local.sessions = sessions
     session = sessions.get(allow_hosts_env)
     if session is None:
-        session = requests.Session()
-        adapter = _PublicEgressAdapter(allow_hosts_env)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
+        adapter = connection_http_adapter(
+            adapter_class=_PublicEgressAdapter, allow_hosts_env=allow_hosts_env)
+        session = managed_session(adapter=adapter)
         sessions[allow_hosts_env] = session
     return session
 
@@ -187,7 +186,6 @@ def fetch_public_file(
             timeout=(min(timeout, 10.0), timeout),
             stream=True,
             allow_redirects=True,
-            proxies=proxies_for(url),
         )
         response.raise_for_status()
         raw_length = response.headers.get('Content-Length')

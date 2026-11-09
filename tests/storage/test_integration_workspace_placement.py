@@ -1,4 +1,4 @@
-"""Placement of managed task checkouts: data root by default, local by opt-in."""
+"""Placement of managed task checkouts: data root by default, a private local root by opt-in."""
 
 from __future__ import annotations
 
@@ -36,10 +36,20 @@ def _select(monkeypatch, root: Path):
     return decisions
 
 
-def test_checkouts_stay_under_the_data_root_by_default(roots):
+def test_checkouts_stay_under_the_data_root_by_default(roots, monkeypatch):
     data, local = roots
+    real, decisions = local_placement.choose_local_root, []
+
+    def recorded(*args, **kwargs):
+        decisions.append(real(*args, **kwargs))
+        return decisions[-1]
+
+    monkeypatch.setattr(local_placement, 'choose_local_root', recorded)
 
     assert control._workspace_root() == data / 'integration' / 'worktrees'
+    # Off by default, not merely refused: TOFU_LOCAL_DIR is a temporary directory.
+    assert [(decision.selected, decision.reason) for decision in decisions] == [
+        (False, 'disabled')]
     assert not local.exists()
 
 

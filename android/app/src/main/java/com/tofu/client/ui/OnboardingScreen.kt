@@ -68,7 +68,7 @@ fun OnboardingScreen(
             onConnect(connect.url, connect.alias)
         } else {
             Toast.makeText(
-                context, context.getString(R.string.toast_bad_qr), Toast.LENGTH_LONG,
+                context, context.getString(R.string.toast_invalid_connection), Toast.LENGTH_LONG,
             ).show()
         }
     }
@@ -157,7 +157,7 @@ private fun pasteInto(context: Context, onConnect: (String, String?) -> Unit) {
     if (connect != null) {
         onConnect(connect.url, connect.alias)
     } else {
-        Toast.makeText(context, context.getString(R.string.toast_no_link), Toast.LENGTH_LONG).show()
+        Toast.makeText(context, context.getString(R.string.toast_invalid_connection), Toast.LENGTH_LONG).show()
     }
 }
 

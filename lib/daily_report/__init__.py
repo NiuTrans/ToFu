@@ -88,8 +88,8 @@ _EXPORT_MODULES = {
 }
 
 _CHILD_MODULES = {
-    'conversations', 'cost', 'generator', 'llm', 'prompts', 'scheduler',
-    'storage', 'todos',
+    'calendar_overview', 'conversations', 'cost', 'generator', 'llm',
+    'prompts', 'scheduler', 'storage', 'todos',
 }
 
 

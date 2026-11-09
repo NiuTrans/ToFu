@@ -52,13 +52,28 @@ def _record_postprocess_degradation(
     try:
         audit_log(
             'compaction_summary_postprocess_degraded',
-            conv=str(conv_id or '')[:16],
+            conv=str(conv_id or ''),
             stage=stage,
             error_type=type(exc).__name__,
         )
     except Exception as audit_exc:
         logger.debug(
             '[Summary] postprocess degradation audit failed: %s', audit_exc)
+
+
+def _strip_analysis(content, *, tag: str, conv_id: str):
+    """Drop ``<analysis>`` scratchpads; a sanitizer failure keeps the usable text."""
+    if not isinstance(content, str):
+        return content
+    try:
+        return re.sub(r'<analysis>.*?</analysis>\s*', '', content, flags=re.DOTALL)
+    except Exception as exc:
+        logger.warning(
+            '%s Summary post-processing degraded at analysis stripping '
+            '(%s); retaining generated content', tag, type(exc).__name__)
+        _record_postprocess_degradation(
+            conv_id=conv_id, stage='analysis_strip', exc=exc)
+        return content
 
 
 def _summary_cache_affinity_id(conv_id: str, task: dict | None) -> str:
@@ -244,12 +259,14 @@ def _summary_input_ports() -> SummaryInputPorts:
 def _summary_request_input_tokens(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str,
+    continuity_fold: frozenset = frozenset(),
 ) -> int:
     """Estimated input of the request _generate_query_aware_summary dispatches."""
     from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
     return _estimate_total_tokens(compose_summary_input(
         messages, current_query, task=task, source_messages=source_messages,
-        anchor_text=anchor_text, ports=_summary_input_ports()).prompt)
+        anchor_text=anchor_text, ports=_summary_input_ports(),
+        continuity_fold=continuity_fold).prompt)
 
 
 def _summary_route_matches_quote(summary_route: dict, expected_route: dict) -> bool:
@@ -317,7 +334,8 @@ def _generate_rolling_summary(messages: list, current_query: str, log_prefix: st
                               usage_out: dict | None, anchor_text: str,
                               source_messages: list | None,
                               output_budget_tokens: int | None,
-                              input_tokens: int) -> str | None:
+                              input_tokens: int,
+                              continuity_fold: frozenset = frozenset()) -> str | None:
     """Summarize evidence larger than the summarizer window in rolling passes.
 
     Human evidence stays verbatim, so one request cannot always carry it. Each
@@ -343,7 +361,8 @@ def _generate_rolling_summary(messages: list, current_query: str, log_prefix: st
         planned = next_summary_pass(
             remaining, current_query, task=task, source_messages=source_messages,
             anchor_text=anchor_text, ports=ports, prior_receipt=receipt,
-            capacity_tokens=capacity_tokens, estimate=_estimate_total_tokens)
+            capacity_tokens=capacity_tokens, estimate=_estimate_total_tokens,
+            continuity_fold=continuity_fold)
         if planned is None:
             logger.warning('%s Required summary evidence exceeds the summarizer window '
                            'even one part at a time; keeping source intact', tag)
@@ -359,7 +378,7 @@ def _generate_rolling_summary(messages: list, current_query: str, log_prefix: st
             on_delta=None if remaining else on_delta, usage_out=usage_out,
             anchor_text=anchor_text, source_messages=source_messages,
             output_budget_tokens=output_budget_tokens, prior_receipt=receipt,
-            planned_pass=True)
+            planned_pass=True, continuity_fold=continuity_fold)
         if isinstance(usage_out, dict):
             call_rows.extend(usage_out.get('_summaryCalls') or ())
             if call_rows:
@@ -379,8 +398,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                                    source_messages: list | None = None,
                                    expected_route: dict | None = None,
                                    output_budget_tokens: int | None = None,
-                                   prior_receipt: str | None = None,
-                                   planned_pass: bool = False) -> str | None:
+                                   prior_receipt: str | None = None, planned_pass: bool = False,
+                                   continuity_fold: frozenset = frozenset()) -> str | None:
     """Generate a complete query-aware summary on an authorized route.
 
     The existing selector owns summary policy, capability, capacity and route
@@ -451,7 +470,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     _summary_messages = build_summary_input(
         messages, current_query, task=task, source_messages=source_messages,
         anchor_text=anchor_text, log_prefix=tag, ports=_summary_input_ports(),
-        prior_receipt=prior_receipt)
+        prior_receipt=prior_receipt, continuity_fold=continuity_fold)
     from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
     composed_input_tokens = _estimate_total_tokens(_summary_messages)
     if not (planned_pass or expected_route is not None
@@ -460,7 +479,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             messages, current_query, log_prefix, conv_id=conv_id, task=task,
             on_delta=on_delta, usage_out=usage_out, anchor_text=anchor_text,
             source_messages=source_messages, output_budget_tokens=output_budget_tokens,
-            input_tokens=composed_input_tokens)
+            input_tokens=composed_input_tokens, continuity_fold=continuity_fold)
 
     codex_provider = _codex_subscription_provider(task)
     summary_affinity_id = _summary_cache_affinity_id(conv_id, task)
@@ -790,19 +809,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             break
 
         # Reject scratchpad-only output before objective injection can make it
-        # appear useful. A local sanitizer failure keeps the last usable text.
-        if isinstance(content, str):
-            try:
-                content = re.sub(
-                    r'<analysis>.*?</analysis>\s*',
-                    '', content, flags=re.DOTALL,
-                )
-            except Exception as exc:
-                logger.warning(
-                    '%s Summary post-processing degraded at analysis stripping '
-                    '(%s); retaining generated content', tag, type(exc).__name__)
-                _record_postprocess_degradation(
-                    conv_id=conv_id, stage='analysis_strip', exc=exc)
+        # appear useful.
+        content = _strip_analysis(content, tag=tag, conv_id=conv_id)
         dispatch_succeeded = isinstance(content, str) and bool(content.strip())
         if not dispatch_succeeded:
             failure_reason = 'summary_empty'

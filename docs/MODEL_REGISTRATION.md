@@ -211,6 +211,15 @@ Prices use `{input, output, currency, unit}` with optional cache rates;
 `unit` is `per_million_tokens`. A task price budget is a hard filter—missing or
 currency-mismatched actual pricing does not pass a requested limit.
 
+A provider may document only how it bills relative to the creator's price.
+FRIDAY (the YourProvider gateway) documents Claude cache multipliers of the base
+input but no base price, so it has no complete transaction price for an
+Offering's `actual_pricing`. Its rule lives in `lib/pricing` as provider rows
+that keep each Model's maintained base and replace only the cache
+multipliers; the evidence, gaps and rejected alternatives are recorded in
+[`modules/auth_providers_billing.md`](modules/auth_providers_billing.md)
+("Billing flow").
+
 Account RPM, TPM, daily token allowance, and balance belong to
 ProviderAccess/Credential quota policy. They are not copied into a Model or
 used as model identity.
@@ -598,12 +607,15 @@ idempotent. Specification:
 **Declared face capabilities converge too (2026-10-21).** Insert-only
 convergence left another gap: a card that already rode the kunlun face kept
 the profile that face had when it was created. That endpoint streams opaque
-`reasoning` items whose only payload is `reasoning.encrypted_content`, and a
-stateless Responses route that does NOT declare
-`features.responses_reasoning_replay` may not drop such an item — checked
-conversion fails closed as `protocol_conversion:mandatory_continuity_unrepresentable`,
-which is `request-prepare`, so no provider is reached and the retry cannot
-succeed (two live conversations died at tool rounds 4–5). `_converge_declared_face`
+`reasoning` items whose only payload is `reasoning.encrypted_content`, asked
+for or not. Without `features.responses_reasoning_replay` the route cannot
+send such an item back, so it loses reasoning continuity between tool rounds;
+before 2026-11-09 Tofu also retained the item, and checked conversion then
+refused the next request in `request-prepare` as
+`protocol_conversion:mandatory_continuity_unrepresentable` (two live
+conversations died at tool rounds 4–5). Retention now follows the request's
+replay decision ([LLM I/O](modules/llm_io.md#encrypted-reasoning-one-replay-decision)),
+so an undeclared route degrades instead of failing. `_converge_declared_face`
 now applies the face's declared `extra_headers`, `responses_profile` and
 `inference_profile` onto the Connection the template itself created
 (`gateway_namespace` non-empty), per section for the profile and per key for
@@ -612,7 +624,8 @@ namespace-less (owner) Connection, never writes a key the recipe does not
 declare, and is idempotent; `repaired_connections` reports it. Declaring the
 feature is the right direction rather than dropping the item: undeclared
 replay is the closed-world default, and this face both emits the item and
-serves the wire id that produces it. Specifications:
+serves the wire id that produces it, so declared replay keeps the reasoning
+round-tripping. Specifications:
 `tests/model_routing/test_template_supply_sync.py::test_declared_face_capability_converges_onto_installed_face_connection`
 and `::test_declared_face_convergence_never_touches_an_owner_connection`.
 **Adding a request name by hand had the same defect from the other side.**

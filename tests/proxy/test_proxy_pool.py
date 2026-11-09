@@ -31,13 +31,19 @@ pytestmark = pytest.mark.unit
 
 import lib.proxy as proxy
 from lib.desktop import egress
-from lib.subscription_routes import ProbeResult, manager as route_manager
+from lib.network_routes import ProbeResult, manager as route_manager
 
 
 @pytest.fixture(autouse=True)
-def _isolated_pool():
+def _isolated_pool(monkeypatch):
     """Snapshot/restore the pool module state (process-global) — sibling
     suites must never see this suite's entries/health/credential cache."""
+    for key in ('http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY',
+                'HTTPS_PROXY', 'ALL_PROXY', 'no_proxy', 'NO_PROXY'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(proxy, '_proxy_config', {})
+    monkeypatch.setattr(proxy, '_ENV_HTTP_PROXY', '')
+    monkeypatch.setattr(proxy, '_ENV_HTTPS_PROXY', '')
     saved = (
         list(proxy._proxy_pool),
         dict(proxy._pool_health),
@@ -385,7 +391,7 @@ class TestEgressIntegration(unittest.TestCase):
             routes = proxy.subscription_route_specs(
                 'https://chatgpt.com/backend-api/codex/responses')
         self.assertEqual([route.route_id for route in routes], [
-            'direct', 'pool:hk', 'pool:global', 'env'])
+            'direct', f'pool:hk:g{proxy._proxy_topology_epoch}', f'pool:global:g{proxy._proxy_topology_epoch}', f'env:g{proxy._proxy_topology_epoch}'])
 
     def test_duplicate_env_proxy_is_probed_once(self):
         proxy.set_proxy_pool([_entry('hk')])
@@ -396,7 +402,7 @@ class TestEgressIntegration(unittest.TestCase):
             routes = proxy.subscription_route_specs(
                 'https://chatgpt.com/backend-api/codex/responses')
         self.assertEqual([route.route_id for route in routes],
-                         ['direct', 'pool:hk'])
+                         ['direct', f'pool:hk:g{proxy._proxy_topology_epoch}'])
 
     def test_set_proxy_pool_invalidates_egress_probe_cache(self):
         """The 300s-stale-verdict bug pin: a pool change MUST clear cached
@@ -472,10 +478,10 @@ class TestEgressIntegration(unittest.TestCase):
                                           user_id='u1')
         self.assertEqual(out, ['direct'])
         self.assertIn('direct', seen)
-        self.assertIn('pool:hk', seen)
+        self.assertIn(f'pool:hk:g{proxy._proxy_topology_epoch}', seen)
         selected = proxy.subscription_route_candidates(
             'https://auth.openai.com/oauth/token')[0]
-        self.assertEqual(selected.route_id, 'pool:hk')
+        self.assertEqual(selected.route_id, f'pool:hk:g{proxy._proxy_topology_epoch}')
         self.assertEqual(selected.requests_proxies(),
                          {'http': 'http://gw.example.com:8080',
                           'https': 'http://gw.example.com:8080'})
@@ -500,14 +506,14 @@ class TestEgressIntegration(unittest.TestCase):
                                           user_id='1')
         # Direct + every pool row race concurrently; all fail before agent.
         self.assertIn('direct', calls)
-        self.assertIn('pool:hk', calls)
-        self.assertIn('pool:backup', calls)
+        self.assertIn(f'pool:hk:g{proxy._proxy_topology_epoch}', calls)
+        self.assertIn(f'pool:backup:g{proxy._proxy_topology_epoch}', calls)
         self.assertEqual(out, ['a1'])
         # Target-specific 403 lives only in per-host route health and cannot
         # globally poison these proxies for unrelated traffic.
-        health = route_manager.status()['routes']['auth.openai.com']
-        self.assertEqual(health['pool:hk']['failure_kind'], 'policy_blocked')
-        self.assertEqual(health['pool:backup']['failure_kind'],
+        health = route_manager.status()['routes']['https://auth.openai.com:443']
+        self.assertEqual(health[f'pool:hk:g{proxy._proxy_topology_epoch}']['failure_kind'], 'policy_blocked')
+        self.assertEqual(health[f'pool:backup:g{proxy._proxy_topology_epoch}']['failure_kind'],
                          'policy_blocked')
         self.assertNotIn('hk', proxy._pool_health)
         self.assertNotIn('backup', proxy._pool_health)
@@ -529,7 +535,7 @@ class TestEgressIntegration(unittest.TestCase):
                                        user_id='')
         self.assertEqual(out, 'direct')
         self.assertTrue(route_manager.status()['routes']
-                        ['auth.openai.com']['pool:hk']['healthy'])
+                        ['https://auth.openai.com:443'][f'pool:hk:g{proxy._proxy_topology_epoch}']['healthy'])
 
 
 # ══════════════════════════════════════════════════════
@@ -931,7 +937,7 @@ def test_global_egress_route_specs_keep_direct_pool_and_environment_order():
     route_ids = [route.route_id for route in routes]
     assert route_ids[0] == 'direct'
     assert route_ids[1].startswith('pool:global-one:g')
-    assert route_ids[2].startswith('proxy:environment:g')
+    assert route_ids[2].startswith('env:g')
     assert all('subscription-only' not in route.route_id for route in routes)
 
 

@@ -167,7 +167,7 @@ def test_apk_route_rejects_a_zero_length_suffix_range(
     assert headers['Content-Range'] == f'bytes */{len(_RANGED_APK)}'
 
 
-def test_link_route_embeds_presented_token_and_qr(
+def test_link_route_does_not_embed_presented_token_in_qr(
         monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     apk = tmp_path / 'app-release.apk'
     apk.write_bytes(b'PK\x03\x04fake')
@@ -186,10 +186,9 @@ def test_link_route_embeds_presented_token_and_qr(
     assert status == 200
     data = _data(body)
     assert data['available'] is True
-    assert data['tokenEmbedded'] is True
-    assert data['url'] == (
-        'http://192.168.1.20:8080/api/v4/mobile/android/apk'
-        '?token=tofu_admin_testtoken')
+    assert data['tokenEmbedded'] is False
+    assert data['url'] == 'http://192.168.1.20:8080/api/v4/mobile/android/apk'
+    assert 'tofu_admin_testtoken' not in json.dumps(data)
     assert data['qr'].startswith('data:image/png;base64,')
     assert data['sizeBytes'] == len(b'PK\x03\x04fake')
     assert isinstance(data['modifiedMs'], int)
@@ -255,8 +254,8 @@ def test_link_keeps_the_proxy_prefix_of_the_callers_base(
     status, body = asyncio.run(_run())
     assert status == 200
     assert _data(body)['url'] == (
-        'https://ide.example/proxy/15000/api/v4/mobile/android/apk'
-        '?token=tofu_admin_testtoken')
+        'https://ide.example/proxy/15000/api/v4/mobile/android/apk')
+    assert _data(body)['tokenEmbedded'] is False
 
 
 @pytest.mark.parametrize('base', [
@@ -267,8 +266,8 @@ def test_link_keeps_the_proxy_prefix_of_the_callers_base(
 ])
 def test_link_rejects_a_base_that_is_not_this_servers_address(
         base: str, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """The URL carries the caller's credential, so it may only point back at
-    the Host this request reached."""
+    """The download link is credential-free and remains pinned to the Host
+    this request reached; arbitrary or query-bearing roots are rejected."""
     _point_at(monkeypatch, tmp_path / 'missing.apk')
 
     async def _run():
@@ -301,6 +300,8 @@ def test_scan_page_reports_the_local_build(
     status, content_type, html = asyncio.run(_run())
     assert status == 200
     assert content_type.startswith('text/html')
+    assert 'id="qr"' in html
+    assert 'api/v4/mobile/android/link?base=' in html
     assert 'APK ready' in html
 
 
@@ -314,12 +315,11 @@ def test_scan_page_asks_for_its_link_under_its_own_root(
         response = await _app().test_client().get('/api/v4/mobile/android')
         return await response.get_data(as_text=True)
 
-    apk_url = ('https://ide.example/proxy/15000/api/v4/mobile/android/apk'
-               '?token=tofu_admin_testtoken')
+    apk_url = 'https://ide.example/proxy/15000/api/v4/mobile/android/apk'
     result = _run_page_script(
         asyncio.run(_run()),
         'https://ide.example/proxy/15000/api/v4/mobile/android',
-        {'data': {'available': False, 'url': apk_url, 'tokenEmbedded': True,
+        {'data': {'available': False, 'url': apk_url, 'tokenEmbedded': False,
                   'qr': 'data:image/png;base64,QR'}})
 
     assert result['requests'] == [
@@ -409,6 +409,8 @@ def test_connect_page_asks_for_its_link_under_its_own_root() -> None:
     status, content_type, html = asyncio.run(_run())
     assert status == 200
     assert content_type.startswith('text/html')
+    assert 'id="qr"' in html
+    assert 'api/v4/mobile/connect/link' in html
     root = 'https://ide.example/proxy/15000/'
     result = _run_page_script(html, root + 'api/v4/mobile/connect', {'data': {
         'url': root, 'name': 'ide.example', 'deepLink': 'tofu://connect?url=x',

@@ -189,7 +189,7 @@ def read_persisted_boundary(conv_id: str, *, user_id: int) -> int:
                 and 0 < cand <= TASK_RESULT_CACHE_FACT_MAXIMUM):
             val = cand
     except Exception as e:
-        logger.debug('[CacheHWM] read failed conv=%s: %s', conv_id[:8], e)
+        logger.debug('[CacheHWM] read failed conv=%s: %s', conv_id, e)
         val = 0
     with _hwm_lock:
         _hwm_read_cache[key] = (val, now + _HWM_TTL_S)
@@ -247,12 +247,12 @@ def advance_persisted_boundary(
             # Expected in sidecar-less runtimes (benchmark agent processes):
             # writes are fenced there by design, so this is not an anomaly.
             logger.debug('[CacheHWM] advance skipped conv=%s: %s',
-                         conv_id[:8], e)
+                         conv_id, e)
         else:
             _warn_throttled(conv_id, user_id,
                             '[CacheHWM] advance failed conv=%s: %s — '
                             'durable prefix floor not written (in-memory guard '
-                            'still active)', conv_id[:8], e)
+                            'still active)', conv_id, e)
     return False
 
 
@@ -291,7 +291,7 @@ def read_last_turn_cache_read(conv_id: str, *, user_id: int) -> int:
                 and 0 <= cand <= TASK_RESULT_CACHE_FACT_MAXIMUM):
             val = cand
     except Exception as e:
-        logger.debug('[CacheLastRead] read failed conv=%s: %s', conv_id[:8], e)
+        logger.debug('[CacheLastRead] read failed conv=%s: %s', conv_id, e)
     with _hwm_lock:
         _last_turn_read_cache[key] = (val, now + _HWM_TTL_S)
     return val if val is not None else 0
@@ -346,12 +346,12 @@ def write_last_turn_cache_read(
     except Exception as e:
         if getattr(e, 'code', '') == 'database_unavailable':
             logger.debug('[CacheLastRead] write skipped conv=%s: %s',
-                         conv_id[:8], e)
+                         conv_id, e)
         else:
             _warn_throttled(conv_id, user_id,
                             '[CacheLastRead] write failed conv=%s: %s — '
                             'durable round-1 baseline not written',
-                            conv_id[:8], e)
+                            conv_id, e)
     return False
 
 

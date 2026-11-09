@@ -274,8 +274,15 @@ class PinnedImportSource:
                     return self._spec(fullname, origin, pin, locations)
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is not None and spec.origin:
-            origin = os.path.abspath(spec.origin)
-            if any(origin.startswith(root + os.sep) for root in self._roots):
+            # A virtualenv under the checkout has its own import root. Its
+            # installed dependencies belong to the interpreter fingerprint,
+            # not the application's pins. Classify by module/package topology
+            # rather than every descendant of the checkout's directory.
+            import_root = os.path.dirname(os.path.abspath(spec.origin))
+            parents = fullname.count('.') + (spec.submodule_search_locations is not None)
+            for _ in range(parents):
+                import_root = os.path.dirname(import_root)
+            if import_root in self._roots:
                 raise ModuleNotFoundError(f'Module {fullname} is outside the prepared execution generation')
         return None
 

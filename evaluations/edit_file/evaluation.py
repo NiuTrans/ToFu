@@ -4,8 +4,7 @@ Input rows use ``model``, ``case_id``, ``tool_name`` and ``arguments`` (a
 JSON object or JSON string). An optional ``baseline_argument_chars`` records
 the legacy-tool argument size for the same answer and enables the 30% argument
 character reduction metric. It does not measure billed tokens, retries,
-latency or total task cost. Correct output and preferred operation are scored
-separately: a longer legal replacement is not an execution failure.
+latency or total task cost.
 
 Each call runs the actual unwrapped production executor in a fresh hermetic
 child process. The workspace lease decorator is deliberately not entered:
@@ -106,7 +105,6 @@ def score_row(row):
         'kind': case['kind'],
         'valid_call': False,
         'correct_edit': False,
-        'efficient_operation': False,
         'argument_chars': len(encoded),
         'argument_reduction_rate': reduction,
     }
@@ -118,10 +116,6 @@ def score_row(row):
     score['valid_call'] = outcome['tool_output'].startswith(
         f'Applied {total}/{total} edits') if total else False
     score['correct_edit'] = outcome['files'] == case['expected']
-    if score['valid_call']:
-        score['efficient_operation'] = all(
-            edit.get('operation') in case['expected_operations']
-            for edit in edits if isinstance(edit, dict))
     return score
 
 
@@ -133,16 +127,12 @@ def summarize(rows):
     out = {}
     for model, scores in sorted(grouped.items()):
         n = len(scores) or 1
-        additive = [s for s in scores if s['kind'] == 'additive']
         reductions = [s['argument_reduction_rate'] for s in scores
                       if s['argument_reduction_rate'] is not None]
         out[model] = {
             'cases': len(scores),
             'valid_call_rate': sum(s['valid_call'] for s in scores) / n,
             'correct_edit_rate': sum(s['correct_edit'] for s in scores) / n,
-            'additive_insert_rate': (
-                sum(s['efficient_operation'] for s in additive) / len(additive)
-                if additive else None),
             'median_argument_chars': median(
                 s['argument_chars'] for s in scores),
             'median_argument_reduction_rate': (

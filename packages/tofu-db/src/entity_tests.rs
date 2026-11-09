@@ -2466,14 +2466,15 @@
         vfs.sync_directory(std::path::Path::new("/")).unwrap();
         let child_id;
         let child_key;
+        let child_payload;
         {
             let mut database =
                 EntityDatabase::initialize_with_vfs(std::path::Path::new("/data"), vfs.clone())
                     .unwrap();
-            // The corruption target below is a loose block file, so the seed
-            // commit must spill: carried bytes past the ceiling materialize
-            // every staged page as a loose file up front, and the checkpoint
-            // retires the WAL copy.
+            // The seed commit spills past the carried ceiling (its pages land
+            // in a catalogued payload segment) and the checkpoint retires the
+            // WAL copy, so the only durable child copy is the one corrupted
+            // below.
             let mut seed = database.begin(7, 11).unwrap();
             for index in 0..300_u16 {
                 database
@@ -2490,24 +2491,41 @@
             };
             child_id = children[0].block_id;
             child_key = EntityKey(children[0].lower_bound.clone());
+            child_payload = database.writer_engine().unwrap().read_block(child_id).unwrap();
         }
 
-        let hexadecimal = child_id.to_hex();
-        let path = std::path::Path::new("/data")
-            .join("blocks")
-            .join(&hexadecimal[..2])
-            .join(format!("{hexadecimal}.blk"));
-        let mut file = vfs
-            .open(
-                &path,
-                OpenRequest {
-                    write: true,
-                    ..OpenRequest::default()
-                },
-            )
-            .unwrap();
-        file.write_all_at(16, b"X").unwrap();
-        file.sync_all().unwrap();
+        // Corrupt the child's durable bytes wherever they live: inside a
+        // payload segment, else its loose block file.
+        let segments = std::path::Path::new("/data/payload-segments");
+        let mut corrupted = false;
+        for name in vfs.read_directory(segments).unwrap_or_default() {
+            let path = segments.join(name);
+            let mut file = vfs
+                .open(&path, OpenRequest { read: true, write: true, ..OpenRequest::default() })
+                .unwrap();
+            let mut bytes = vec![0_u8; file.len().unwrap() as usize];
+            file.read_exact_at(0, &mut bytes).unwrap();
+            if let Some(offset) = bytes
+                .windows(child_payload.len())
+                .position(|window| window == child_payload.as_slice())
+            {
+                file.write_all_at(offset as u64 + 16, &[bytes[offset + 16] ^ 0x5a]).unwrap();
+                file.sync_all().unwrap();
+                corrupted = true;
+            }
+        }
+        if !corrupted {
+            let hexadecimal = child_id.to_hex();
+            let path = std::path::Path::new("/data")
+                .join("blocks")
+                .join(&hexadecimal[..2])
+                .join(format!("{hexadecimal}.blk"));
+            let mut file = vfs
+                .open(&path, OpenRequest { write: true, ..OpenRequest::default() })
+                .unwrap();
+            file.write_all_at(16, b"X").unwrap();
+            file.sync_all().unwrap();
+        }
 
         let mut database = EntityDatabase::open_with_vfs(std::path::Path::new("/data"), vfs).unwrap();
 

@@ -8,7 +8,7 @@ A Project Router's question is also relayed to the owner's Global Router
 
 from __future__ import annotations
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.executor import (
     _build_simple_meta,
     _finalize_tool_round,
@@ -48,7 +48,7 @@ def _question_has_reader(task):
         except Exception:
             logger.warning('[Executor] ask_human: Coordinator role lookup failed; '
                            'treating task=%s as unattended',
-                           task.get('id', '?')[:8], exc_info=True)
+                           task_log_tag(task.get('id', '?')), exc_info=True)
             return False
     return True
 
@@ -114,23 +114,32 @@ def _relay_to_global_router(task, tc_id, round_entry, blocking):
     """A Project Router's question also reaches the owner's Global Router (docs/ROUTER.md R3).
 
     The notice points at this card; a relay failure never fails the question.
+    The question is also indexed for the digest and the cross-project view
+    (docs/ROUTER.md R10 "Owner question unanswered").
     """
     try:
         from lib.tasks_pkg.coordinator_policy import coordinator_scope
         scope = coordinator_scope(task)
         if scope is None:
             return
-        from lib.router.relay import relay_project_question
-        relay_project_question(scope['user_id'], {
+        question = {
             'projectPath': scope['project_path'], 'coordinatorId': scope['conversation_id'],
             'turnId': task['_turnId'], 'toolCallId': tc_id, 'guidanceId': round_entry['guidanceId'],
             'blocking': blocking, 'question': round_entry['guidanceQuestion'],
             'options': round_entry['guidanceOptions'],
-            'questions': round_entry.get('guidanceBatchQuestions') or []})
+            'questions': round_entry.get('guidanceBatchQuestions') or []}
+        from lib.router.proactive.questions import record_question
+        try:
+            record_question(scope['user_id'], question)
+        except Exception:
+            logger.warning('[Executor] owner question index failed: guidance_id=%s',
+                           round_entry.get('guidanceId'), exc_info=True)
+        from lib.router.relay import relay_project_question
+        relay_project_question(scope['user_id'], question)
     except Exception:
         logger.warning('[Executor] ask_human: Global Router question relay failed: '
                        'guidance_id=%s, task=%s', round_entry.get('guidanceId'),
-                       task.get('id', '?')[:8], exc_info=True)
+                       task_log_tag(task.get('id', '?')), exc_info=True)
 
 
 def _finalize_nonblocking(task, fn_name, rn, round_entry, title, extra):
@@ -138,7 +147,7 @@ def _finalize_nonblocking(task, fn_name, rn, round_entry, title, extra):
     round_entry['guidanceBlocking'] = False
     tool_content = _NONBLOCKING_CONTENT.format(guidance_id=extra['guidanceId'])
     logger.info('[Executor] ask_human shown without waiting: guidance_id=%s, '
-                'task=%s', extra['guidanceId'], task.get('id', '?')[:8])
+                'task=%s', extra['guidanceId'], task_log_tag(task.get('id', '?')))
     meta = _build_simple_meta(
         fn_name, tool_content, source='HumanGuidance', title=title,
         snippet='Asked without waiting for an answer', badge='asked',
@@ -152,7 +161,7 @@ def _finalize_superseded(task, fn_name, rn, round_entry, title, extra):
     round_entry['guidanceSuperseded'] = True
     logger.info('[Executor] ask_human superseded by a chat message: '
                 'guidance_id=%s, task=%s', extra['guidanceId'],
-                task.get('id', '?')[:8])
+                task_log_tag(task.get('id', '?')))
     meta = _build_simple_meta(
         fn_name, _SUPERSEDED_CONTENT, source='HumanGuidance', title=title,
         snippet='The user replied in chat instead', badge='superseded',
@@ -208,7 +217,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 
     if not question:
         logger.warning('[Executor] ask_human called with empty question, task=%s',
-                       task.get('id', '?')[:8])
+                       task_log_tag(task.get('id', '?')))
         tool_content = 'Error: question parameter is required.'
         meta = _build_simple_meta(
             fn_name, tool_content, source='HumanGuidance',
@@ -222,7 +231,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     logger.info('[Executor] ask_human: question=%.200s, type=%s, '
                 'options=%d, guidance_id=%s, task=%s',
                 question, response_type, len(options), guidance_id,
-                task.get('id', '?')[:8])
+                task_log_tag(task.get('id', '?')))
 
     round_entry['status'] = 'awaiting_human'
     round_entry['guidanceId'] = guidance_id
@@ -254,7 +263,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         logger.warning('[Executor] ask_human in an unattended execution mode '
                        '(no interactive session) — returning sentinel instead '
                        'of blocking: guidance_id=%s, task=%s',
-                       guidance_id, task.get('id', '?')[:8])
+                       guidance_id, task_log_tag(task.get('id', '?')))
         user_response = None
         tool_content = ('Cannot ask the user in this execution mode — no '
                         'interactive session is available to answer. Proceed '
@@ -289,7 +298,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         return tc_id, tool_content, False
     logger.info('[Executor] ask_human blocking indefinitely for user '
                 'response: guidance_id=%s, task=%s',
-                guidance_id, task.get('id', '?')[:8])
+                guidance_id, task_log_tag(task.get('id', '?')))
     user_response, superseded = _await_answer(task, guidance_id, publish_request)
 
     if task.get('aborted') or (user_response is None and not superseded):
@@ -297,7 +306,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
                        'guidance_id=%s, task=%s, aborted=%s — round left '
                        'awaiting_human so the turn settlement keeps '
                        'offering the answer_guidance late-answer resume',
-                       guidance_id, task.get('id', '?')[:8],
+                       guidance_id, task_log_tag(task.get('id', '?')),
                        task.get('aborted', False))
         # Do NOT finalize this round with a placeholder result. Finalizing
         # closes the replayable gap: the settlement then stops offering
@@ -314,7 +323,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     tool_content = f'Human response: {user_response}'
     logger.info('[Executor] ask_human received response: '
                 'guidance_id=%s, response_len=%d, task=%s',
-                guidance_id, len(user_response), task.get('id', '?')[:8])
+                guidance_id, len(user_response), task_log_tag(task.get('id', '?')))
 
     # No title/snippet truncation: the user specifically flagged that
     #   "incomplete displays are not allowed" — the original 80-char title
@@ -406,7 +415,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
     guidance_id = short_id('hg_', 12)
     logger.info('[Executor] ask_human batch: %d questions, guidance_id=%s, '
                 'task=%s', len(questions), guidance_id,
-                task.get('id', '?')[:8])
+                task_log_tag(task.get('id', '?')))
 
     # Use a synthetic top-level question that summarizes the batch.
     summary = 'Multiple questions (batch form):'
@@ -436,7 +445,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
         publish_request()
         logger.warning('[Executor] ask_human batch in an unattended execution '
                        'mode — returning sentinel: guidance_id=%s, task=%s',
-                       guidance_id, task.get('id', '?')[:8])
+                       guidance_id, task_log_tag(task.get('id', '?')))
         user_response = None
         tool_content = ('Cannot ask the user in this execution mode — no '
                         'interactive session is available to answer. Proceed '
@@ -472,7 +481,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
         return tc_id, tool_content, False
     logger.info('[Executor] ask_human batch blocking indefinitely for '
                 'user response: guidance_id=%s, task=%s',
-                guidance_id, task.get('id', '?')[:8])
+                guidance_id, task_log_tag(task.get('id', '?')))
     user_response, superseded = _await_answer(task, guidance_id, publish_request)
 
     if task.get('aborted') or (user_response is None and not superseded):
@@ -480,7 +489,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
                        'guidance_id=%s, task=%s, aborted=%s — round left '
                        'awaiting_human so the turn settlement keeps '
                        'offering the answer_guidance late-answer resume',
-                       guidance_id, task.get('id', '?')[:8],
+                       guidance_id, task_log_tag(task.get('id', '?')),
                        task.get('aborted', False))
         return tc_id, '[Task was aborted while waiting for human guidance]', False
     if superseded:
@@ -520,7 +529,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
     tool_content = 'Human responses (batch):\n' + '\n'.join(result_parts)
     logger.info('[Executor] ask_human batch received %d answers: '
                 'guidance_id=%s, task=%s',
-                len(answers), guidance_id, task.get('id', '?')[:8])
+                len(answers), guidance_id, task_log_tag(task.get('id', '?')))
 
     _FULL_LIMIT = 2000
     def _clip(s):
@@ -554,9 +563,12 @@ def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     Note: NOT a state-changing tool (no file mutation) — so it correctly does
     NOT reset the zero-deliverable streak; the two guards stay orthogonal.
     """
+    from lib.conversations.coordinator_progress import plan_publication
     from lib.tools.todo import apply_todo_write_to_task, public_todo_state
 
-    todos, tool_content, outcome = apply_todo_write_to_task(task, fn_args)
+    # A board-keeping Coordinator's checklist is its task board: one progress source.
+    todos, tool_content, outcome = apply_todo_write_to_task(
+        task, fn_args, publish=plan_publication(task))
     if project_enabled and project_path:
         try:
             from lib.conversations.project_brain import note_todo_signal
@@ -577,7 +589,7 @@ def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     logger.info('[Executor] todo_write: %d items, %d done, %d in_progress, '
                 'updates=%d noop=%s rejected=%s (task=%s)', total, done, in_prog,
                 state.get('update_count', 0), outcome.get('no_op'),
-                outcome.get('rejected'), task.get('id', '?')[:8])
+                outcome.get('rejected'), task_log_tag(task.get('id', '?')))
 
     badge = ('rejected' if outcome.get('rejected') else
              ('unchanged' if outcome.get('no_op') else
@@ -599,5 +611,9 @@ def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             'todoExplanation': state.get('explanation') or '',
         },
     )
+    board = (outcome.get('publication') or {}).get('coordinatorProgress')
+    if board:
+        # The task board revision this checklist became, for the live board view.
+        meta['coordinatorProgress'] = board
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

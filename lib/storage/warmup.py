@@ -37,6 +37,7 @@ from typing import Any, Callable, Mapping
 from lib.identity import PERSONAL_USER_ID
 from lib.log import get_logger
 from lib.observability import InstrumentedThreadPoolExecutor
+from lib.storage.retry import decline_storage_wait, storage_wait_owner
 
 logger = get_logger(__name__)
 
@@ -167,7 +168,10 @@ def run_warmup_pass(
     def _run_one(operation: str, payload: Mapping[str, Any]) -> str:
         remaining = max(1.0, budget - (monotonic() - started))
         try:
-            client.query(operation, payload, deadline=min(deadline, remaining))
+            # A probe stays bounded by its own deadline: it declines the
+            # client's in-call wait for a live authority.
+            with storage_wait_owner(decline_storage_wait):
+                client.query(operation, payload, deadline=min(deadline, remaining))
             return 'warmed'
         except Exception as exc:  # fail-soft: warm-up never raises into boot/request paths
             logger.warning('[StorageWarmup] %s warm-up read failed: %s', operation, exc)

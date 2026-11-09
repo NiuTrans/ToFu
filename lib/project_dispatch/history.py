@@ -81,10 +81,13 @@ def page(repository, cursor=None):
         if not rows:
             # Preserve a route back after following a cursor while history was
             # concurrently imported, or when an owned page has no visible rows.
-            return {'rows': [], 'olderCursor': None,
+            return {'rows': [], 'olderCursor': None, 'rowOlderCursors': [],
                     'newerCursor': 'newer/' + after if after and reverse else None, 'snapshot': value}
+        # rowOlderCursors[i] continues with the rows older than rows[i], so a
+        # reader that shows only part of a page can resume exactly after it.
         return {'rows': [deepcopy(item['row']) for item in rows],
                 'olderCursor': 'older/' + rows[-1]['key'] if older_available else None,
+                'rowOlderCursors': ['older/' + item['key'] for item in rows],
                 'newerCursor': 'newer/' + rows[0]['key'] if newer_available else None,
                 'snapshot': value}
     raise ProjectDispatchError('Concurrent history changes; retry the same page')

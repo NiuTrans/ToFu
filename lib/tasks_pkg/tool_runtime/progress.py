@@ -38,7 +38,7 @@ import time
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.project_mod.config import MAX_COMMAND_OUTPUT
 from lib.tasks_pkg.tool_runtime.context import ToolExecutionContext
 
@@ -389,7 +389,7 @@ class ToolProgressSink:
             logger.warning(
                 '[tool-progress] append_event failed (non-fatal) task=%s '
                 'round=%s tool=%s: %s',
-                self._task_id[:8], self._round_num, self._tool_name, exc)
+                task_log_tag(self._task_id), self._round_num, self._tool_name, exc)
             return False
         self._emitted += 1
         return True

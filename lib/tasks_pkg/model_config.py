@@ -5,7 +5,7 @@ Extracted from orchestrator.py to reduce file size and isolate concerns.
 """
 
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -103,7 +103,7 @@ def _resolve_model_config(cfg, task_id):
     project_path, project_enabled, code_exec_enabled, memory_enabled,
     browser_enabled, desktop_enabled.
     """
-    tid = task_id[:8]
+    tid = task_log_tag(task_id)
     # ── Two-tier chat mode (chat/studio) → atomic flags ──
     #   Single source of truth: lib/tasks_pkg/chat_mode. When the request
     #   declares a tier, its derived flags OVERRIDE the atomic flags below so
@@ -248,7 +248,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     always supplies the canonical ``ask_human`` protocol required for
     within-turn clarification.
     """
-    tid = task_id[:8]
+    tid = task_log_tag(task_id)
     from lib.tasks_pkg.plan_mode import (
         plan_mode_enabled, plan_mode_filter_tool_schemas,
     )

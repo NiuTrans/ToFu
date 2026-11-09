@@ -135,13 +135,15 @@ class SnapshotHistoryRead:
                 self.selected[address] = event
             else:
                 self.index.discard(sequence)
-        elif (
-            event_type == "tool_wire_projection"
-            and self.rounds is not None
-            and str(payload.get("roundNum")) in self.rounds
-            and (not self.turn or payload.get("turn", "") == self.turn)
-        ):
-            self.wire_rows.append(event)
+        elif event_type == "tool_wire_projection":
+            # Earlier projection rows may be source-map baselines even when
+            # only one later round was requested.
+            self.index.append(sequence, event)
+            if (self.rounds is not None and str(payload.get("roundNum")) in self.rounds
+                    and (not self.turn or payload.get("turn", "") == self.turn)):
+                self.wire_rows.append(event)
+            else:
+                self.index.discard(sequence)
         # Advance only after decoding succeeds; malformed rows must never be
         # skipped by a later continuation.
         self.after = sequence
@@ -217,6 +219,7 @@ class SnapshotHistoryRead:
                 dict(row, payload=self.index.payload(row["event_id"]))
                 for row in self.selected.values()
             ]
-            + self.wire_rows,
+            + [dict(row, payload=self.index.payload(row['event_id']))
+               if row['event_id'] in self.index.records else row for row in self.wire_rows],
             key=lambda row: row["event_id"],
         )

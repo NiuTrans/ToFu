@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "repository": "rangehow/tofu-android",
+  "tag": "v0.1.15",
+  "versionName": "0.1.15",
+  "versionCode": 16,
+  "filename": "tofu-android.apk",
+  "url": "https://github.com/rangehow/tofu-android/releases/download/v0.1.15/tofu-android.apk",
+  "sha256": "2956df2444dc08a3a8bfba7516284d6baea15e454c096fcd75978741cafbfd24",
+  "sizeBytes": 12061744
+}

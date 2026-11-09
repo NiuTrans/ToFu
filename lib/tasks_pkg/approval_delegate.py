@@ -30,7 +30,7 @@ import json
 import time
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -189,7 +189,7 @@ def register_approval_delegate(task: dict, fn_args: dict) -> str:
         'registered_at': time.time(),
     }
     logger.info('[ApprovalDelegate] registered for task %s: tools=%s '
-                'timeout=%ds tier=%s', str(task.get('id'))[:8], tools,
+                'timeout=%ds tier=%s', task_log_tag(task.get('id')), tools,
                 timeout, model_tier)
     return json.dumps({
         'status': 'ok',

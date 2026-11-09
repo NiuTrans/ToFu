@@ -690,6 +690,11 @@ class AgentRuntime:
             task['_tool_env'] = tool_env
         task['_pinned_provider_id'] = route_group.pin_id
         task['_requestedModelRef'] = dict(selected_model_ref)
+        # Delegated children re-resolve this exact selection against this
+        # run's envelope, never a durable owner repository the process lacks.
+        task['_model_routing_selection'] = selection
+        from lib.model_routing import bind_request_routing_authority
+        bind_request_routing_authority(task, repository, boundary)
 
         execution = AgentExecution(
             self,

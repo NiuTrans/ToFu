@@ -57,7 +57,7 @@ def observe_admission_wait(task, wait):
         # A revoked/cancelled delivery lane refuses this optional evidence like
         # every later frame; the tool's own lifecycle events surface that fate.
         logger.debug('[AdmissionWait] evidence not delivered task=%s: %s',
-                     str(task.get('id') or '?')[:8], exc)
+                     str(task.get('id') or '?'), exc)
 
 
 def install_admission_wait_observer():

@@ -226,9 +226,11 @@ class TestStreamChatForwardsTheBounds:
 
         stream.stream_chat({'model': 'm', 'messages': []})
 
-        # Unbounded by default: an interactive caller keeps the historical
-        # behaviour (idle window only), so the dispatch-layer compatibility
-        # test in tests/llm_dispatch/test_dispatch_transport_timeout_rotation.py
+        # No caller bound by default: an interactive caller keeps the
+        # historical call shape (the transport's own silent-stream liveness
+        # contract still bounds a wedged attempt, before and after headers),
+        # so the dispatch-layer compatibility test in
+        # tests/llm_dispatch/test_dispatch_transport_timeout_rotation.py
         # guards the external call shape.
         assert captured['attempt_timeout'] is None
         assert captured['first_byte_timeout'] is None

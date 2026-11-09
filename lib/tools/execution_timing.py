@@ -69,10 +69,10 @@ def tool_execution_timing(tool_name, *, task_id='', conversation_id='', tool_cal
                     outcome = state.get('_runtimeState') or outcome
                 log_event(logger, logging.WARNING, 'tool_execution_slow',
                     '[ToolLatency] tool=%s elapsed_ms=%d budget_ms=%d task_id=%s conv_id=%s call=%s outcome=%s',
-                    tool_name, round(elapsed), budget, str(task_id)[:96],
-                    str(conversation_id)[:96], str(tool_call_id)[:96], outcome,
+                    tool_name, round(elapsed), budget, str(task_id),
+                    str(conversation_id), str(tool_call_id)[:96], outcome,
                     tool_name=tool_name, elapsed_ms=round(elapsed), budget_ms=budget,
-                    task_id=str(task_id)[:96], conversation_id=str(conversation_id)[:96],
+                    task_id=str(task_id), conversation_id=str(conversation_id),
                     tool_call_id=str(tool_call_id)[:96], outcome=outcome,
                     phases=scope['phases'])
             except Exception:

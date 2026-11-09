@@ -128,5 +128,5 @@ def test_full_profile_defers_edit_content_semantics_to_the_tool_contract(tool_na
         cwd='/workspace', is_git=True, model='kimi-k3', profile='full',
         tool_names=tool_names, include_date=False, include_environment=False,
     )
-    assert 'follow its operation/content contract and examples' in prompt
+    assert 'follow its anchor/content contract and examples' in prompt
     assert 'To add content in the middle of a file use' not in prompt

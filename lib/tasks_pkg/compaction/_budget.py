@@ -19,9 +19,10 @@ Imports nothing from sibling sub-modules except ``_constants`` and
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
@@ -161,7 +162,7 @@ def clamp_tool_result_text(tool_name: str, content: str,
                      '%s — clamped (tc=%s conv=%s). Investigate: opaque blob in '
                      'text stream.',
                      tool_name, _human_size(original_len), _human_size(ceiling),
-                     tc_id[:8] if tc_id else '?', conv_id[:8] if conv_id else '?')
+                     tc_id if tc_id else '?', conv_id if conv_id else '?')
     else:
         marker = (
             f'\n\n... [{elided:,} chars elided — this "{tool_name}" call '
@@ -174,7 +175,7 @@ def clamp_tool_result_text(tool_name: str, content: str,
                     '(tc=%s conv=%s). Text-shaped, so this is an oversized '
                     'legitimate read, not a blob leak.',
                     tool_name, _human_size(original_len), _human_size(ceiling),
-                    tc_id[:8] if tc_id else '?', conv_id[:8] if conv_id else '?')
+                    tc_id if tc_id else '?', conv_id if conv_id else '?')
     return head + marker + tail
 
 
@@ -227,6 +228,16 @@ def _model_result_tokens(content: str, model: str) -> int:
     from lib.tools.result_envelope import model_text_from_tool_result
 
     return _result_tokens(model_text_from_tool_result(content), model)
+
+
+def fits_tool_result_budget(content: str, *, model: str = "") -> bool:
+    """Whether producer text reaches the model inline, without an artifact.
+
+    A producer that pages its own result sizes each page with this, so the
+    page is readable in the call that returned it. It applies the same
+    single-result ceiling and token authority as the artifact policy here.
+    """
+    return _model_result_tokens(content, model) <= TOOL_RESULT_V2_MAX_TOKENS
 
 
 def _fit_summary(text: str, *, token_budget: int, model: str,
@@ -473,11 +484,12 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
         accepted.append(item)
     final_truncated = truncated or len(accepted) < len(items)
     visible = _render(fitted_summary, accepted, final_truncated)
-    if _model_result_tokens(visible, model) <= token_budget:
+    if fitted_summary == summary and _model_result_tokens(visible, model) <= token_budget:
         return visible
 
-    # The summary budget above is only a first-pass allocation. JSON string
-    # escaping is content-dependent for structured projections. Fit against
+    # The summary/item split only admits items; small items release their
+    # unused share back to the original summary. JSON string escaping is
+    # content-dependent for structured projections. Fit against
     # the final model-visible value, preserving the largest deterministic
     # prefix and every item that can coexist with it.
     remaining_items = list(accepted)
@@ -600,12 +612,15 @@ def _materialize_file_read_envelope(
     # Identity/status is non-negotiable. Progressive fallbacks only remove
     # optional detail and shorten pathological paths in the bounded 64-item
     # model preview. Complete batch observations remain outside this preview.
-    minimal = _render(0, path_limit=384, include_details=True)
+    path_limit, include_details = 384, True
+    minimal = _render(0, path_limit=path_limit, include_details=include_details)
     if _model_result_tokens(minimal, model) > token_budget:
-        minimal = _render(0, path_limit=160, include_details=False)
+        path_limit, include_details = 160, False
+        minimal = _render(0, path_limit=path_limit, include_details=include_details)
     if _model_result_tokens(minimal, model) > token_budget:
         fitted_summary = _fit_summary(summary, token_budget=128, model=model)
-        minimal = _render(0, path_limit=48, include_details=False)
+        path_limit, include_details = 48, False
+        minimal = _render(0, path_limit=path_limit, include_details=include_details)
     if _model_result_tokens(minimal, model) > token_budget:
         # Defensive last form for malformed non-schema callers. It still keeps
         # one identity/status row per preview item instead of first-file bias.
@@ -613,7 +628,8 @@ def _materialize_file_read_envelope(
             "File diagnostics reduced; follow the original error's recovery advice."
             if error is not None or failed_execution else
             "Batch read result; re-read named files as needed.")
-        minimal = _render(0, path_limit=24, include_details=False)
+        path_limit, include_details = 24, False
+        minimal = _render(0, path_limit=path_limit, include_details=include_details)
 
     maximum_source_preview = max(
         (len(str(item.get("preview") or "")) for item in source_items),
@@ -628,7 +644,7 @@ def _materialize_file_read_envelope(
     low = 1
     while low <= high:
         middle = (low + high) // 2
-        candidate = _render(middle, path_limit=384, include_details=True)
+        candidate = _render(middle, path_limit=path_limit, include_details=include_details)
         if _model_result_tokens(candidate, model) \
                 <= token_budget:
             best = candidate
@@ -1083,6 +1099,207 @@ def enforce_round_aggregate_budget(
     return tool_results
 
 
+@dataclass(frozen=True)
+class _RoundResultFit:
+    """One prepared recovery boundary with pure model-view fitting."""
+
+    token_limit: int
+    minimum: str
+    render: Callable[[int], str]
+
+
+def _prepare_round_result_fit(content: str, tool_name: str, *, user_id: int,
+                              model: str, observed_at_ms: int,
+                              declared: Mapping[str, Any], retention_attempted: bool,
+                              require_retention: bool) -> _RoundResultFit | None:
+    """Prepare canonical recovery once, before any allocation/refitting search."""
+    from lib.tools.result_value import CapturedToolResult, TrustedResultText
+    value = {}  # Application JSON has no recovery/identity authority.
+    if isinstance(content, TrustedResultText) and content.envelope:
+        try:
+            value = json.loads(content)
+        except (TypeError, ValueError):
+            pass
+    from lib.tools.result_envelope import tool_result_error
+    canonical = getattr(content, 'canonical', None)
+    canonical = canonical if isinstance(canonical, CapturedToolResult) else None
+    failed_execution = (canonical is not None and canonical.execution_status != 'ok') or (
+        value.get("status") == "error"
+        or value.get("executionStatus") not in (None, "ok", "success"))
+    retained_error = tool_result_error(content) if failed_execution else tool_result_error(value)
+    existing_recovery = (value.get("recovery")
+                         if isinstance(value, dict) else None)
+    if not isinstance(existing_recovery, Mapping):
+        existing_recovery = {}
+    supplied_error_recovery = None
+    if failed_execution and existing_recovery:
+        from lib.tools.result_envelope import ToolResultRecoveryV2
+        try:
+            supplied_error_recovery = ToolResultRecoveryV2(**existing_recovery)
+        except (TypeError, ValueError):
+            # An unknown producer recovery record cannot be reinterpreted.
+            return None
+    recovery_policy = _normalized_recovery_policy(
+        declared.get("policy") or (
+            "source" if existing_recovery.get("kind") == "source"
+            else "artifact"))
+    source_arguments = declared.get("arguments")
+    if not isinstance(source_arguments, Mapping):
+        source_arguments = existing_recovery.get("arguments")
+    if not isinstance(source_arguments, Mapping):
+        source_arguments = {}
+
+    artifact_ref = (
+        str(value.get("artifactRef") or "")
+        if isinstance(value, dict) and recovery_policy == "artifact" else "")
+    if not artifact_ref and recovery_policy == "artifact" and not retention_attempted:
+        artifact_ref = _store_tool_result_artifact(
+            content, user_id=user_id, observed_at_ms=observed_at_ms)
+    if require_retention and not artifact_ref:
+        # Unconsumed evidence cannot be replaced by an unavailable preview.
+        return None
+    # A declared source policy is not a new retry decision for a failed
+    # execution. Keep producer advice; absent classification proves no retry.
+    recovery = supplied_error_recovery
+    if recovery_policy == "source" and not failed_execution:
+        recovery = _source_recovery(tool_name, source_arguments)
+    evidence_id = (str(value.get("evidenceId") or "")
+                   if isinstance(value, dict) else "")
+    if not evidence_id:
+        evidence_id = "ev_" + hashlib.sha256(
+            content.encode("utf-8", errors="replace")).hexdigest()[:24]
+    raw_bytes = (int(value.get("rawBytes") or 0)
+                 if isinstance(value, dict) else 0)
+    raw_bytes = raw_bytes or len(content.encode("utf-8"))
+    source_freshness = (value.get("freshness")
+                        if isinstance(value, dict) else {})
+    if not isinstance(source_freshness, dict):
+        source_freshness = {}
+    source_observed_at_ms = int(
+        source_freshness.get("observedAtMs") or 0)
+    source_world_version = str(
+        source_freshness.get("worldVersion") or "")
+    # Refit the evidence already acquired, including successful structured
+    # items, instead of spending the remaining allowance on a fixed notice.
+    # Old presentation suffixes describe a different preview/recovery view;
+    # the shared fitter issues the current marker and cursor together.
+    trusted_envelope = isinstance(content, TrustedResultText) and content.envelope
+    reduced_summary = str(value.get("summary") or "") if trusted_envelope else content
+    if trusted_envelope:
+        for marker in (_ARTIFACT_RESUME_MARKER, _ARTIFACT_CONTINUATION_MARKER,
+                       _NARROWER_QUERY_MARKER, _UNAVAILABLE_RESULT_MARKER):
+            if reduced_summary.endswith(marker):
+                reduced_summary = reduced_summary[:-len(marker)]
+                break
+    if not artifact_ref and (recovery is None or failed_execution):
+        if recovery_policy == "none":
+            reduced_summary = (
+                "Result reduced by the shared round budget; this tool "
+                "declares no overflow recovery.\n" + reduced_summary)
+        elif recovery_policy == "source":
+            reduced_summary = (
+                "Diagnostic reduced by the shared round budget; "
+                "follow the original error's recovery advice.\n" + reduced_summary)
+        else:
+            reduced_summary = (
+                "Full aggregate result unavailable because artifact "
+                "persistence failed; inspect the prior outcome before "
+                "deciding whether to repeat the operation.\n"
+                + reduced_summary
+            )
+    source_items = (value.get("items")
+                    if isinstance(value, dict) else None)
+    from lib.tools.result_projection import (
+        is_file_read_projection,
+        normalize_file_read_projection_items,
+    )
+    if (not failed_execution and recovery_policy == "source"
+            and tool_name == "read_files"
+            and not is_file_read_projection(source_items)):
+        source_items = normalize_file_read_projection_items(
+            None, source_arguments)
+    result_limit = _result_policy_token_limit(recovery_policy)
+    reduced_status = "error" if retained_error is not None else "partial"
+    from lib.tools.result_envelope import ToolResultProgramInputV2
+    program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
+
+    def finalize_view(reduced_value):
+        for key in ('resultId', 'executionStatus', 'sourceCoverage', 'retentionCoverage'):
+            if key in value:
+                reduced_value[key] = value[key]
+        if program_input is not None and not failed_execution:
+            reduced_value['programInput'] = program_input.to_dict()
+        reduced_value['viewCoverage'] = 'partial'
+        if not artifact_ref:
+            reduced_value['retentionCoverage'] = 'unavailable'
+        if failed_execution:
+            reduced_value['status'] = 'error'
+        return (_canonical_view_facts(reduced_value, canonical)
+                if canonical is not None else reduced_value)
+
+    minimum_summary = ("" if artifact_ref or recovery is not None or retained_error is not None
+                       else _UNAVAILABLE_RESULT_MARKER)
+
+    def render(result_budget: int, *, minimum: bool = False) -> str:
+        summary = minimum_summary if minimum else reduced_summary
+        if is_file_read_projection(source_items):
+            reduced = _materialize_file_read_envelope(
+                status=reduced_status,
+                summary=summary,
+                items=list(source_items),
+                artifact_ref=artifact_ref,
+                raw_bytes=raw_bytes,
+                observed_at_ms=max(
+                    0, source_observed_at_ms or int(observed_at_ms or 0)),
+                world_version=source_world_version,
+                evidence_id=evidence_id,
+                model=model,
+                max_preview_chars=0 if minimum else None,
+                recovery=recovery,
+                error=retained_error, failed_execution=failed_execution,
+                token_budget=result_budget, finalize_view=finalize_view,
+            )
+        else:
+            reduced = _materialize_envelope(
+                status=reduced_status,
+                summary=summary,
+                items=(source_items or []) if not minimum or retained_error is not None else [],
+                artifact_ref=artifact_ref, truncated=True,
+                raw_bytes=raw_bytes,
+                observed_at_ms=max(
+                    0, source_observed_at_ms or int(observed_at_ms or 0)),
+                world_version=source_world_version,
+                evidence_id=evidence_id, model=model,
+                recovery=recovery, error=retained_error,
+                failed_execution=failed_execution, token_budget=result_budget,
+                # Only raw text artifacts use byte offsets. Canonical manifests
+                # and synthesized summaries retain their safe starting cursor.
+                artifact_content="" if isinstance(content, TrustedResultText) else content,
+                finalize_view=finalize_view,
+            )
+        if isinstance(content, TrustedResultText):
+            reduced = TrustedResultText(reduced, canonical=content.canonical, envelope=True)
+        return reduced
+
+    # File identities use the existing minimal layout. Typed error items are
+    # admitted before optional diagnostics, using the same per-result ceiling.
+    minimum_budget = 1 if is_file_read_projection(source_items) else max(1, result_limit)
+    return _RoundResultFit(result_limit, render(minimum_budget, minimum=True), render)
+
+
+def _allocate_round_allowances(demands: Mapping[str, int], minimums: Mapping[str, int],
+                               limit: int) -> dict[str, int]:
+    """Reserve required views, then share optional space by actual demand."""
+    allowances = dict(minimums)
+    remaining = max(0, limit - sum(minimums.values()))
+    pending = sorted(demands, key=lambda key: (demands[key] - minimums[key], key))
+    for position, key in enumerate(pending):
+        granted = min(demands[key] - minimums[key], remaining // (len(pending) - position))
+        allowances[key] += granted
+        remaining -= granted
+    return allowances
+
+
 def enforce_round_aggregate_budget_v2(
     tool_results: dict[str, tuple[str, str, str]], *, user_id: int,
     model: str = "", observed_at_ms: int = 0,
@@ -1098,7 +1315,7 @@ def enforce_round_aggregate_budget_v2(
     """
     limit = (ROUND_TOOL_RESULT_V2_MAX_TOKENS if token_budget is None
              else max(1, int(token_budget)))
-    from lib.tools.result_value import CapturedToolResult, TrustedResultText
+    from lib.tools.result_value import TrustedResultText
     retention_attempted = set()
     for tc_id, (content, tool_name, tool_use_id) in tool_results.items():
         if isinstance(content, TrustedResultText) and content.envelope:
@@ -1106,190 +1323,77 @@ def enforce_round_aggregate_budget_v2(
             tool_results[tc_id] = (content, tool_name, tool_use_id)
             if attempted:
                 retention_attempted.add(tc_id)
-    total = sum(_model_result_tokens(content, model)
-                for content, _, _ in tool_results.values()
-                if isinstance(content, str))
-    if total <= limit:
+    original_costs = {key: _model_result_tokens(row[0], model)
+                      for key, row in tool_results.items() if isinstance(row[0], str)}
+    if sum(original_costs.values()) <= limit:
         return tool_results
-    candidates = sorted(
-        ((tc_id, value) for tc_id, value in tool_results.items()
-         if isinstance(value[0], str)),
-        key=lambda row: (-_model_result_tokens(row[1][0], model), row[0]),
-    )
-    for tc_id, (content, tool_name, tool_use_id) in candidates:
-        if total <= limit:
+
+    demands = dict(original_costs)
+    minimums = dict.fromkeys(original_costs, 0)
+    prepared: dict[str, _RoundResultFit | None] = {}
+    while True:
+        allowances = _allocate_round_allowances(demands, minimums, limit)
+        pending = sorted(key for key in original_costs
+                         if key not in prepared and allowances[key] < original_costs[key])
+        if not pending:
             break
-        before = _model_result_tokens(content, model)
-        from lib.tools.result_value import TrustedResultText
-        try:
-            value = json.loads(content)
-        except (TypeError, ValueError):
-            value = {}
-        if not (isinstance(content, TrustedResultText) and content.envelope):
-            value = {}  # Application JSON has no recovery/identity authority.
-        from lib.tools.result_envelope import tool_result_error
-        canonical = getattr(content, 'canonical', None)
-        canonical = canonical if isinstance(canonical, CapturedToolResult) else None
-        failed_execution = (canonical is not None and canonical.execution_status != 'ok') or (
-            value.get("status") == "error"
-            or value.get("executionStatus") not in (None, "ok", "success"))
-        retained_error = tool_result_error(content) if failed_execution else tool_result_error(value)
-        declared = ((recovery_by_call_id or {}).get(tc_id) or {})
-        existing_recovery = (value.get("recovery")
-                             if isinstance(value, dict) else None)
-        if not isinstance(existing_recovery, Mapping):
-            existing_recovery = {}
-        supplied_error_recovery = None
-        if failed_execution and existing_recovery:
-            from lib.tools.result_envelope import ToolResultRecoveryV2
-            try:
-                supplied_error_recovery = ToolResultRecoveryV2(**existing_recovery)
-            except (TypeError, ValueError):
-                # An unknown producer recovery record cannot be reinterpreted.
-                continue
-        recovery_policy = _normalized_recovery_policy(
-            declared.get("policy") or (
-                "source" if existing_recovery.get("kind") == "source"
-                else "artifact"))
-        source_arguments = declared.get("arguments")
-        if not isinstance(source_arguments, Mapping):
-            source_arguments = existing_recovery.get("arguments")
-        if not isinstance(source_arguments, Mapping):
-            source_arguments = {}
-
-        artifact_ref = (
-            str(value.get("artifactRef") or "")
-            if isinstance(value, dict) and recovery_policy == "artifact" else "")
-        if not artifact_ref and recovery_policy == "artifact" and tc_id not in retention_attempted:
-            artifact_ref = _store_tool_result_artifact(
-                content, user_id=user_id, observed_at_ms=observed_at_ms)
-        if require_retention and not artifact_ref:
-            # Unconsumed evidence cannot be replaced by an unavailable preview.
-            continue
-        # A declared source policy is not a new retry decision for a failed
-        # execution. Keep producer advice; absent classification proves no retry.
-        recovery = supplied_error_recovery
-        if recovery_policy == "source" and not failed_execution:
-            recovery = _source_recovery(tool_name, source_arguments)
-        evidence_id = (str(value.get("evidenceId") or "")
-                       if isinstance(value, dict) else "")
-        if not evidence_id:
-            evidence_id = "ev_" + hashlib.sha256(
-                content.encode("utf-8", errors="replace")).hexdigest()[:24]
-        raw_bytes = (int(value.get("rawBytes") or 0)
-                     if isinstance(value, dict) else 0)
-        source_freshness = (value.get("freshness")
-                            if isinstance(value, dict) else {})
-        if not isinstance(source_freshness, dict):
-            source_freshness = {}
-        source_observed_at_ms = int(
-            source_freshness.get("observedAtMs") or 0)
-        source_world_version = str(
-            source_freshness.get("worldVersion") or "")
-        # Refit the evidence already acquired, including successful structured
-        # items, instead of spending the remaining allowance on a fixed notice.
-        # Old presentation suffixes describe a different preview/recovery view;
-        # the shared fitter issues the current marker and cursor together.
-        trusted_envelope = isinstance(content, TrustedResultText) and content.envelope
-        reduced_summary = str(value.get("summary") or "") if trusted_envelope else content
-        if trusted_envelope:
-            for marker in (_ARTIFACT_RESUME_MARKER, _ARTIFACT_CONTINUATION_MARKER,
-                           _NARROWER_QUERY_MARKER, _UNAVAILABLE_RESULT_MARKER):
-                if reduced_summary.endswith(marker):
-                    reduced_summary = reduced_summary[:-len(marker)]
-                    break
-        if not artifact_ref and (recovery is None or failed_execution):
-            if recovery_policy == "none":
-                reduced_summary = (
-                    "Result reduced by the shared round budget; this tool "
-                    "declares no overflow recovery.\n" + reduced_summary)
-            elif recovery_policy == "source":
-                reduced_summary = (
-                    "Diagnostic reduced by the shared round budget; "
-                    "follow the original error's recovery advice.\n" + reduced_summary)
+        # Every pass prepares at least one new result. Mandatory retention can
+        # make a result immutable and reduce other allowances; no occurrence is
+        # prepared twice, including when its first publication failed.
+        for key in pending:
+            content, tool_name, _ = tool_results[key]
+            fit = _prepare_round_result_fit(content, tool_name, user_id=user_id,
+                model=model, observed_at_ms=observed_at_ms,
+                declared=((recovery_by_call_id or {}).get(key) or {}),
+                retention_attempted=key in retention_attempted,
+                require_retention=require_retention)
+            floor = (_model_result_tokens(fit.minimum, model) if fit is not None
+                     else original_costs[key])
+            if floor >= original_costs[key]:
+                prepared[key] = None
+                minimums[key] = demands[key] = original_costs[key]
             else:
-                reduced_summary = (
-                    "Full aggregate result unavailable because artifact "
-                    "persistence failed; inspect the prior outcome before "
-                    "deciding whether to repeat the operation.\n"
-                    + reduced_summary
-                )
-        source_items = (value.get("items")
-                        if isinstance(value, dict) else None)
-        from lib.tools.result_projection import (
-            is_file_read_projection,
-            normalize_file_read_projection_items,
-        )
-        if (not failed_execution and recovery_policy == "source"
-                and tool_name == "read_files"
-                and not is_file_read_projection(source_items)):
-            source_items = normalize_file_read_projection_items(
-                None, source_arguments)
-        # Count the final typed failure/items inside the same remaining budget.
-        # Required metadata may be irreducible; adoption below uses its actual
-        # model projection rather than claiming an unattainable reduction.
-        result_budget = min(
-            _result_policy_token_limit(recovery_policy), max(1, limit - (total - before)))
-        reduced_status = "error" if retained_error is not None else "partial"
-        from lib.tools.result_envelope import ToolResultProgramInputV2
-        program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
+                prepared[key] = fit
+                minimums[key] = floor
+                demands[key] = max(floor, min(original_costs[key], fit.token_limit))
 
-        def finalize_view(reduced_value):
-            for key in ('resultId', 'executionStatus', 'sourceCoverage', 'retentionCoverage'):
-                if key in value:
-                    reduced_value[key] = value[key]
-            if program_input is not None and not failed_execution:
-                reduced_value['programInput'] = program_input.to_dict()
-            reduced_value['viewCoverage'] = 'partial'
-            if not artifact_ref:
-                reduced_value['retentionCoverage'] = 'unavailable'
-            if failed_execution:
-                reduced_value['status'] = 'error'
-            return (_canonical_view_facts(reduced_value, canonical)
-                    if canonical is not None else reduced_value)
+    def select(key: str, allowance: int) -> tuple[str, int]:
+        original = tool_results[key][0]
+        fit = prepared.get(key)
+        if allowance >= original_costs[key] or fit is None:
+            return original, original_costs[key]
+        if allowance > minimums[key]:
+            candidate = fit.render(min(allowance, fit.token_limit))
+            cost = _model_result_tokens(candidate, model)
+            if cost <= allowance and cost < original_costs[key]:
+                return candidate, cost
+        return fit.minimum, minimums[key]
 
-        if is_file_read_projection(source_items):
-            reduced = _materialize_file_read_envelope(
-                status=reduced_status,
-                summary=reduced_summary,
-                items=list(source_items),
-                artifact_ref=artifact_ref,
-                raw_bytes=raw_bytes or len(content.encode("utf-8")),
-                observed_at_ms=max(
-                    0, source_observed_at_ms or int(observed_at_ms or 0)),
-                world_version=source_world_version,
-                evidence_id=evidence_id,
-                model=model,
-                # Share available preview space while preserving identities.
-                recovery=recovery,
-                error=retained_error, failed_execution=failed_execution,
-                token_budget=result_budget, finalize_view=finalize_view,
-            )
-        else:
-            reduced = _materialize_envelope(
-                status=reduced_status,
-                summary=reduced_summary,
-                items=source_items or [],
-                artifact_ref=artifact_ref, truncated=True,
-                raw_bytes=raw_bytes or len(content.encode("utf-8")),
-                observed_at_ms=max(
-                    0, source_observed_at_ms or int(observed_at_ms or 0)),
-                world_version=source_world_version,
-                evidence_id=evidence_id, model=model,
-                recovery=recovery, error=retained_error,
-                failed_execution=failed_execution, token_budget=result_budget,
-                # Only raw text artifacts use byte offsets. Canonical manifests
-                # and synthesized summaries retain their safe starting cursor.
-                artifact_content="" if isinstance(content, TrustedResultText) else content,
-                finalize_view=finalize_view,
-            )
-        from lib.tools.result_value import TrustedResultText
-        if isinstance(content, TrustedResultText):
-            reduced = TrustedResultText(reduced, canonical=content.canonical, envelope=True)
-        after = _model_result_tokens(reduced, model)
-        if after < before:
-            tool_results[tc_id] = (reduced, tool_name, tool_use_id)
-            total -= before - after
+    selected = {key: select(key, allowance) for key, allowance in allowances.items()}
+    remaining = max(0, limit - sum(cost for _, cost in selected.values()))
+    # Structured items and token boundaries leave discrete gaps. Reclaim them
+    # once per prepared result, starting with the least optional evidence. This
+    # is a bounded pure fitting pass: it cannot query or publish an artifact.
+    for key in sorted(prepared, key=lambda key: (selected[key][1] - minimums[key], key)):
+        if remaining <= 0:
+            break
+        fit = prepared[key]
+        if fit is None:
+            continue
+        previous_cost = selected[key][1]
+        allowance = min(original_costs[key], max(minimums[key], fit.token_limit),
+                        previous_cost + remaining)
+        if allowance <= previous_cost:
+            continue
+        candidate, cost = select(key, allowance)
+        if previous_cost < cost <= allowance:
+            selected[key] = candidate, cost
+            remaining -= cost - previous_cost
+
+    for key, (candidate, cost) in selected.items():
+        if cost < original_costs[key]:
+            _, tool_name, tool_use_id = tool_results[key]
+            tool_results[key] = candidate, tool_name, tool_use_id
     return tool_results
 
 

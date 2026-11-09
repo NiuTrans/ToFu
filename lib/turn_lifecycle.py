@@ -27,7 +27,7 @@ from lib.conversation_sync.dispatch_contract import (
 )
 from lib.conversation_sync.workspace import is_conversation_workspace
 from lib.identity import PrincipalContext, require_user_id
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.storage.commit_events import CommittedEventOrder, defer_committed_events
 from lib.storage.errors import (
     ProjectionRebaseRequired,
@@ -49,7 +49,7 @@ from lib.conversation_sync.settled_rows import (
     settle,
     settle_items,
 )
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     compact_tool_rounds_for_frame_budget,
     sanitize_api_rounds_for_persist,
     tool_round_payload_chars,
@@ -155,10 +155,25 @@ _TURN_SEARCH_BACKFILL_INITIAL_DELAY_SECONDS = 60.0
 _ATTEMPT_DISPATCH_OWNER_ID = uuid.uuid4().hex
 _ATTEMPT_CLAIM_MAX_ATTEMPTS = 4
 _ATTEMPT_CLAIM_RPC_DEADLINE_SECONDS = 2.0
-# Every in-process dispatch entry point shares these stripes from claim through
-# bind/spawn. This makes same-owner claim replay safe without retaining an
-# unbounded lock/token map for arbitrary attempt IDs.
-_ATTEMPT_DISPATCH_LOCKS = tuple(threading.Lock() for _ in range(256))
+# Every in-process dispatch entry point serializes one attempt from claim
+# through bind/spawn, and a claimed worker holds it for the attempt's whole
+# execution. Exclusion is exact per attempt identity, so an unrelated attempt
+# never waits behind a long-running one (a fixed pool of hashed stripes once
+# parked new turns behind unrelated hours-long tasks). A key is retained only
+# while a thread holds or awaits it: the map is bounded by in-flight dispatches,
+# not by the attempt IDs this process has seen.
+_ATTEMPT_DISPATCH_GUARD = threading.Lock()
+_ATTEMPT_DISPATCH_LOCKS: dict[str, '_AttemptDispatchHold'] = {}
+
+
+class _AttemptDispatchHold:
+    """One attempt's lock and the number of threads holding or awaiting it."""
+
+    __slots__ = ('lock', 'users')
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
 
 
 # ── Text-delta write coalescing ──────────────────────────────────────────
@@ -404,7 +419,7 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
             except Exception:
                 logger.debug(
                     'Could not hydrate lane-busy turn conv=%s',
-                    conversation_id[:12], exc_info=True)
+                    conversation_id, exc_info=True)
             raise LifecycleConflict(
                 'lane_busy', str(exc), latest) from exc
         if exc.code == 'turn_parent_invalid':
@@ -816,14 +831,31 @@ def dispatch_attempt_to_worker(
     )
 
 
-def attempt_dispatch_lock(attempt_id: str) -> threading.Lock:
-    """Return the bounded process-wide serialization stripe for one attempt."""
+@contextmanager
+def attempt_dispatch_lock(attempt_id: str) -> Iterator[None]:
+    """Serialize dispatch of exactly one attempt within this process."""
     normalized_attempt_id = str(attempt_id or '')
     if not normalized_attempt_id:
         raise ValueError('attempt_id is required for dispatch serialization')
-    return _ATTEMPT_DISPATCH_LOCKS[
-        hash(normalized_attempt_id) % len(_ATTEMPT_DISPATCH_LOCKS)
-    ]
+    with _ATTEMPT_DISPATCH_GUARD:
+        hold = _ATTEMPT_DISPATCH_LOCKS.get(normalized_attempt_id)
+        if hold is None:
+            hold = _ATTEMPT_DISPATCH_LOCKS[normalized_attempt_id] = _AttemptDispatchHold()
+        hold.users += 1
+    try:
+        if not hold.lock.acquire(blocking=False):
+            logger.info('[TurnLifecycle] dispatch of %s waits for its current '
+                        'in-process owner', normalized_attempt_id)
+            hold.lock.acquire()
+        try:
+            yield
+        finally:
+            hold.lock.release()
+    finally:
+        with _ATTEMPT_DISPATCH_GUARD:
+            hold.users -= 1
+            if not hold.users:
+                del _ATTEMPT_DISPATCH_LOCKS[normalized_attempt_id]
 
 
 def claim_attempt_start(attempt_id: str, *, user_id: Any) -> bool:
@@ -853,7 +885,7 @@ def claim_attempt_start(attempt_id: str, *, user_id: Any) -> bool:
                     '[TurnLifecycle] attempt dispatch claim recovered after '
                     '%d transient failure(s) attempt=%s',
                     attempt_no,
-                    attempt_id[:12],
+                    attempt_id,
                 )
             return bool(claimed)
         except StorageError as exc:
@@ -873,7 +905,7 @@ def claim_attempt_start(attempt_id: str, *, user_id: Any) -> bool:
                 '[TurnLifecycle] transient attempt dispatch claim failure; '
                 'retrying in %.2fs attempt=%s code=%s try=%d/%d',
                 delay,
-                attempt_id[:12],
+                attempt_id,
                 exc.code,
                 attempt_no + 1,
                 _ATTEMPT_CLAIM_MAX_ATTEMPTS,
@@ -1161,7 +1193,9 @@ def _derive_history_rows(task, values):
 
     if isinstance(values.get('apiRounds'), list) and values['apiRounds']:
         derive('apiRounds', sanitize_api_rounds_for_persist)
-    if 'toolRounds' in values:
+    # Terminal persistence releases a conversation attempt's history lists to
+    # None (the settled Turn owns them); a late frame keeps them released.
+    if isinstance(values.get('toolRounds'), list):
         rows, memo = derive('toolRounds', _trimmed_tool_rounds, tool_round_payload_chars)
         compacted = compact_tool_rounds_for_frame_budget(rows, payload_chars=memo.weight + sum(
             tool_round_payload_chars(rows[position]) for position in memo.live))
@@ -1663,19 +1697,49 @@ def _signal_stale_attempt_abort(task: dict[str, Any], attempt_id: str,
     """
     if task.get('aborted'):
         return
+    cause = stale_attempt_abort_reason(
+        task, attempt_id, fallback='turn_attempt_stale_fence')
     logger.warning('[TurnLifecycle] turn-native attempt stale (%s); signaling abort '
-                   'task=%s attempt=%s', reason,
-                   (task.get('id') or '?')[:8], (attempt_id or '?')[:8])
+                   'task=%s attempt=%s cause=%s', reason,
+                   (task.get('id') or '?'), (attempt_id or '?'), cause)
     try:
         task['aborted'] = True
         task['_abort_timestamp'] = time.time()
-        task['_abort_reason'] = 'turn_attempt_stale_fence'
+        task['_abort_reason'] = cause
         abort_event = task.get('abort_event')
         if abort_event is not None:
             abort_event.set()
     except Exception:
         logger.debug('[TurnLifecycle] stale-attempt abort signal failed '
                      '(non-fatal)', exc_info=True)
+
+
+def stale_attempt_abort_reason(task: dict[str, Any], attempt_id: str, *,
+                               fallback: str) -> str:
+    """Name the settlement that made this executor's attempt stale.
+
+    The fence only proves the attempt is no longer live. Its Turn's settlement
+    says who ended it. Restart recovery (``server_restart``) paused resumable
+    work, and a Stop recorded elsewhere stays a Stop. Anything else, including
+    a newer attempt that replaced this one, keeps the fence's own failed stamp.
+    """
+    from lib.turn_verdict import RESTART_RECOVERY, STOPPED_ELSEWHERE
+    try:
+        turn = get_turn(str(task.get('convId') or ''), str(task.get('_turnId') or ''),
+                        user_id=task.get('_userId'), include_projection=False)
+    except Exception:
+        logger.debug('[TurnLifecycle] stale-attempt cause unread task=%s',
+                     (task.get('id') or '?'), exc_info=True)
+        return fallback
+    if not isinstance(turn, Mapping) or turn.get('currentAttemptId') != attempt_id:
+        return fallback
+    settlement = turn.get('settlement')
+    cause = settlement.get('cause') if isinstance(settlement, Mapping) else None
+    if cause == 'server_restart':
+        return RESTART_RECOVERY
+    if cause == 'user_abort':
+        return STOPPED_ELSEWHERE
+    return fallback
 
 
 class _CommandEncoding:
@@ -1735,7 +1799,7 @@ def _note_debug_evidence_shed(task: dict[str, Any], attempt_id: str,
     (logger.warning if count == 1 else logger.debug)(
         '[TurnLifecycle] %s evidence shed from its turn event '
         'task=%s attempt=%s count=%d: %s',
-        event_kind, str(task.get('id') or '?')[:8], str(attempt_id)[:8],
+        event_kind, str(task.get('id') or '?'), str(attempt_id),
         count, reason)
 
 
@@ -1910,7 +1974,7 @@ def _signal_frame_overflow_abort(task: dict[str, Any], attempt_id: str,
         return
     logger.error('[TurnLifecycle] unwritable frame for task=%s attempt=%s '
                  'event=%s; signaling abort (storage_frame_overflow)',
-                 str(task.get('id') or '?')[:8], str(attempt_id or '?')[:8],
+                 str(task.get('id') or '?'), str(attempt_id or '?'),
                  event_kind)
     try:
         task['aborted'] = True
@@ -1941,7 +2005,7 @@ def _signal_authority_integrity_abort(task: dict[str, Any], attempt_id: str,
         '[TurnLifecycle] conversation authority integrity failure for task=%s '
         'attempt=%s event=%s; signaling cooperative abort (authority detail: '
         '%s)',
-        str(task.get('id') or '?')[:8], str(attempt_id or '?')[:8], event_kind,
+        str(task.get('id') or '?'), str(attempt_id or '?'), event_kind,
         detail or 'no authority diagnostic',
     )
     try:
@@ -1977,7 +2041,7 @@ def _log_refused_frame_and_stop(task: dict[str, Any], attempt_id: str, user_id: 
     logger.warning(
         '[TurnLifecycle] Turn reached its settleable ceiling task=%s attempt=%s '
         'event=%s; keeping %d row(s) in the attempt event log and stopping the task',
-        str(task.get('id') or '?')[:8], str(attempt_id)[:8], event_kind, len(rows))
+        str(task.get('id') or '?'), str(attempt_id), event_kind, len(rows))
     if not task.get('aborted'):
         _signal_frame_overflow_abort(task, attempt_id, event_kind)
         if not task.get('error'):
@@ -2061,18 +2125,18 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
                 if new_task_id:
                     logger.info('[Queue] turn-native settlement drain dispatched '
                                 'queued message → task %s for conv=%s',
-                                new_task_id[:8], conversation_id[:8])
+                                task_log_tag(new_task_id), conversation_id)
                 else:
                     from lib.project_dispatch.recovery import recover_conversation_dispatch
                     recover_conversation_dispatch(
                         conversation_id, user_id=owner_user_id)
             except Exception as exc:
                 logger.debug('[Queue] turn-native settlement drain failed conv=%s: %s',
-                             conversation_id[:8], exc)
+                             conversation_id, exc)
 
         threading.Thread(
             target=_drain, daemon=True,
-            name=f'turn-native-queue-drain-{conversation_id[:8]}').start()
+            name=f'turn-native-queue-drain-{conversation_id}').start()
     except Exception:
         logger.debug('[Queue] turn-native settlement drain hook failed', exc_info=True)
 
@@ -2264,8 +2328,8 @@ def record_task_event(task: dict[str, Any], raw_event: dict[str, Any],
                     '[TurnLifecycle] deterministic event-record rejection '
                     'task=%s attempt=%s kind=%s terminal=%s client_rev=%s '
                     'reason=%s',
-                    str(task.get('id') or '?')[:8],
-                    str(attempt_id or '?')[:8],
+                    str(task.get('id') or '?'),
+                    str(attempt_id or '?'),
                     raw_event.get('type'), terminal,
                     (state or {}).get('projectionRevision'),
                     _storage_rejection_reason(exc))
@@ -2628,7 +2692,7 @@ def _record_task_event_locked(
             '[TurnLifecycle] oversized projection for task=%s attempt=%s '
             'event=%s; carrying the exact task event with a slim projection '
             'and probing full state again in %.0fs (count=%d)',
-            str(task.get('id') or '?')[:8], str(attempt_id)[:8], event_kind,
+            str(task.get('id') or '?'), str(attempt_id), event_kind,
             _OVERSIZE_PROJECTION_RETRY_SECONDS, retry_count,
         )
         content, thinking = _delta_text_fields(source, previous)
@@ -2778,7 +2842,7 @@ def _report_watchdog_turn_fault(task: dict[str, Any], turn: Mapping[str, Any], a
                                 attempt_id=str(attempt_id), error=envelope)
 
         threading.Thread(target=_report, daemon=True,
-                         name=f'router-watchdog-signal-{conversation_id[:8]}').start()
+                         name=f'router-watchdog-signal-{conversation_id}').start()
     except Exception:
         logger.debug('[TurnLifecycle] watchdog fault report hook failed', exc_info=True)
 
@@ -2920,7 +2984,7 @@ def _record_task_events_locked(task: dict[str, Any], entries: list[TaskEventBatc
             if entry.preceding_events:
                 carrier['preceding_events'] = entry.preceding_events
             entry.task_event = carrier
-    from lib.storage import storage_event_policy
+    from lib.agent_core import storage_event_policy
     budget = storage_event_policy.resolve_storage_event_budget()
     batch_supported = True
     # Split only the refused interval. A large first event may need a commit
@@ -3088,7 +3152,7 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
             logger.warning(
                 '[TurnLifecycle] turn event batch refused task=%s attempt=%s '
                 'events=%d reason=%s; recording them one by one',
-                str(task.get('id') or '?')[:8], str(attempt_id)[:8], len(chunk),
+                str(task.get('id') or '?'), str(attempt_id), len(chunk),
                 _storage_rejection_reason(exc))
             return _record_task_events_per_event(task, entries, live_flow=live_flow), True, None
         raise
@@ -3220,7 +3284,7 @@ def _task_event_rows_durable(task_id: str, entries: list[TaskEventBatchEntry]) -
     """
     from lib.event_envelope import stamp_event_format_envelope
     from lib.storage.protocol import canonical_json
-    from lib.storage.storage_projection import project_event_usage_for_storage
+    from lib.task_replay.persistence_projection import project_event_usage_for_storage
     from lib.tasks_pkg.event_log import read_events
     expected = {}
     for entry in entries:
@@ -3338,7 +3402,7 @@ def list_turns(conversation_id: str, *, user_id: Any,
                 logger.warning(
                     '[turns] delta overflow conv=%s rows=%d limit=%d — '
                     'falling back to full snapshot',
-                    conversation_id[:8], len(rows), limit)
+                    conversation_id, len(rows), limit)
             else:
                 if light:
                     for row in rows:
@@ -3802,10 +3866,18 @@ def _notify_abort_busy_projection(conversation_id: Any, user_id: Any) -> None:
         logger.debug('[turns] abort busy-notify failed: %s', exc)
 
 
-def _withdraw_conversation_dispatch(conversation_id: Any, user_id: Any) -> dict[str, str]:
-    """Durable project-dispatch Stop; an unacknowledged Stop watermark propagates."""
+def _withdraw_conversation_dispatch(conversation_id: Any, user_id: Any,
+                                    *, occurred_at: float | None = None) -> dict[str, str]:
+    """Durable project-dispatch Stop; an unacknowledged Stop watermark propagates.
+
+    ``occurred_at`` is the human Stop's own timestamp when the entry point has
+    one. A repeated Stop of an attempt that already ended passes the attempt's
+    settlement time: the original withdrawal is still retired, but its watermark
+    never moves forward to withdraw grants created after that Stop.
+    """
     from lib.project_dispatch.recovery import revoke_conversation_dispatch
-    outcome = revoke_conversation_dispatch(conversation_id, user_id=user_id)
+    outcome = revoke_conversation_dispatch(conversation_id, user_id=user_id,
+                                           occurred_at=occurred_at)
     return {'dispatchWithdrawal': outcome['withdrawal']}
 
 
@@ -3835,7 +3907,9 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
     task_id = str(row.get('taskId') or '')
     status = row['status']
     if status not in LIVE_ATTEMPT_STATUSES:
-        withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+        settled_at = row.get('settledAt') or row.get('createdAt')
+        ended_at = (settled_at / 1000) if isinstance(settled_at, (int, float)) and settled_at > 0 else 0.0
+        withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id, occurred_at=ended_at)
                       if withdraw_dispatch else {})
         return {'attemptId': attempt_id, 'status': status, 'alreadyTerminal': True,
                 **withdrawal}
@@ -3870,7 +3944,10 @@ def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = Tr
         if not isinstance(cancelled, Mapping) or not cancelled.get('accepted'):
             latest = get_attempt(attempt_id, user_id=user_id)
             if isinstance(latest, Mapping) and latest.get('status') not in LIVE_ATTEMPT_STATUSES:
-                withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id)
+                settled_at = latest.get('settledAt') or latest.get('createdAt')
+                ended_at = (settled_at / 1000) if isinstance(settled_at, (int, float)) and settled_at > 0 else 0.0
+                withdrawal = (_withdraw_conversation_dispatch(row['conversationId'], user_id,
+                                                              occurred_at=ended_at)
                               if withdraw_dispatch else {})
                 return {'attemptId': attempt_id, 'status': latest['status'],
                         'alreadyTerminal': True, **withdrawal}
@@ -4011,10 +4088,10 @@ def build_api_messages(
                                      user_id=owner_user_id, allow_model_replay=False)
         config['_modelReplayStatus'] = refusal
         logger.warning('[ModelReplay] conv=%s restore=%s fallback=full_history messages=%d',
-                       conversation_id[:8], refusal, len(rebuilt) if rebuilt is not None else 0)
+                       conversation_id, refusal, len(rebuilt) if rebuilt is not None else 0)
         return rebuilt
     logger.info('[ModelReplay] conv=%s restore=%s turns=%d messages=%d',
-                conversation_id[:8], config.get('_modelReplayStatus'),
+                conversation_id, config.get('_modelReplayStatus'),
                 covered, len(prefix_messages))
     raw = []
     for row in selected[covered:]:

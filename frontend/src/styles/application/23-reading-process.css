@@ -47,7 +47,7 @@
  * The caret is a pseudo-element of the FLEX ROW, so it is an atomic flex item
  * that can never wrap onto a line of its own — the failure the edit card had
  * while its caret was inline text inside the wrapping label. */
-.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after {
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header, .conversation-tool-card__summary)::after {
   content: '';
   box-sizing: border-box;
   flex: 0 0 var(--space-2);
@@ -59,7 +59,7 @@
   transform: rotate(-45deg);
   color: var(--text-secondary);
 }
-.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after,
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header, .conversation-tool-card__summary)::after,
 .conversation-surface .ptool-results-header[aria-expanded="true"]::after {
   transform: rotate(45deg);
 }
@@ -73,7 +73,7 @@
   color: var(--text-secondary);
 }
 .conversation-surface .ptool-results-header > .ptool-results-toggle,
-.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header) .ptool-text::after {
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .ptool-memory-header) .ptool-text::after {
   display: none;
 }
 .conversation-surface .ptc-head::before,
@@ -117,7 +117,12 @@
 .conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
   margin-inline-start: auto;
 }
+/* Project, motion and memory receipts hang their bodies the same way (no
+ * tinted sheet of their own); a body inside an accepted work card's request
+ * details keeps that card's own layout. */
 .conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
+.conversation-surface .ptool-convmeta-block > :is(.ptool-convmeta-body, .ptool-motion-body),
+.conversation-surface .ptool-memory-block > .ptool-memory-body,
 .conversation-surface .ptool-results-block.expanded > .ptool-results-content {
   margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
   padding: var(--space-1) 0 var(--space-1) calc(var(--space-4) - var(--control-edge-inset));
@@ -126,6 +131,7 @@
   border-radius: 0;
   background: transparent;
 }
+.conversation-surface .ptool-memory-content { border-block-start-color: var(--turn-rule); }
 /* A program result already sits on the card spine, and settled edit rows carry
    their own bordered chrome; neither gets a second rail or inset. */
 .conversation-surface :is(.ptc-result, .ptool-batch-done-block) > .ptool-result-body {

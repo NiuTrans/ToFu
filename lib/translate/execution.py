@@ -17,7 +17,7 @@ from lib.agent_core.fair_work_lane import (
     OwnerFairWorkLane,
 )
 from lib.agent_core.task_runtime import TaskRuntime
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from .observability import observed_submission
 from runtime_guards import resolve_resource_budget
@@ -142,7 +142,7 @@ def submit_translation_task(
 
         logger.error(
             '[Translate] background worker admission failed task=%s: %s',
-            task_id[:8], submission_error, exc_info=True,
+            task_log_tag(task_id), submission_error, exc_info=True,
         )
         runtime.finish(
             task_id,

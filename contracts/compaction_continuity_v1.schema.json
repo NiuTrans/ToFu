@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Source-derived compaction continuity v1",
-  "description": "A rebuildable working projection carried independently of model-authored narrative. Original transcript/tool receipts remain authoritative. No model selects, edits or certifies these observations. The complete state participates in ordinary request admission; it is never silently clipped to make a candidate fit.",
+  "description": "A rebuildable working projection carried independently of model-authored narrative. Original transcript/tool receipts remain authoritative. No model selects, edits or certifies these observations. The complete state participates in ordinary request admission and is never silently clipped. Only when it cannot fit beside the smallest execution tail does compaction fold its oldest observations into the narrative (handed to the summarizer as such) and count them in foldedIntoNarrative.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "ownerKey", "taskId", "checklist", "observations"],
@@ -10,6 +10,11 @@
     "ownerKey": {"type": "string"},
     "taskId": {"type": "string"},
     "checklist": {"type": "array", "items": {"type": "object"}},
+    "foldedIntoNarrative": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Cumulative count of older observations no longer carried verbatim: the narrative carries their consequences and the original Turns/archives their exact text. Absent when nothing was folded."
+    },
     "observations": {
       "type": "array",
       "items": {

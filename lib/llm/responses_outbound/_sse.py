@@ -79,6 +79,24 @@ _KNOWN_PROGRESS_PREFIXES = (
 _MAX_RESPONSE_OUTPUT_INDEX = 4095
 _MAX_RESPONSE_ITEM_ID_CHARS = 512
 _MAX_RESPONSE_TOOL_NAME_CHARS = 512
+_UNREPLAYED_REASONING_NOTE = (
+    '[Responses] encrypted reasoning not retained: this route does not declare '
+    'responses_reasoning_replay, so the request neither asked for it nor can '
+    'send it back')
+
+
+def _retained(item, *, reasoning_replay: bool) -> bool:
+    """Whether an output item belongs on the private replay sidecar.
+
+    ``reasoning_replay`` is the request's ``responses_reasoning_replay``
+    decision. Encrypted reasoning is optional stateless replay input (the
+    model re-reasons without it), and checked conversion refuses ciphertext a
+    route cannot resend as mandatory continuity, so a request that does not
+    replay reasoning keeps none. Every other captured item is retained.
+    """
+    return (isinstance(item, dict) and item.get('type') in _CAPTURE_ITEM_TYPES
+            and (reasoning_replay or item.get('type') != 'reasoning'
+                 or not item.get('encrypted_content')))
 
 
 def _usage_to_openai(usage: dict) -> dict:
@@ -154,10 +172,15 @@ class ResponsesSSETranslator:
         translator = ResponsesSSETranslator(model='deepseek-v4-flash')
         for chunk in translator.translate(raw_data_str):
             ...  # OpenAI-shaped chat.completion.chunk dicts (+ '[DONE]')
+
+    ``reasoning_replay`` binds the request's ``responses_reasoning_replay``
+    decision; when it is false no encrypted reasoning is retained.
     """
 
-    def __init__(self, model: str = ''):
+    def __init__(self, model: str = '', *, reasoning_replay: bool = True):
         self.model = model
+        self.reasoning_replay = bool(reasoning_replay)
+        self._unreplayed_reasoning_noted = False
         # Function-call slots: how many function_call items have been seen
         # (the OpenAI chunk's ``index``), and the item_id → slot map for
         # routing argument deltas of PARALLEL calls.
@@ -245,10 +268,7 @@ class ResponsesSSETranslator:
         """
         if authoritative:
             self.response_items = [
-                dict(item) for item in (items or ())
-                if (isinstance(item, dict)
-                    and item.get('type') in _CAPTURE_ITEM_TYPES)
-            ]
+                dict(item) for item in (items or ()) if self._retains(item)]
             self.response_items.extend(capture_phase_messages(items))
             self._response_item_positions.clear()
             return
@@ -256,8 +276,7 @@ class ResponsesSSETranslator:
             list(output_indices)
             if isinstance(output_indices, (list, tuple)) else [])
         for item_position, item in enumerate(items or ()):
-            if (not isinstance(item, dict)
-                    or item.get('type') not in _CAPTURE_ITEM_TYPES):
+            if not self._retains(item):
                 continue
             saved = dict(item)
             output_index = (
@@ -282,6 +301,15 @@ class ResponsesSSETranslator:
                     self._response_item_positions[position_key] = len(
                         self.response_items)
                 self.response_items.append(saved)
+
+    def _retains(self, item) -> bool:
+        if _retained(item, reasoning_replay=self.reasoning_replay):
+            return True
+        if (isinstance(item, dict) and item.get('type') == 'reasoning'
+                and not self._unreplayed_reasoning_noted):
+            self._unreplayed_reasoning_noted = True
+            logger.info(_UNREPLAYED_REASONING_NOTE)
+        return False
 
     def finalized_response_items(self, message: dict) -> list[dict]:
         """Bind terminal native order after canonical calls/text are assembled."""

@@ -45,8 +45,10 @@ def test_watchdog_lives_in_the_router_home_ignored_tree(paths):
 
 def test_watchdog_ceiling_is_read_signal_schedule_message_and_notify_only(paths):
     home, watchdog = paths
+    # The artifact readers only continue a partial result the Watchdog already read.
     assert WATCHDOG_TOOLS == WATCHDOG_ONLY_TOOLS | {'list_conversations', 'get_conversation',
-                                                    'search_tools', 'execute_tools'}
+                                                    'search_tools', 'execute_tools',
+                                                    'read_tool_artifact', 'search_tool_artifact'}
     assert coordinator_tool_ceiling(_task(watchdog, 'watchdog')['_coordinatorDispatchScope']) == WATCHDOG_TOOLS
     assert not WATCHDOG_ONLY_TOOLS & (ROUTER_TOOLS | COORDINATOR_TOOLS)
     task = _task(watchdog, 'watchdog')

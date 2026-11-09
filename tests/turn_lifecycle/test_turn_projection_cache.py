@@ -26,13 +26,12 @@ def _remember(cache, key, revision, charge):
     )
 
 
-def test_projection_cache_enforces_lru_byte_entry_and_idle_bounds():
+def test_projection_cache_enforces_lru_byte_and_idle_bounds():
     from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
 
     now = [10.0]
     cache = TurnProjectionCache(
         10,
-        max_entries=2,
         max_idle_seconds=5,
         clock=lambda: now[0],
     )
@@ -57,10 +56,31 @@ def test_projection_cache_enforces_lru_byte_entry_and_idle_bounds():
     assert stats["expired_evictions"] == 2
 
 
+def test_projection_cache_retains_every_live_turn_within_its_byte_budget():
+    """Concurrent live Turns are bounded by charged bytes, not an entry count.
+
+    More concurrent attempts than any per-MiB entry estimate must keep their
+    exact baselines; otherwise every event reloads and refolds the durable
+    projection once concurrency exceeds the estimate.
+    """
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
+
+    cache = TurnProjectionCache(16 * 1024 * 1024)
+    keys = [_key(f"live-{index}") for index in range(1000)]
+    for key in keys:
+        assert _remember(cache, key, 1, 4096)
+
+    assert all(cache.get(key, revision=1) is not None for key in keys)
+    stats = cache.stats()
+    assert stats["entries"] == 1000
+    assert stats["capacity_evictions"] == 0
+    assert stats["charged_bytes"] == 1000 * 4096
+
+
 def test_projection_cache_revision_mismatch_evicts_instead_of_serving_stale():
     from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
 
-    cache = TurnProjectionCache(1024, max_entries=2)
+    cache = TurnProjectionCache(1024)
     key = _key("revision")
     assert _remember(cache, key, 7, 100)
 

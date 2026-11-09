@@ -17,11 +17,15 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.task.config import NetworkMode as HarborNetworkMode, TaskOS
+from harbor.models.trial.paths import EnvironmentPaths
+
+if TYPE_CHECKING:
+    from harbor.environments.base import EnvironmentPath
 
 from .host_paths import private_temporary_root, validate_host_path
 from .image_cache import PreparedImageCache, PreparedImageResult, PreparedImageSpec
@@ -40,6 +44,17 @@ from .session import (
 _CONTAINER = "task-env"
 _DEFAULT_TRANSFER_LIMIT = 512 * 1024 * 1024
 _SECRET_ENV_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD")
+# The reward channel belongs to root alone. Harbor prepares every writable
+# mount with ``chmod 777``, including ``/logs/verifier``, which lets any
+# de-privileged process in the container (the agent, or a child the verifier's
+# test drops to uid 65534) create, replace or delete ``reward.txt``. Every
+# directory command this environment builds re-seals that directory to
+# root:root 0700 immediately after Harbor's own preparation, and verifier
+# commands run as root so their own reward and logs still land there.
+_VERIFIER_DIR_COMMANDS = (
+    "chown 0:0 /logs/verifier",
+    "chmod 0700 /logs/verifier",
+)
 
 
 def _checked_file(value: str | os.PathLike[str], label: str) -> Path:
@@ -840,6 +855,79 @@ class RootlessQemuEnvironment(BaseEnvironment):
         else:
             await asyncio.to_thread(session.stop)
 
+    async def _grant_verifier_dir(self, verifier_user: str | int | None) -> None:
+        """Keep /logs/verifier writable by the verifier and by nobody else.
+
+        With no task-level override the verifier runs as root, so the sealed
+        root:root 0700 directory is already correct. A task that names another
+        user gets that directory owned by that user, never chmodded back to
+        0777: the agent and any de-privileged child stay locked out.
+        """
+        if verifier_user is None:
+            return
+        runc_user = await self._runc_user_spec(verifier_user)
+        owner = shlex.quote(runc_user or str(verifier_user))
+        command = " && ".join(
+            [
+                f"chown -R {owner} /logs/verifier",
+                "chmod 0700 /logs/verifier",
+            ]
+        )
+        if self._container_backend == "runc":
+            argv = ["runc", "exec", "--user", "0:0", _CONTAINER, "/bin/sh", "-c", command]
+        else:
+            argv = ["docker", "exec", "--user", "0", _CONTAINER, "/bin/sh", "-c", command]
+        result = await self._outer_exec(" ".join(shlex.quote(part) for part in argv), timeout=60.0)
+        if result.return_code != 0:
+            raise RuntimeError(
+                "failed to grant the verifier user its log directory: "
+                + _decode(result.stderr or result.stdout, False).strip()
+            )
+
+    def _seal_verifier_dir(self, command: str, dirs: Sequence[EnvironmentPath]) -> str:
+        """Append the root-only seal to one of Harbor's directory commands.
+
+        Harbor runs these commands as root already (``_reset_dirs_user``), and
+        only the exact verifier mount target is tightened; ``/logs/agent``
+        keeps whatever writability the agent user needs.
+        """
+        if self.os == TaskOS.WINDOWS:
+            return command
+        verifier_dir = str(EnvironmentPaths.for_os(self.os).verifier_dir)
+        if verifier_dir not in [str(path) for path in dirs]:
+            return command
+        return " && ".join([command, *_VERIFIER_DIR_COMMANDS])
+
+    def _ensure_dirs_command(
+        self,
+        dirs: Sequence[EnvironmentPath],
+        *,
+        chmod: bool = True,
+    ) -> str:
+        return self._seal_verifier_dir(super()._ensure_dirs_command(dirs, chmod=chmod), dirs)
+
+    def _empty_dirs_command(
+        self,
+        dirs: Sequence[EnvironmentPath],
+        *,
+        chmod: bool = True,
+    ) -> str:
+        return self._seal_verifier_dir(super()._empty_dirs_command(dirs, chmod=chmod), dirs)
+
+    def _reset_dirs_command(
+        self,
+        *,
+        remove_dirs: Sequence[EnvironmentPath],
+        create_dirs: Sequence[EnvironmentPath],
+        chmod_dirs: Sequence[EnvironmentPath] | None = None,
+    ) -> str:
+        return self._seal_verifier_dir(
+            super()._reset_dirs_command(
+                remove_dirs=remove_dirs, create_dirs=create_dirs, chmod_dirs=chmod_dirs
+            ),
+            create_dirs,
+        )
+
     async def _runc_user_spec(self, user: str | int | None) -> str | None:
         """Translate Docker-style names to the numeric form runc requires."""
 
@@ -905,8 +993,17 @@ class RootlessQemuEnvironment(BaseEnvironment):
         timeout_sec: int | None = None,
         user: str | int | None = None,
     ) -> ExecResult:
-        resolved_user = self._resolve_user(user)
         is_verifier = "/tests/" in command and "/logs/verifier/" in command
+        if is_verifier and self.os != TaskOS.WINDOWS:
+            # The verifier owns the reward channel. Root is explicit so a
+            # sealed root:root 0700 /logs/verifier is always writable by it,
+            # on both container backends. A task that names another
+            # [verifier] user is honored by giving that user the directory
+            # instead of opening it to every uid.
+            await self._grant_verifier_dir(user)
+        resolved_user = self._resolve_user(user)
+        if is_verifier and resolved_user is None and self.os != TaskOS.WINDOWS:
+            resolved_user = 0
         timeout = float(
             timeout_sec
             if timeout_sec is not None

@@ -129,8 +129,20 @@ class Runner:
         self.stop_requested = threading.Event()
 
     # ------------------------------------------------------------ specs
+    def model_base_url(self, task: harness.Task, arm: str) -> str:
+        """The trial's model endpoint, on the face its run model uses.
+
+        On the Anthropic face the URL also names the task, so every relay
+        request is attributed to its trial: sandbox NAT peers are shared and
+        Pi sends no affinity header, so the peer IP cannot attribute anything.
+        """
+        label = f"{arm}-{self.config.run_label}"
+        if self.config.model in harness.ANTHROPIC_RUN_MODELS:
+            return f"{self.config.relay_url.rstrip('/')}/arm/{label}/task/{task.name}/anthropic"
+        return f"{self.config.relay_url.rstrip('/')}/arm/{label}/v1"
+
     def agent_for(self, task: harness.Task, arm: str) -> dict:
-        model_base_url = f"{self.config.relay_url.rstrip('/')}/arm/{arm}-{self.config.run_label}/v1"
+        model_base_url = self.model_base_url(task, arm)
         timeout = harness.agent_timeout_for(task, self.protocol)
         guarded = self.config.source_guard
         if arm == "tofu":
@@ -138,7 +150,8 @@ class Runner:
                                       model_base_url=model_base_url, model=self.config.model,
                                       timeout_sec=timeout, instruction=task.instruction,
                                       context_tokens=self.config.context_tokens,
-                                      output_tokens=self.protocol.max_tokens, source_guard=guarded)
+                                      output_tokens=self.protocol.max_tokens,
+                                      thinking=self.protocol.reasoning_effort, source_guard=guarded)
         if arm == "opencode":
             return harness.opencode_agent(artifact=self.artifacts["opencode"], files_url=self.config.files_url,
                                           model_base_url=model_base_url, model=self.config.model,
@@ -148,7 +161,8 @@ class Runner:
             return harness.pi_agent(artifact=self.artifacts["pi"], files_url=self.config.files_url,
                                     model_base_url=model_base_url, model=self.config.model,
                                     instruction=task.instruction, context_tokens=self.config.context_tokens,
-                                    output_tokens=self.protocol.max_tokens, source_guard=guarded)
+                                    output_tokens=self.protocol.max_tokens,
+                                    thinking=self.protocol.reasoning_effort, source_guard=guarded)
         if arm == "claude-code":
             if not self.config.anthropic_url:
                 raise ValueError("the claude-code arm needs anthropic_url (the Anthropic bridge)")

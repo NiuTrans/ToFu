@@ -74,6 +74,7 @@ def test_trial_spec_uses_protocol_budget_and_egress_policy(tmp_path):
     assert "marginlab.ai" in spec["egress"]["deny_hosts"]
     assert spec["egress"]["upstream"] == "http://proxy:8080"
     assert "--timeout-s 21600" in agent["program"] and " -I -m tofu_agent " in agent["program"]
+    assert "--thinking max" in agent["program"]
     assert agent["artifacts"][0]["url"] == "http://relay:1/files/tofu.tar.gz"
 
 
@@ -460,3 +461,31 @@ def test_report_combines_arms_of_comparable_runs_and_refuses_the_rest(tmp_path):
     plan_run(pi, ["pi"], tasks + ["unplanned"])
     with pytest.raises(ValueError, match="unplanned"):
         report.build_report([native, pi], tmp_path / "tasks", {})
+
+
+def test_relay_pins_reasoning_effort_for_every_arm():
+    pytest.importorskip("aiohttp", reason="TB relay runtime dependency")
+    from evaluations.terminal_bench import relay
+
+    args = type("Args", (), {"model": "glm-5.3-flash", "temperature": 1.0, "top_p": 1.0,
+                             "max_tokens": 65536, "reasoning_effort": "max"})()
+    live = relay.Relay.__new__(relay.Relay)
+    live.args = args
+    body = {"model": "glm-5.3-flash", "messages": [], "reasoning_effort": "high", "temperature": 0.2}
+    original = live.shape(body, "tofu")
+    assert original["reasoning_effort"] == "high" and original["temperature"] == 0.2
+    assert body["reasoning_effort"] == "max"
+    assert body["temperature"] == 1.0 and body["top_p"] == 1.0 and body["max_tokens"] == 65536
+
+
+def test_relay_leaves_effort_to_the_harness_when_unpinned():
+    pytest.importorskip("aiohttp", reason="TB relay runtime dependency")
+    from evaluations.terminal_bench import relay
+
+    args = type("Args", (), {"model": "glm-5.3-flash", "temperature": None, "top_p": None,
+                             "max_tokens": None, "reasoning_effort": None})()
+    live = relay.Relay.__new__(relay.Relay)
+    live.args = args
+    body = {"model": "glm-5.3-flash", "messages": []}
+    live.shape(body, "opencode")
+    assert "reasoning_effort" not in body and "temperature" not in body

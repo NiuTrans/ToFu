@@ -247,8 +247,10 @@ def test_token_weighted_cost_not_blended_price(routes):
     assert _select(routes, input_tokens=1_000, output_tokens=10_000)['modelId'] == 'cheap'
 
 
-def test_context_tiers_currency_and_cache_cost_apply_to_same_prompt(routes):
-    from lib.pricing import DEFAULT_USD_CNY_RATE
+def test_context_tiers_currency_and_cache_cost_apply_to_same_prompt(routes, monkeypatch):
+    import lib.pricing as pricing
+    monkeypatch.setattr(pricing, 'get_pricing_data',
+                        lambda: {'usdToCny': 6.5, 'exchangeRateSource': 'api'})
     routes.profiles[1]['declaredPricing'] = {'contextTiers': [
         {'id': 'short', 'maxPromptTokens': 10_000, 'input': 1, 'output': 2,
          'currency': 'CNY', 'cacheReadMul': 0.1, 'cacheWriteMul': 1.25},
@@ -263,7 +265,8 @@ def test_context_tiers_currency_and_cache_cost_apply_to_same_prompt(routes):
     assert basis['cacheWriteTokens'] == 10_001
     assert basis['uncachedInputTokens'] == 0
     assert basis['rates'] == pytest.approx({'input': 7, 'output': 14, 'cacheRead': 1.4, 'cacheWrite': 14})
-    assert result['projectedCostUsd'] == pytest.approx((10_001 * 14 + 1_000 * 14) / DEFAULT_USD_CNY_RATE / 1e6)
+    assert basis['usdToCny'] == 6.5 and basis['currencyRateSource'] == 'pricing_api'
+    assert result['projectedCostUsd'] == pytest.approx((10_001 * 14 + 1_000 * 14) / 6.5 / 1e6)
     assert _select(routes)['costBasis']['tierId'] == 'short'
 
 
@@ -626,7 +629,7 @@ def test_ambiguous_or_incomplete_tier_card_cannot_qualify_candidate(routes, muta
 @pytest.mark.parametrize('rate', [None, 0, -7, True, float('nan'), float('inf')])
 def test_invalid_projection_exchange_rate_cannot_qualify_candidate(routes, monkeypatch, rate):
     import lib.pricing as pricing
-    monkeypatch.setattr(pricing, 'DEFAULT_USD_CNY_RATE', rate)
+    monkeypatch.setattr(pricing, 'get_pricing_data', lambda: {'usdToCny': rate})
     routes.profiles[1]['declaredPricing']['currency'] = 'CNY'
     assert _select(routes)['modelId'] == 'main'
 

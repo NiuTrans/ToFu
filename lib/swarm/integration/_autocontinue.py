@@ -235,7 +235,7 @@ def _start_autocontinue_turn(
             {},
             user_id=owner_id,
             command_id=command_id,
-            log_prefix=f"[Swarm:{conversation_id[:12]}]",
+            log_prefix=f"[Swarm:{conversation_id}]",
             input_actor="virtual_user",
             input_kind="swarm_autocontinue_input",
             turn_kind="swarm_autocontinue_reply",

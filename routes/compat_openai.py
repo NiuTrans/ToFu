@@ -43,7 +43,7 @@ from lib.compat._common import CompatTerminalFailure
 from lib.error_envelope import BadRequest
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.openapi import media_responses, api_meta
 from lib.rate_limit.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
@@ -186,7 +186,7 @@ async def chat_completions():
         reject_unstarted_chat_task(
             task, e, cause='task_spawn_failed', conv_id=conv_id)
         logger.exception('[compat:openai] spawn_task failed task=%s',
-                         task['id'][:8])
+                         task_log_tag(task['id']))
         return api_internal_error(e, context='compat:openai',
                                    source='routes.compat_openai')
 
@@ -205,7 +205,7 @@ async def chat_completions():
         await _wait_terminal(task, options['timeout_s'])
     except RuntimeError as e:
         logger.warning('[compat:openai] task=%s timed out model=%s elapsed=%.0fs',
-                       task['id'][:8], model, options['timeout_s'])
+                       task_log_tag(task['id']), model, options['timeout_s'])
         return api_internal_error(str(e), context='compat:openai')
     finally:
         unregister_waiter(task['id'])
@@ -215,7 +215,7 @@ async def chat_completions():
             task, model=model, requested_id=requested_id)
     except CompatTerminalFailure as exc:
         logger.warning('[compat:openai] refusing false-success task=%s cause=%s',
-                       task['id'][:8], exc.verdict.cause)
+                       task_log_tag(task['id']), exc.verdict.cause)
         return api_internal_error(
             str(exc), context='compat:openai', log_traceback=False,
             error_kind=exc.verdict.cause,

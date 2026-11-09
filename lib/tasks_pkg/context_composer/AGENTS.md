@@ -5,6 +5,18 @@
 This package is the single owner of assembling model-visible context from
 system, task, conversation, memory, project, and tool sources.
 
+Start implementation investigations at `_render.render_context`: prepare,
+reconcile visible snapshots, admit budget, place carriers, publish receipts.
+These stages stay together in `_render.py`; `injections.py` owns chronological
+events and rollback. `registry.py` owns policy, never a second dispatch loop.
+For exported request drift, use `scripts/inspect_context.py BEFORE [AFTER]`;
+`inspection.py` joins actual section hashes to source policy and receipts.
+`lib/llm_sanitize/context_sections.py` owns the shared identity;
+`_sections.py` is its compatibility facade. `_lineage_inspection.py` validates
+exported transformation witnesses and joins existing cache records.
+Marker observations never grant
+authority, and an input difference alone never proves a provider cache miss.
+
 ## Editing rules
 
 - Register every automatic source in `registry.py` before adding a provider or
@@ -31,6 +43,9 @@ system, task, conversation, memory, project, and tool sources.
 
 Run `tests/context/test_context_composer.py`, context-limit/token-counter tests, and
 permission, ordering, deterministic budget, cache-epoch, and provenance cases.
+`test_context_lifecycle.py` pins reuse/failure/retraction and open-tool batches;
+`test_context_inspection.py` covers exported requests, source attribution and
+the read-only CLI, including missing/stale evidence and quoted markers.
 
 Provider acquisition uses the shared demand kernel through `_provider_executor.py`.
 Launch knobs size idle reuse, never active-read or pending-count admission.

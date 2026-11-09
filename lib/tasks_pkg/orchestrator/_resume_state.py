@@ -74,6 +74,7 @@ class _PreparedResumeState:
     checkpoint_modified_files_truncated: bool
     next_model_round: int
     last_tool_round: int
+    checkpoint_injected_notes: tuple[dict[str, Any], ...] = ()
 
 
 def _protocol_error(field: str, detail: str) -> ContinueResumeStateProtocolError:
@@ -389,6 +390,8 @@ def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
     else:
         checkpoint_modified_file_list = ()
 
+    checkpoint_injected_notes = _checkpoint_injected_notes(cfg)
+
     from lib.tasks_pkg.continuation_rounds import continuation_round_counters
     next_model_round, last_tool_round = continuation_round_counters(
         checkpoint_rounds)
@@ -412,7 +415,91 @@ def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
         checkpoint_modified_files_truncated=modified_files_truncated,
         next_model_round=next_model_round,
         last_tool_round=last_tool_round,
+        checkpoint_injected_notes=checkpoint_injected_notes,
     )
+
+
+def _checkpoint_injected_notes(cfg: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Earlier attempts' display notes; this Turn's context record stays visible."""
+    field = 'checkpointInjectedNotes'
+    raw = cfg.get(field)
+    if raw is None:
+        return ()
+    from lib.tasks_pkg.segments._types import (
+        NOTE_ACTIONS, NOTE_KINDS, NOTE_REASON_LIMIT, NOTE_TEXT_LIMIT,
+    )
+    if not isinstance(raw, list) or any(not isinstance(item, Mapping) for item in raw):
+        raise _protocol_error(field, 'must be a list of objects')
+    notes = []
+    for position, item in enumerate(_json_safe_copy(raw, field)):
+        text, kind = item.get('text'), item.get('kind')
+        llm_round = item.get('llmRound')
+        if (kind not in NOTE_KINDS or not isinstance(text, str) or not text.strip()
+                or len(text) > NOTE_TEXT_LIMIT
+                or item.get('action', 'prompt') not in NOTE_ACTIONS
+                or not (llm_round is None or (type(llm_round) is int and llm_round >= 0))
+                or any(not isinstance(item.get(key, ''), str)
+                       for key in ('attemptId', 'taskId', 'blockId', 'reason'))
+                or len(item.get('reason', '')) > NOTE_REASON_LIMIT):
+            raise _protocol_error(field, f'note {position} is malformed')
+        notes.append(item)
+    return tuple(notes)
+
+
+# An interruption during the first model call retains no round, yet its
+# checkpointed view still holds the turn-start context.
+_RESUME_OPERATIONS = frozenset({'continue', 'checkpoint_resume', 'answer_guidance'})
+
+
+def restore_resume_view(
+    *,
+    task: dict[str, Any],
+    cfg: dict[str, Any],
+    messages: list[dict[str, Any]],
+    prepared_state: _PreparedResumeState,
+) -> bool:
+    """Replace fresh history with the Turn's checkpointed working view.
+
+    Runs before any context is composed: the composer then reconciles against
+    the exact view the interrupted request carried, reusing every unchanged
+    block and appending only real changes at the resume point. Fresh history
+    stays the authority that proves the view (witnesses, media); without a
+    valid checkpoint the canonical replay in ``apply_resume_state`` applies.
+    """
+    if (cfg.get('_turnOperation') not in _RESUME_OPERATIONS
+            and 'checkpointToolRounds' not in cfg and not prepared_state.checkpoint_messages):
+        return False
+    from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
+    restored = restore_compacted_resume(
+        task, cfg, prepared_state.checkpoint_tool_rounds,
+        fresh_messages=[], current_messages=messages)
+    if restored is None or task.get('aborted'):
+        return False
+    messages[:] = restored
+    task['_resumeViewRestored'] = True
+    return True
+
+
+def resume_view_holds_turn_block(
+    task: dict[str, Any], messages: list[dict[str, Any]], block_id: str,
+) -> bool:
+    """Whether a restored view already carries this Turn's ``block_id`` block.
+
+    Turn-stability evidence (relevant memories) is selected once per human
+    request; re-selecting it for the same request on Continue could only
+    replace what the interrupted request already sent.
+    """
+    if not task.get('_resumeViewRestored'):
+        return False
+    from lib.tasks_pkg.message_semantics import is_human_message
+    start = next((index for index in range(len(messages) - 1, -1, -1)
+                  if is_human_message(messages[index])), None)
+    if start is None:
+        return False
+    return any(isinstance(row, Mapping) and row.get('id') == block_id
+               for message in messages[start + 1:]
+               if isinstance(message, Mapping) and message.get('_contextComposer')
+               for row in message.get('_contextBlocks') or ())
 
 
 def apply_resume_state(
@@ -462,36 +549,50 @@ def apply_resume_state(
     # history; otherwise the resumed model loses its observations and the next
     # user turn expands into a different message prefix, defeating cross-turn
     # provider caching as well as semantic continuity.
-    if prepared.checkpoint_messages or 'checkpointToolRounds' in cfg:
+    if (task.get('_resumeViewRestored') or prepared.checkpoint_messages
+            or 'checkpointToolRounds' in cfg):
         from lib.tasks_pkg.compaction._resume_projection import (
             report_compaction_resume, restore_compacted_resume,
         )
-        baseline = original_messages if original_messages is not None else task.get('messages')
-        fresh_messages = None
-        if (isinstance(baseline, list) and len(messages) >= len(baseline)
-                and messages[:len(baseline)] == baseline):
-            fresh_messages = messages[len(baseline):]
-        # ``messages`` is the fresh authoritative projection the archive would
-        # replace; retained image bytes must be reproducible from it.
-        restored = restore_compacted_resume(
-            task, cfg, prepared.checkpoint_tool_rounds, fresh_messages=fresh_messages,
-            current_messages=messages)
+        if task.get('_resumeViewRestored'):
+            # restore_resume_view already made the checkpointed view, plus the
+            # receipts settled after it, the wire; context was composed on it.
+            restored_view = True
+        elif '_compactionResumeOutcome' in task:
+            # The startup restore found no valid checkpoint for this Turn.
+            restored_view = False
+            messages.extend(copy.deepcopy(prepared.checkpoint_messages))
+        else:
+            baseline = (original_messages if original_messages is not None
+                        else task.get('messages'))
+            fresh_messages = None
+            if (isinstance(baseline, list) and len(messages) >= len(baseline)
+                    and messages[:len(baseline)] == baseline):
+                fresh_messages = messages[len(baseline):]
+            # ``messages`` is the fresh authoritative projection the archive
+            # would replace; retained image bytes must be reproducible from it.
+            restored = restore_compacted_resume(
+                task, cfg, prepared.checkpoint_tool_rounds,
+                fresh_messages=fresh_messages, current_messages=messages)
 
-        if task.get('aborted'):
-            return
-        if restored is not None:
-            from lib.tasks_pkg.compaction._pipeline import recompose_context_after_compaction
-            recompose_context_after_compaction(restored, task=task)
             if task.get('aborted'):
                 return
-            messages[:] = restored
-        else:
-            messages.extend(copy.deepcopy(prepared.checkpoint_messages))
+            restored_view = restored is not None
+            if restored is not None:
+                from lib.tasks_pkg.compaction._pipeline import recompose_context_after_compaction
+                recompose_context_after_compaction(restored, task=task)
+                if task.get('aborted'):
+                    return
+                messages[:] = restored
+            else:
+                messages.extend(copy.deepcopy(prepared.checkpoint_messages))
         report_compaction_resume(task, cfg, prepared.checkpoint_tool_rounds)
         logger.info(
-            '[%s] conv=%s Replayed %d checkpoint message(s) from %d durable '
+            '[%s] conv=%s %s %d checkpoint message(s) from %d durable '
             'tool round(s)',
-            tid, task.get('convId', ''), len(prepared.checkpoint_messages),
+            tid, task.get('convId', ''),
+            'Restored the working view after' if restored_view else 'Replayed',
+            len(prepared.checkpoint_messages),
             len(prepared.checkpoint_tool_rounds),
         )
 
@@ -549,6 +650,14 @@ def apply_resume_state(
     if prepared.checkpoint_modified_file_list:
         task['_checkpointModifiedFileList'] = list(
             prepared.checkpoint_modified_file_list)
+    if prepared.checkpoint_injected_notes:
+        from lib.tasks_pkg.segments._types import INJECTED_NOTES_FIELD
+        # Earlier attempts' records keep their own attempt scope and anchor
+        # beside that attempt's retained rounds.
+        task[INJECTED_NOTES_FIELD] = [
+            settle_or_none(item) or dict(item)
+            for item in prepared.checkpoint_injected_notes
+        ] + list(task.get(INJECTED_NOTES_FIELD) or [])
 
     # One task-local positive receipt, not a durable or user-supplied authority.
     # Successful terminal publication rechecks the final delivered model body.
@@ -559,4 +668,6 @@ __all__ = [
     'ContinueResumeStateProtocolError',
     'apply_resume_state',
     'prepare_resume_state',
+    'restore_resume_view',
+    'resume_view_holds_turn_block',
 ]

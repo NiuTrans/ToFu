@@ -8,6 +8,7 @@ clock evidence, strict accounting, status history and durable publication.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 
 from lib.agent_core.events import Phase
 from lib.orchestration.message_compat import is_flow_event_type
@@ -49,6 +50,19 @@ def _safe_seconds_to_ms(value, default=0.0):
         return max(0, round(float(value or 0) * 1000))
     except (TypeError, ValueError, OverflowError):
         return max(0, round(float(default or 0) * 1000))
+
+
+def _annotate_failed_attempt(span, *, status_code=None, detail_key='',
+                             error_kind=''):
+    """Name why a first-token window ended without its first token."""
+    attrs = span['attrs']
+    if type(status_code) is int and status_code > 0 \
+            and attrs.get('statusCode') is None:
+        attrs['statusCode'] = status_code
+    if detail_key and not attrs.get('detailKey'):
+        attrs['detailKey'] = _bounded_trace_text(detail_key, 160)
+    if error_kind and not attrs.get('errorKind'):
+        attrs['errorKind'] = _bounded_trace_text(error_kind, 160)
 
 
 def _admission_waiter_identity(p, owner):
@@ -101,7 +115,23 @@ class TraceSpanFold:
         self.open_model_requests: dict[str, dict] = {}  # raw correlation id -> active occurrence
         self.pending_approval: dict[tuple[str, str], list[float]] = {}
         self.open_phase_span: dict | None = None  # retry_wait / compaction span
-        self.ttft_open: dict | None = None      # {'round': key, 'tStart': ts}
+        # {'span', 'round', 'request'}: open until the first token, or until
+        # its attempt fails or a later boundary proves the request ended.
+        self.ttft_open: dict | None = None
+        # {'round'} after a window closed as a failed attempt: the next
+        # attempt's model_request_start (the event that also ends its retry
+        # wait) opens that attempt's own window in the same round.
+        self.ttft_resume: dict | None = None
+        self.last_failed_ttft: dict | None = None
+        self.open_logical_request: str | None = None
+        # Per raw logical request id, joined by round_usage's
+        # request_span_id: its latest non-failed first-token window, its
+        # dispatcher attempts, and whether exactly one dispatch with complete
+        # observer evidence served it (only then is the last attempt the one
+        # the usage's dispatcher first-token offset was measured on).
+        self.ttft_by_request: dict[str, dict] = {}
+        self.attempts_by_request: dict[str, list[dict]] = {}
+        self.single_dispatch_requests: set[str] = set()
         self.usage_by_round: dict[str, list] = {}
         self.usage_orphans: list[tuple[str, dict]] = []
         self.saw_round_markers = False
@@ -208,12 +238,121 @@ class TraceSpanFold:
             self.apply_budget(self.open_phase_span)
             self.open_phase_span = None
 
-    def _close_ttft(self, ts):
+    def _open_ttft(self, ts, *, model='', attempt=None):
+        parent = self.current_round_key
+        span_id = (f'r{parent}.ttft.{len(self.spans)}' if parent is not None
+                   else f'ttft.{len(self.spans)}')
+        attrs = {'model': model or ''}
+        if attempt is not None:
+            attrs['attempt'] = attempt
+        sp = self.make_span(span_id,
+                   self.rounds[parent]['attrs']['_llm']['spanId'] if parent is not None else 'turn',
+                   3 if parent is not None else 1,
+                   'llm_ttft', 'ttft', ts, attrs=attrs)
+        self.spans.append(sp)
+        request = self.open_logical_request
+        self.ttft_open = {'span': sp, 'round': parent, 'request': request}
+        self.ttft_resume = None
+        self.last_failed_ttft = None
+        if request is not None:
+            self.ttft_by_request[request] = sp
+
+    def _close_ttft(self, ts, status='done', *, unobserved=False):
+        """Close the open window; ``unobserved`` marks a boundary that proves
+        the request ended without ever showing its first token."""
+        if self.ttft_open is None:
+            return None
+        sp = self.ttft_open['span']
+        _close(sp, ts, status)
+        if unobserved:
+            sp['truncated'] = True
+            sp['attrs']['firstTokenUnobserved'] = True
+        self.apply_budget(sp)
+        self.ttft_open = None
+        return sp
+
+    def _fail_ttft(self, ts, status='error', *, status_code=None,
+                   detail_key='', error_kind=''):
+        """The attempt ended before its first token: its wait is not TTFT."""
+        opened = self.ttft_open
+        sp = self._close_ttft(ts, status)
+        if sp is None:
+            return
+        sp['attrs']['failedAttempt'] = True
+        _annotate_failed_attempt(sp, status_code=status_code,
+                                 detail_key=detail_key, error_kind=error_kind)
+        if self.ttft_by_request.get(opened['request']) is sp:
+            del self.ttft_by_request[opened['request']]
+        self.last_failed_ttft = sp
+        self.ttft_resume = {'round': opened['round']}
+
+    def _attempt_in_flight(self):
+        attempts = self.attempts_by_request.get(self.open_logical_request)
+        return bool(attempts) and attempts[-1].get('tEnd') is None
+
+    def _note_retry(self, p, ts):
+        """A retry of attempt N >= 1 begins: attempt N failed pre-first-token.
+
+        Beats that name no retry attempt (storage waits, network recovery at
+        attempt 0) and beats while a dispatcher attempt is still in flight
+        (a wait inside that attempt) leave the window open. When the
+        attempt's own failure already closed the window, the beat only adds
+        the retry's detail.
+        """
         if self.ttft_open is not None:
-            sp = self.ttft_open['span']
-            _close(sp, ts, 'done')
-            self.apply_budget(sp)
+            attempt = p.get('attempt')
+            if (type(attempt) is int and attempt > 0
+                    and not self._attempt_in_flight()):
+                self._fail_ttft(ts, status_code=p.get('statusCode'),
+                                detail_key=p.get('detailKey') or '')
+            return
+        if self.last_failed_ttft is not None:
+            _annotate_failed_attempt(self.last_failed_ttft,
+                                     status_code=p.get('statusCode'),
+                                     detail_key=p.get('detailKey') or '')
+
+    def _apply_dispatch_first_token(self, usage):
+        """Prefer the dispatcher's measured first-token offset for the settled
+        attempt over the delta spine (which can be late or lost).
+
+        The offset counts from the dispatcher's attempt start, which the
+        attempt's model_request_start marks. It applies only when exactly one
+        dispatch with complete observer evidence served the request, so the
+        last attempt is unambiguously the settled one; an earlier observed
+        first token is never moved later.
+        """
+        dispatch = usage.get('_dispatch')
+        if not isinstance(dispatch, Mapping) \
+                or dispatch.get('ttft_measurement') != 'measured':
+            return
+        offset = dispatch.get('ttft_ms')
+        if isinstance(offset, bool) or not isinstance(offset, (int, float)) \
+                or not math.isfinite(offset) or offset < 0:
+            return
+        request = str(usage.get('request_span_id') or '')[:160]
+        window = self.ttft_by_request.get(request)
+        attempts = self.attempts_by_request.get(request)
+        if (window is None or not attempts or window.get('tStart') is None
+                or request not in self.single_dispatch_requests):
+            return
+        settled = attempts[-1]
+        if settled.get('tStart') is None:
+            return
+        first_token = settled['tStart'] + round(offset)
+        for bound in (settled.get('tEnd'), window.get('tEnd')):
+            if bound is not None:
+                first_token = min(first_token, bound)
+        if first_token < window['tStart']:
+            return
+        if self.ttft_open is not None and self.ttft_open['span'] is window:
             self.ttft_open = None
+        unobserved = window['attrs'].pop('firstTokenUnobserved', False)
+        if window.get('tEnd') is None or unobserved or first_token < window['tEnd']:
+            window['attrs']['firstTokenSource'] = 'dispatch'
+        window['tEnd'] = int(first_token)
+        window['status'] = 'done'
+        window.pop('truncated', None)
+        self.apply_budget(window)
 
     def _close_llm(self, round_key, ts, status_):
         rk = str(round_key)
@@ -231,7 +370,9 @@ class TraceSpanFold:
         if rnd is None or rnd.get('tEnd') is not None:
             return
         if self.ttft_open is not None and self.ttft_open.get('round') == rk:
-            self._close_ttft(ts)
+            self._close_ttft(ts, 'unknown', unobserved=True)
+        self.ttft_resume = None
+        self.last_failed_ttft = None
         self._close_llm(rk, ts, status_)
         for tsp in list(self.open_tools.values()):
             if tsp['attrs'].get('roundKey') == rk:
@@ -340,6 +481,11 @@ class TraceSpanFold:
             if prev is not None and prev.get('tEnd') is None:
                 prev['truncated'] = True
             self._close_round(self.current_round_key, ts, 'unknown')
+        # A new round proves every earlier request ended; a window still open
+        # here lost its first-token evidence and must not span later rounds.
+        self._close_ttft(ts, 'unknown', unobserved=True)
+        self.ttft_resume = None
+        self.last_failed_ttft = None
         rnd = self.make_span(f'r{key}', 'turn', 1, 'round', f'round {key}', ts)
         rnd['attrs']['roundKey'] = key
         llm = self.make_span(f'r{key}.llm', rnd['spanId'], 2, 'llm',
@@ -409,6 +555,23 @@ class TraceSpanFold:
         self.open_model_requests[request_id] = request_span
         if open_round is not None and p.get('requestLevel') != 'provider_attempt':
             self.round_requests.setdefault(open_round, []).append(request_span)
+        if p.get('requestLevel') == 'provider_attempt':
+            if supplied_parent:
+                self.attempts_by_request.setdefault(
+                    supplied_parent, []).append(request_span)
+        else:
+            if self.ttft_open is not None \
+                    and self.ttft_open['request'] != request_id:
+                self._close_ttft(ts, 'unknown', unobserved=True)
+            self.open_logical_request = request_id
+        # The next attempt after a failed one starts here: this event also
+        # ends the retry wait, so its first-token window begins at it.
+        if (self.ttft_open is None and self.ttft_resume is not None
+                and self.ttft_resume['round'] == open_round):
+            self._open_ttft(
+                ts, model=p.get('model') or '',
+                attempt=(p.get('attempt')
+                         if p.get('requestLevel') == 'provider_attempt' else None))
         return
 
     def on_model_request_complete(self, p, ts, event_type):
@@ -458,6 +621,31 @@ class TraceSpanFold:
             'durationMs': _safe_nonnegative_int(p.get('durationMs')),
         })
         _close(request_span, ts, request_status)
+        failure = request_status in ('error', 'aborted')
+        if request_span['attrs'].get('requestLevel') == 'provider_attempt':
+            # A dispatcher attempt of the window's request that ends before
+            # the window saw a first token is a failed attempt, closed at its
+            # own end; the retry beat that follows only adds its detail.
+            window = self.ttft_open
+            if failure and window is not None and any(
+                    attempt is request_span for attempt in
+                    self.attempts_by_request.get(window['request'], ())):
+                self._fail_ttft(ts, request_status,
+                                status_code=p.get('statusCode'),
+                                error_kind=p.get('errorKind') or '')
+        else:
+            if self.ttft_open is not None \
+                    and self.ttft_open['request'] in (request_id, None):
+                if failure:
+                    self._fail_ttft(ts, request_status,
+                                    status_code=p.get('statusCode'),
+                                    error_kind=p.get('errorKind') or '')
+                else:
+                    # The request is over without a first-token event (lost
+                    # deltas): bound the window here, never at a later event.
+                    self._close_ttft(ts, 'unknown', unobserved=True)
+            if self.open_logical_request == request_id:
+                self.open_logical_request = None
 
         isolation = p.get('observerIsolation')
         if isinstance(isolation, Mapping):
@@ -469,6 +657,11 @@ class TraceSpanFold:
                             'deliveryFailures', 'flushIncomplete',
                             'diagnosticFailures') if key in isolation
             }
+            if (isolation.get('providerDispatches') == 1
+                    and not any(isolation.get(key) for key in (
+                        'droppedEvents', 'deliveryFailures', 'flushIncomplete',
+                        'diagnosticFailures'))):
+                self.single_dispatch_requests.add(request_id)
         return
 
     def on_phase(self, p, ts, event_type):
@@ -490,16 +683,7 @@ class TraceSpanFold:
             # tool_start / round close) settles it.
             if self.ttft_open is not None:
                 self._close_ttft(ts)
-            parent = self.current_round_key
-            span_id = (f'r{parent}.ttft.{len(self.spans)}' if parent is not None
-                       else f'ttft.{len(self.spans)}')
-            sp = self.make_span(span_id,
-                       self.rounds[parent]['attrs']['_llm']['spanId'] if parent is not None else 'turn',
-                       3 if parent is not None else 1,
-                       'llm_ttft', 'ttft', ts,
-                       attrs={'model': p.get('model') or ''})
-            self.spans.append(sp)
-            self.ttft_open = {'span': sp, 'round': parent}
+            self._open_ttft(ts, model=p.get('model') or '')
         elif rule in ('retry_wait', 'compaction'):
             if coalesce:
                 # Same-phase beat (429 heartbeat ×N): extend, keep the
@@ -511,6 +695,8 @@ class TraceSpanFold:
             else:
                 kind = 'retry_wait' if rule == 'retry_wait' else 'compaction'
                 ckey = 'wait' if kind == 'retry_wait' else 'compact'
+                if kind == 'retry_wait':
+                    self._note_retry(p, ts)
                 self.counters[ckey] += 1
                 sp = self.make_span(f'{ckey}.{self.counters[ckey]}',
                            'turn', 1, kind, ph, ts,
@@ -531,11 +717,14 @@ class TraceSpanFold:
     def on_delta(self, p, ts, event_type):
         if self.ttft_open is not None and ts >= self.ttft_open['span']['tStart']:
             self._close_ttft(ts)
+        # Output began without an observed attempt start: no window to place.
+        self.ttft_resume = None
         return
 
     def on_tool_start(self, p, ts, event_type):
         if self.ttft_open is not None:
             self._close_ttft(ts)
+        self.ttft_resume = None
         call_id = p.get('toolCallId') or ''
         t_start = p.get('tStart') or ts
         # Tools execute BETWEEN rounds (the authoring round's round_end
@@ -771,6 +960,12 @@ class TraceSpanFold:
                 'sseChunks': _safe_nonnegative_int(
                     u.get('_chunks_received')),
             })
+        if '_response_headers_ms' in u:
+            # Request send -> response headers of the attempt this usage
+            # settled: gateway header buffering versus model think time.
+            rec['responseHeadersMs'] = _safe_nonnegative_int(
+                u.get('_response_headers_ms'))
+        self._apply_dispatch_first_token(u)
         # Usage of the open round's request (its roundNum is the 1-based tag).
         key = (self.current_round_key if self.current_round_key is not None
                else str(p.get('roundNum')))
@@ -874,7 +1069,12 @@ class TraceSpanFold:
     def finish(self, boundary_ms):
         settle_ts = boundary_ms
         self._finish_startup_and_settlement(settle_ts)
-        self._close_ttft(settle_ts)
+        # A live snapshot is still waiting; a settled turn that never showed
+        # the window's first token cannot claim the rest of the run as TTFT.
+        if self.running:
+            self._close_ttft(settle_ts, 'running')
+        else:
+            self._close_ttft(settle_ts, 'unknown', unobserved=True)
         if self.open_phase_span is not None:
             self._close_phase_span(settle_ts, 'running' if self.running else 'unknown')
         for tsp in list(self.open_tools.values()):

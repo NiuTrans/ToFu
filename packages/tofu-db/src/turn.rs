@@ -18,6 +18,8 @@ pub(crate) mod sync_head_migration;
 #[path = "conversation_diagnostic.rs"]
 pub(crate) mod diagnostic;
 pub(crate) mod model_context;
+pub(crate) mod projection_page;
+pub(crate) mod usage_projection;
 pub(crate) mod event_retirement;
 mod metadata_read;
 mod metadata_summary;
@@ -79,6 +81,7 @@ const PROJECTION_HEAD_DOCUMENT_IDENTITY: &str = "turn_projection_heads";
 
 mod text_tail;
 pub(crate) mod execution_frame;
+pub(crate) mod projection_residency;
 mod sync_attempt_reference;
 
 #[path = "turn/agent_machine_tokens.generated.rs"]
@@ -260,6 +263,9 @@ pub struct SteerCommitRequest {
     pub attempt_id: String,
     pub command_id: String,
     pub text: String,
+    /// The steered input's display images (`steer_preview_images`), stored on
+    /// the record's preview exactly as the SQL authority stores them.
+    pub images: Vec<Value>,
     /// The steered input's author record (`TurnSteerAuthor`), stored once with
     /// the record it belongs to; a replayed steer keeps the original.
     pub author: Option<Value>,
@@ -479,14 +485,37 @@ struct LoadedTurnForAttempt {
     verified_stable_segments: Option<execution_frame::VerifiedStableSegments>,
 }
 
-/// The preceding ordinary event's owned reconstruction, valid only between
-/// adjacent event steps in one IR transaction. The IR owner drops it at every
-/// other step and before commit preparation. Scope and the complete physical
-/// header must still match a fresh transactional read before it can be moved.
+/// The preceding event's owned reconstruction, valid only between adjacent
+/// event steps in one IR transaction. The IR owner drops it at every other
+/// step and hands the final one to the commit (`publish_with`). Scope and the
+/// complete physical header must still match a fresh transactional read
+/// before it can be moved.
 pub(crate) struct AdjacentEventProjection {
     key: EntityKey,
-    header: Map<String, Value>,
-    projection: Map<String, Value>,
+    resident: projection_residency::ResidentProjection,
+}
+
+impl AdjacentEventProjection {
+    /// Retain the last step's projection beyond the transaction that stores it.
+    pub(crate) fn publish_with(self, transaction: &mut AuthorityTransaction) {
+        transaction.publish_resident_projection(self.key, self.resident);
+    }
+}
+
+/// The exact projection of this loaded live head, from the preceding step of
+/// the same transaction or from the commit that stored this header.
+fn take_reusable_projection(
+    database: &AuthorityDatabase,
+    loaded: &LoadedTurnForAttempt,
+    preceding: &mut Option<AdjacentEventProjection>,
+) -> Option<projection_residency::ResidentProjection> {
+    loaded.projection_head.as_ref()?;
+    match preceding.take() {
+        Some(previous) if previous.key == loaded.key && previous.resident.header == loaded.document => {
+            Some(previous.resident)
+        }
+        _ => database.resident_projections().take(&loaded.key, &loaded.document),
+    }
 }
 
 fn materialize_event_projection(
@@ -496,10 +525,8 @@ fn materialize_event_projection(
     preceding: &mut Option<AdjacentEventProjection>,
 ) -> io::Result<()> {
     if let Some(head) = &loaded.projection_head {
-        if let Some(previous) = preceding.take()
-            .filter(|previous| previous.key == loaded.key && previous.header == loaded.document)
-        {
-            loaded.document.insert("projection".into(), Value::Object(previous.projection));
+        if let Some(reused) = take_reusable_projection(database, loaded, preceding) {
+            loaded.document.insert("projection".into(), Value::Object(reused.projection));
             // Normalization still proves segment semantics for this request;
             // no persisted witness is inferred from the owned buffer.
             loaded.verified_stable_segments = None;
@@ -5926,7 +5953,7 @@ pub(crate) fn steer_commit(
         .any(|record| record.get("blockId").and_then(Value::as_str) == Some(block_id.as_str()))
     {
         records.push(recovery_index::pending_steer_record(
-            &request.command_id, &request.text, request.author.as_ref()));
+            &request.command_id, &request.text, &request.images, request.author.as_ref()));
     }
     next_projection.insert("_userSteerInjects".to_owned(), Value::Array(records));
     let projection_request = ProjectionUpdateRequest {
@@ -12510,7 +12537,9 @@ pub(crate) fn attempt_create(
         .ok_or_else(|| invalid_data("invalid stored turn settlement"))?;
     let anchors = resume_option_anchors(settlement)?;
     let anchor = if request.operation == "regenerate" {
-        Map::new()
+        // Regenerate is always available; a caller may echo its advertised
+        // anchor (`turn_start`), exactly as the SQL authority admits.
+        anchors.get("regenerate").cloned().unwrap_or_default()
     } else {
         anchors.get(&request.operation).cloned().ok_or_else(|| {
             conflict("attempt operation is not available for the current settlement")
@@ -13786,8 +13815,8 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
     request: &EventRecordRequest, allow_frame_witness: bool,
     mut adjacent: Option<&mut Option<AdjacentEventProjection>>) -> io::Result<Vec<u8>>
 {
-    // An error, refusal, fast-path event or different Turn consumes the old
-    // buffer. Only a fully published materialized event can supply the next.
+    // An error, refusal or different Turn consumes the old buffer. Only an
+    // event that published its complete next projection can supply the next.
     let mut preceding = adjacent.as_mut().and_then(|slot| slot.take());
     if request.slim && request.projection_patch.is_some() {
         return Err(invalid_input("Slim Turn events cannot carry a projection patch"));
@@ -13834,20 +13863,47 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
     let next_revision = previous_revision
         .checked_add(1)
         .ok_or_else(|| invalid_data("turn projection revision overflow"))?;
-    let text_update = match &text_append {
+    // Text and frame candidates defer materialization. Carry an already
+    // reconstructed projection through them so their result stays reusable.
+    let reused = if text_append.is_some() || frame_candidate {
+        take_reusable_projection(database, &loaded_turn, &mut preceding)
+    } else { None };
+    let mut text_update = match &text_append {
         Some(append) => text_tail::append(database, transaction, &loaded_turn, append,
-            request, &loaded_attempt.conversation_id, &turn_id)?,
+            request, &loaded_attempt.conversation_id, &turn_id, reused.as_ref())?,
         None => None,
     };
     let frame_update = if frame_candidate && !starts_attempt {
         execution_frame::append_from_witness(database, transaction, &loaded_turn,
             request, &loaded_attempt.conversation_id, &turn_id)?
     } else { None };
-    // The fast append helpers have finished borrowing the original loaded
-    // document. Transfer its private reconstruction buffer instead of copying
-    // the complete history into another Turn before applying one event.
-    if (text_append.is_some() || frame_candidate) && text_update.is_none() && frame_update.is_none() {
-        materialize_event_projection(database, transaction, &mut loaded_turn, &mut preceding)?;
+    // A fast path stored only its delta. The reusable projection advances by
+    // exactly what that stored delta materializes to; a mismatch drops it.
+    let mut fast_path_projection = None;
+    let reconstructed = text_update.as_mut().and_then(|update| update.reconstructed.take());
+    match reused.map(|reused| reused.projection).or(reconstructed) {
+        Some(mut projection) if text_update.is_some() => {
+            if text_append.as_ref().is_some_and(|append| append.apply_to(&mut projection)) {
+                fast_path_projection = Some(projection);
+            }
+        }
+        Some(projection) if frame_update.is_some() => {
+            fast_path_projection = request.projection_patch.as_ref().and_then(|patch|
+                crate::turn_projection_patch::apply_projection_patch_owned(projection, patch).ok());
+        }
+        // The fast append helpers have finished borrowing the original loaded
+        // document. Transfer the private reconstruction buffer instead of
+        // copying the complete history into another Turn before one event.
+        Some(projection) => {
+            loaded_turn.document.insert("projection".into(), Value::Object(projection));
+            loaded_turn.verified_stable_segments = None;
+        }
+        None if (text_append.is_some() || frame_candidate)
+            && text_update.is_none() && frame_update.is_none() =>
+        {
+            materialize_event_projection(database, transaction, &mut loaded_turn, &mut preceding)?;
+        }
+        None => {}
     }
     let mut verified_stable_segments = loaded_turn.verified_stable_segments.take();
     let mut turn = std::mem::take(&mut loaded_turn.document);
@@ -13967,6 +14023,9 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
             .get("createdAt")
             .and_then(Value::as_u64)
             .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
+        // Exact encoded size of the complete next projection on every path:
+        // the text tail and frame witnesses are verified against it whenever
+        // the head is materialized.
         projection_bytes = match text_update.as_ref().map(|u| u.projection_bytes)
             .or_else(|| frame_update.as_ref().map(|u| u.projection_bytes))
             .or_else(|| frame_witness.as_ref().map(|witness| witness.bytes())) {
@@ -14139,6 +14198,7 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
         request.now_ms,
         false,
     )?;
+    let next_projection_bytes = projection_bytes;
     // Legacy terminal writes always materialize the settled projection and
     // expose that encoded size as durable event evidence.  Live slim frames
     // retain the compact two-text-field measurement.
@@ -14155,12 +14215,23 @@ fn event_record_with_projection(database: &AuthorityDatabase, transaction: &mut 
         attempt: &attempt, projection: publication_projection, projection_bytes,
         replay_patch, starts_attempt,
     })?;
-    if next_projection_head.is_some() && text_update.is_none() && frame_update.is_none() {
-        if let Some(slot) = adjacent {
-            *slot = Some(AdjacentEventProjection {
-                key: loaded_turn.key, header: turn, projection: retained_projection
-                    .ok_or_else(|| invalid_data("Adjacent Turn projection is missing"))?,
-            });
+    // A live head keeps the complete projection this event produced: the next
+    // step of the same transaction takes it, otherwise the commit retains it.
+    let next_projection = if text_update.is_some() || frame_update.is_some() {
+        fast_path_projection
+    } else {
+        retained_projection
+    };
+    if let (Some(_), Some(projection)) = (&next_projection_head, next_projection) {
+        let reusable = AdjacentEventProjection {
+            key: loaded_turn.key,
+            resident: projection_residency::ResidentProjection {
+                header: turn, projection, projection_bytes: next_projection_bytes,
+            },
+        };
+        match adjacent {
+            Some(slot) => *slot = Some(reusable),
+            None => reusable.publish_with(transaction),
         }
     }
     Ok(response)
@@ -14187,6 +14258,14 @@ fn store_event_projection(database: &AuthorityDatabase, transaction: &mut Author
         )?;
         None
     } else if let Some(current) = current_head {
+        // An open text tail joins the chain when both fit; otherwise the whole
+        // head folds into a new checkpoint below.
+        let closed = match &current.text_tail {
+            Some(_) => text_tail::close_into_chain(database, transaction, conversation_id,
+                turn_id, current, previous_projection, replay_patch_bytes, request.now_ms)?,
+            None => None,
+        };
+        let current = closed.as_ref().unwrap_or(current);
         let next_count = current
             .patch_count
             .checked_add(1)
@@ -14631,10 +14710,12 @@ fn restart_settlement(projection: &Map<String, Value>) -> Value {
         "operation": "regenerate",
         "anchor": {"type": "turn_start"}
     }));
+    // The attempt died with its server; no person stopped it. The Python
+    // verdict maps the same restart to system_recovery evidence.
     json!({
         "outcome": "interrupted",
         "cause": "server_restart",
-        "evidence": "user_abort",
+        "evidence": "system_recovery",
         "streamState": null,
         "providerFinishReason": "interrupted",
         "error": null,
@@ -16324,6 +16405,18 @@ mod metadata_read_tests;
 #[cfg(test)]
 #[path = "turn/event_prune_tests.rs"]
 mod event_prune_tests;
+
+#[cfg(test)]
+#[path = "turn_event_load_tests.rs"]
+mod event_load_tests;
+
+#[cfg(test)]
+#[path = "turn_projection_reuse_specs.rs"]
+mod reuse_specs;
+
+#[cfg(test)]
+#[path = "turn_projection_residency_tests.rs"]
+mod residency_tests;
 
 pub(crate) fn main_turn_count(
     database: &AuthorityDatabase,

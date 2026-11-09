@@ -71,7 +71,7 @@ def _heartbeat_task(task: dict) -> bool:
         return True
     except Exception as exc:
         logger.debug('[PresenceKeepalive] heartbeat failed task=%s: %s',
-                     str(task.get('id') or '')[:8], exc)
+                     str(task.get('id') or ''), exc)
         return False
 
 

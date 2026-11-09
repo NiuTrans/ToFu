@@ -59,7 +59,7 @@ async def list_compactions(conv_id):
         )
     except Exception as exc:
         return _archive_error(exc)
-    logger.info("[Compactions] conv=%s returned %d archives", conv_id[:8], len(rows))
+    logger.info("[Compactions] conv=%s returned %d archives", conv_id, len(rows))
     return api_ok({"compactions": rows, "count": len(rows)})
 
 
@@ -118,7 +118,7 @@ async def get_compaction(conv_id, archive_id):
         }
     logger.info(
         "[Compactions] conv=%s archive=%s projection=%s messages=%d",
-        conv_id[:8],
+        conv_id,
         archive_id[:12],
         "post" if include_post_messages
         else "full" if include_messages else "summary",
@@ -210,14 +210,14 @@ def _compaction_response(conv_id, result):
     if result.get("ok") and result.get("scheduled"):
         logger.info(
             "[ManualCompact] conv=%s scheduled request=%s already=%s",
-            conv_id[:8], str(result.get("requestId") or "")[:8],
+            conv_id, str(result.get("requestId") or "")[:8],
             result.get("alreadyScheduled"),
         )
         return api_ok(result)
     if result.get("ok"):
         logger.info(
             "[ManualCompact] conv=%s ok tokens %s→%s archive=%s",
-            conv_id[:8],
+            conv_id,
             result.get("tokensBefore"),
             result.get("tokensAfter"),
             result.get("archiveId"),

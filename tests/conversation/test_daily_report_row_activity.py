@@ -161,22 +161,24 @@ def test_report_extraction_raises_instead_of_partial_day_on_lazy_error(
             '2026-08-02', owner_user_id=OWNER_USER_ID)
 
 
-def test_cost_scan_uses_usage_from_authority_snapshot(monkeypatch):
-    snapshot = _snapshot(
-        'cost-current',
-        [
-            {'role': 'user', 'timestamp': _ms(1), 'content': 'question'},
-            {
-                'role': 'assistant', 'timestamp': _ms(2), 'content': 'answer',
-                'usage': {'prompt_tokens': 100, 'completion_tokens': 25},
-                'model': 'model-x', 'providerId': 'provider-y',
-            },
-        ],
-        settings={'model': 'fallback-model'},
+def test_cost_scan_uses_usage_from_authority_projection(monkeypatch):
+    from lib.conversations.repository import ConversationTurnUsage
+
+    projection = ConversationTurnUsage(
+        metadata={'id': 'cost-current', 'title': 'Title cost-current',
+                  'created_at': _ms(1), 'updated_at': _ms(3),
+                  'settings': {'model': 'fallback-model'}},
+        message_count=2,
+        title_fallback='',
+        turns=[{
+            'index': 1, 'timestamp': _ms(2),
+            'usage': {'prompt_tokens': 100, 'completion_tokens': 25},
+            'model': 'model-x', 'providerId': 'provider-y',
+        }],
     )
     monkeypatch.setattr(
-        'lib.conversations.repository.scan_conversations_bounded',
-        lambda **_kwargs: (1, iter([snapshot])),
+        'lib.conversations.repository.scan_conversation_turn_usage',
+        lambda **_kwargs: (1, iter([projection])),
     )
     pricing_calls = []
 

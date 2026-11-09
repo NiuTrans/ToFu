@@ -39,7 +39,15 @@ def human(owner=OWNER, credential='session', browser='fetch-metadata'):
 def approvals(tmp_path, monkeypatch):
     monkeypatch.setattr(gate, '_APPROVALS_FILE', str(tmp_path / 'lifecycle_approvals.json'))
     monkeypatch.setattr(gate, '_STATE_FILE', str(tmp_path / 'lifecycle_state.json'))
+    # The server manager's restart outcome lives in this project's manager state.
+    monkeypatch.setenv('TOFU_PROJECT_PATH', str(tmp_path))
     return tmp_path
+
+
+def _manager_outcome(approvals, **outcome):
+    """What server_manager.LifecycleManager._settle_restart persisted for the restart."""
+    (approvals / 'data').mkdir(exist_ok=True)
+    (approvals / 'data' / 'server-manager-state.json').write_text(json.dumps({'lastRestart': outcome}))
 
 
 @pytest.fixture
@@ -207,8 +215,8 @@ def test_a_replayed_restart_never_restarts_twice(d):
 
 
 def test_a_handed_over_restart_reads_completed_once_a_newer_server_answers(d, monkeypatch):
-    """The server manager reports no outcome back. Every restart replaces the serving
-    worker, so a server generation that booted after the handover proves it happened."""
+    """Every restart replaces the serving worker, so a server generation that
+    booted after the handover proves it happened."""
     from lib import boot_identity
     d.grant()
     first = d.restart()
@@ -222,6 +230,45 @@ def test_a_handed_over_restart_reads_completed_once_a_newer_server_answers(d, mo
     replay = d.restart()
     assert (replay['action_id'], replay['status'], replay['replayed']) == (first['action_id'], 'completed', True)
     assert replay['execution_started'] is True and d.names().count('perform') == 1
+
+
+def test_a_manager_refusal_after_the_handover_reads_failed_while_the_old_server_serves(
+        d, approvals, monkeypatch):
+    """The manager decides every refusal before it stops the old server, which then
+    keeps serving and reads the outcome the manager recorded."""
+    from lib import boot_identity
+    d.grant()
+    d.restart()
+    d.run_detached()
+    [handed_over] = d.audit()
+    monkeypatch.setattr(boot_identity, 'BOOT_TS', handed_over['acceptedAt'] - 600)
+    _manager_outcome(approvals, outcome='refused', stage='admission',
+                     message='native storage service belongs to another host',
+                     settledAt=handed_over['acceptedAt'] - 60)
+    assert d.audit()[0]['status'] == 'restarting'  # an earlier restart's refusal
+    _manager_outcome(approvals, outcome='refused', stage='admission',
+                     message='native storage service belongs to another host',
+                     settledAt=handed_over['acceptedAt'] + 1)
+    [refused] = d.audit()
+    assert refused['status'] == 'failed' and refused['code'] == 'restart_refused_by_manager'
+    assert 'keeps serving' in refused['detail'] and 'another host' in refused['detail']
+
+
+def test_a_restart_that_replaced_a_host_after_an_unclean_close_says_so(d, approvals, monkeypatch):
+    from lib import boot_identity
+    d.grant()
+    d.restart()
+    d.run_detached()
+    [handed_over] = d.audit()
+    _manager_outcome(approvals, outcome='spawned', settledAt=handed_over['acceptedAt'] + 1,
+                     uncleanCloses=[{'service': 'native storage',
+                                     'detail': 'clean close was not confirmed'}])
+    monkeypatch.setattr(boot_identity, 'BOOT_ID', 'next-generation')
+    monkeypatch.setattr(boot_identity, 'BOOT_TS', handed_over['acceptedAt'] + 2)
+    [completed] = d.audit()
+    assert completed['status'] == 'completed' and 'next-generation' in completed['detail']
+    assert ('replaced the native storage host after an unclean close '
+            '(clean close was not confirmed)') in completed['detail']
 
 
 def test_delegated_session_control_is_recorded_and_acts_through_the_shared_command(d):

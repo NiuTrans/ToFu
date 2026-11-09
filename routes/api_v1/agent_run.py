@@ -102,7 +102,7 @@ from lib.error_envelope import BadRequest
 from lib.model_routing import ModelRoutingError
 from lib.idempotency import idempotent_post
 from lib.ids import short_id
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.openapi import media_responses, api_meta
 from lib.request_parser import (
     async_parse_body, optional_bool, optional_dict, optional_str, require_list,
@@ -243,7 +243,7 @@ async def _stream_generator(task, model: str, completion_id: str,
     except (GeneratorExit, asyncio.CancelledError):
         # Client disconnected. The task keeps running (its terminal
         # callback still releases the admission slot); just stop streaming.
-        logger.info('[agent.run] stream client disconnected task=%s', task_id[:8])
+        logger.info('[agent.run] stream client disconnected task=%s', task_log_tag(task_id))
         raise
     finally:
         unregister_waiter(task_id)
@@ -508,11 +508,11 @@ async def agent_run():
         unregister_waiter(task['id'])
         reject_unstarted_chat_task(
             task, e, cause='task_spawn_failed', conv_id=conversation_id)
-        logger.exception('[agent.run] spawn_task failed task=%s', task['id'][:8])
+        logger.exception('[agent.run] spawn_task failed task=%s', task_log_tag(task['id']))
         return api_internal_error(e, context='api_v1.agent_run')
 
     logger.info('[agent.run] spawned task=%s conv=%s key=%s model=%s '
-                'stream=%s in_flight=%d/%d', task['id'][:8],
+                'stream=%s in_flight=%d/%d', task_log_tag(task['id']),
                 conversation_id, credential_key_id or 'open-mode',
                 model_id,
                 stream, controller.in_flight, controller.capacity)
@@ -549,7 +549,7 @@ async def agent_run():
         await _wait_for_terminal(task, timeout_s=timeout_s)
     except RuntimeError as e:
         logger.warning('[agent.run] task=%s timed out model=%s elapsed=%.0fs',
-                       task['id'][:8], model_id, timeout_s)
+                       task_log_tag(task['id']), model_id, timeout_s)
         return api_internal_error(str(e), context='api_v1.agent_run')
     finally:
         unregister_waiter(task['id'])

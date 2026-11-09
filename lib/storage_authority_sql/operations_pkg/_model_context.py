@@ -5,8 +5,10 @@ settled enrichment advances ordinary projection CAS without invalidating model
 context. Real edits/execution changes, ownership and current-target fences stay
 mandatory. This query never substitutes for same-turn Continue recovery.
 The proof digest streams over every header in keyset pages: memory holds one
-header page plus the response page, and lane length is never a ceiling. The
-native authority (packages/tofu-db/src/turn/model_context.rs) has the same
+header page plus the response page, and lane length is never a ceiling. A Turn
+with more than one ``turn.projection.page`` page travels as its page-0 head,
+which the client completes by page (docs/STORAGE.md, "Paged Turn storage").
+The native authority (packages/tofu-db/src/turn/model_context.rs) has the same
 selection semantics.
 """
 from __future__ import annotations
@@ -16,6 +18,7 @@ import json
 
 from lib.storage.errors import StorageError
 from lib.storage.model_continuation import settled_witness
+from lib.storage.turn_projection_pages import turn_projection_page
 from ._common import _required_text, _integer
 from ._turns_core import _turn_public, _optional_row_value
 from ._model_continuation import continuation_get
@@ -37,6 +40,17 @@ def _header_bytes(row):
         row['turn_id'], row['parent_turn_id'], row['status'],
         row['current_attempt_id'], revision,
     ], ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+
+
+def _context_row(turn):
+    """The Turn itself, or ``{'pagedTurn': head}`` when it has more than one page."""
+    first = turn_projection_page(turn, 0)
+    return {'pagedTurn': first['turn']} if first['pageCount'] > 1 else turn
+
+
+def _row_turn(row):
+    """The Turn record of a response row; a paged Turn's row carries its head."""
+    return row.get('pagedTurn', row)
 
 
 def _main_lane_headers(session, conv, owner, through_ordinal, *, after_ordinal=None):
@@ -89,7 +103,7 @@ class _Page:
             'AND user_id=? AND turn_id=?', (self.conv, self.owner, header['turn_id']))
         if row is None:
             raise StorageError('database_internal', 'Model context Turn disappeared')
-        turn = _turn_public(self.session, row)
+        turn = _context_row(_turn_public(self.session, row))
         size = len(json.dumps(turn, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
         if self.turns and self.bytes + size > self.limit:
             self.full = True
@@ -198,8 +212,9 @@ def read_model_context(session, payload):
     turns = page.turns
     return {
         'supported': True, 'covered': covered, 'turns': turns,
-        'nextTurnId': turns[-1]['turnId'] if page.full else None,
+        'nextTurnId': _row_turn(turns[-1])['turnId'] if page.full else None,
         'continuation': continuation, 'continuationStatus': continuation_status,
         'historyProof': {'version': 2, 'count': index, 'digest': digest.hexdigest()},
-        'proofEligible': all(not (row.get('projection') or {}).get('attachments') for row in turns),
+        'proofEligible': all(not (_row_turn(row).get('projection') or {}).get('attachments')
+                             for row in turns),
     }

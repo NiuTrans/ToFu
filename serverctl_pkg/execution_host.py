@@ -16,6 +16,9 @@ import signal
 import threading
 
 from serverctl_pkg.execution_service import RECORD_FORMAT
+from serverctl_pkg.execution_plan import (
+    ExecutionSourceChanged, SOURCE_CHANGED_BEFORE_BOOT, require_plan_match,
+)
 from serverctl_pkg.resident_service import (
     await_published_record, manager_control_matches, process_matches, write_record,
 )
@@ -25,8 +28,7 @@ def create_application(shutdown_requested, plan):
     from serverctl_pkg.execution_plan import prepare_plan
     project = Path(os.environ['TOFU_PROJECT_PATH'])
     environment = dict(os.environ)
-    if prepare_plan(project, environment) != plan:
-        raise RuntimeError('Execution source or launch policy changed after preparation')
+    require_plan_match(plan, prepare_plan(project, environment), stage='after preparation')
     from runtime_guards import load_deployment_configuration
     if load_deployment_configuration().process_role != 'execution':
         raise RuntimeError('Resident execution requires the execution process role')
@@ -36,15 +38,13 @@ def create_application(shutdown_requested, plan):
     pins.install()
     try:
         retained = pins.freeze()
-        if any(retained[key] != plan[key] for key in retained):
-            raise RuntimeError('Retained execution sources differ from the prepared generation')
+        require_plan_match(plan, {**plan, **retained}, stage='while retaining source')
         app = server.create_app()
         server.register_server_runtime_lifecycle(app, shutdown_requested=shutdown_requested)
         # Same source owner as server.py/asgi.py. Preserve __file__ paths and
         # lazy optional imports; finish current sweeps before admitting work.
         pins.join()
-        if prepare_plan(project, environment) != plan:
-            raise RuntimeError('Execution source changed during application construction')
+        require_plan_match(plan, prepare_plan(project, environment), stage='during application construction')
         app.extensions['tofu_execution_import_source'] = pins
         return app
     except BaseException:
@@ -86,7 +86,13 @@ async def _run_application(args, record, stopped, shutdown_requested, applicatio
             return
         # Imports and app construction may touch the source filesystem. Keep
         # owner-exit notification live; asyncio.run joins this construction.
-        app = await asyncio.to_thread(application_factory, shutdown_requested, record['plan'])
+        try:
+            app = await asyncio.to_thread(application_factory, shutdown_requested, record['plan'])
+        except ExecutionSourceChanged:
+            # This catch ends before startup can admit tasks. A later boot or
+            # invocation failure cannot issue the same no-entry witness.
+            record['failureKind'] = SOURCE_CHANGED_BEFORE_BOOT
+            raise
         await run_execution_lifespan(app, stopped, ready, before_shutdown=close_controls)
     finally:
         loop.remove_reader(owner_fd)

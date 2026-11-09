@@ -18,7 +18,7 @@ import threading
 from collections import deque
 
 from lib.identity import require_user_id
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from .bridge import actuals_complete, terminal_actuals, settle_from_task, settle_terminal_receipt
 from .checkers import evaluate_goal
@@ -84,7 +84,7 @@ def on_task_terminal(task: dict, *, actuals=None, cancel_event=None) -> None:
                 task_status=status, actuals=actuals, verdict=verdict,
                 actuals_complete=actuals_complete(task))
         logger.info('[Evolution:Automation] episode %s settled %s from task %s',
-                    episode_id, settled['status'], str(task.get('id'))[:8])
+                    episode_id, settled['status'], task_log_tag(task.get('id')))
     except EvolutionStateError as exc:
         logger.warning('[Evolution:Automation] episode %s settlement refused: '
                        '%s', episode_id, exc)

@@ -124,7 +124,7 @@ def _record_latest_task(conv_id: str, task_id: str) -> None:
         get_store().set_value(_LATEST_KIND, conv_id, task_id, _LATEST_TTL)
     except Exception as e:
         logger.debug('[Task] supersede index mirror failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
 
 
 def _clear_latest_task(conv_id: str, *, expect_task_id: str | None = None) -> bool:
@@ -154,7 +154,7 @@ def _clear_latest_task(conv_id: str, *, expect_task_id: str | None = None) -> bo
         get_store().delete_value(_LATEST_KIND, conv_id)
     except Exception as e:
         logger.debug('[Task] supersede index mirror clear failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
     return removed
 
 
@@ -169,7 +169,7 @@ def _latest_task_for_conv(conv_id: str):
             return v
     except Exception as e:
         logger.debug('[Task] supersede index read failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
     with _conv_latest_task_lock:
         return _conv_latest_task.get(conv_id)
 
@@ -204,7 +204,7 @@ def _live_successor_task_id(conv_id: str, exclude_task_id: str = '') -> str:
         return succ
     except Exception as e:
         logger.debug('[Task] live-successor probe failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
         return ''
 
 
@@ -230,7 +230,7 @@ def _live_successor_info(conv_id: str, exclude_task_id: str = '') -> tuple[str, 
         return succ, bool(t and t.get('_vu_subtask'))
     except Exception as e:
         logger.debug('[Task] live-successor is-vu probe failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
         return succ, False
 
 
@@ -270,5 +270,5 @@ def push_withheld_for_conv(conv_id: str) -> dict | None:
         }
     except Exception as e:
         logger.debug('[Task] push-withheld probe failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
         return None

@@ -1,41 +1,10 @@
-"""lib/proxy.py — Centralized proxy configuration.
+"""Outbound configuration and eligible routes (docs/NETWORK.md).
 
-Manages **two** concerns that are unified for the user:
-
-1. **Proxy address** — the ``http_proxy`` / ``https_proxy`` values that
-   ``requests`` uses.  These can come from environment variables (traditional)
-   **or** from the Settings UI (persisted to ``server_config.json``).
-
-2. **Proxy bypass** — domain suffixes / hosts whose traffic should bypass
-   the proxy entirely.  Configured via one Settings UI field (or the
-   ``PROXY_BYPASS_DOMAINS`` env var).  Under the hood, bypass domains
-   feed **both**:
-
-   - Per-request bypass via ``proxies_for(url)`` (suffix match)
-   - Global ``no_proxy`` environment variable (for any code using
-     ``requests`` directly without explicit ``proxies=`` kwarg)
-
-Usage in any module::
-
-    from lib.proxy import proxies_for
-
-    resp = requests.post(url, json=body, proxies=proxies_for(url), timeout=30)
-
-The Settings UI (Network tab) lets users configure the proxy address
-and a single unified bypass list without touching environment variables.
-
-**Proxy pool** (2026-08-07, ): an ordered, scoped list of
-proxy entries persisted as ``proxy_pool`` in server_config.json. Entries
-carry a ``scope`` — ``subscription`` applies ONLY to
-:data:`SUBSCRIPTION_HOSTS` (the OAuth provider endpoints, so a proxy that
-can reach them need not bend ALL traffic), ``global`` applies to any
-non-bypassed host. Credentials never persist in the URL: the save path
-splits userinfo into the credentials vault (``proxy_<id>_auth``) and
-stores a stripped URL. Per-entry health (consecutive failures → 60s
-cooldown) is fed by :func:`report_outcome` for generic traffic. Subscription
-traffic uses a separate per-host route health table, so a target-specific
-block never globally poisons the proxy. An EMPTY pool preserves the legacy
-single-proxy/env behaviour byte for byte.
+Global and subscription proxy pools, credentials and explicit bypasses are
+resolved here; lib.network_routes owns per-origin reachability. Application
+requests use lib.http_transport clients automatically. Legacy proxies_for and
+pool-selection helpers remain compatibility APIs, not the application network
+entry point. Process/browser adapters consume explicit shared route plans.
 """
 
 import ipaddress
@@ -65,6 +34,8 @@ __all__ = [
     'global_egress_route_specs',
     'subscription_route_specs', 'subscription_route_candidates',
     'subscription_route_verdict', 'subscription_route_recovery_delay', 'report_subscription_route',
+    'network_route_specs', 'network_route_candidates', 'async_network_route_candidates',
+    'report_network_route',
 ]
 
 
@@ -247,7 +218,7 @@ def _apply_to_env(key: str, value: str):
 #
 # Health: per-entry consecutive-failure counting fed by report_outcome()
 # (the same real-traffic feed netpath learns from). Subscription routing owns
-# per-(host, route) health in lib.subscription_routes instead.
+# per-(host, route) health in lib.network_routes instead.
 # ``_POOL_FAIL_THRESHOLD`` consecutive failures → 60s cooldown;
 # the ordered pool is the failover chain (no blind round-robin).
 
@@ -303,7 +274,7 @@ def _on_proxy_topology_changed() -> None:
     except Exception as e:
         logger.debug('[Proxy] egress probe invalidation failed: %s', e)
     try:
-        from lib.subscription_routes import manager as _route_manager
+        from lib.network_routes import manager as _route_manager
         _route_manager.reset()
     except Exception as e:
         logger.debug('[Proxy] subscription route reset failed: %s', e)
@@ -637,180 +608,174 @@ def pool_probe_entries() -> list:
 
 def global_egress_route_specs(
         url: str, *, include_bypassed: bool = False,
-        include_credentialed: bool = False, limit: int = 4) -> list:
-    """Return explicit direct/global-proxy routes eligible for ``url``.
+        include_credentialed: bool = False, limit: int | None = None) -> list:
+    """Command admission shares route construction, with its credential policy.
 
-    This is the credential-preserving candidate boundary for consumers that
-    must compare routes before launching work.  It does not perform network
-    I/O. Credentialed pool rows are excluded by default because an arbitrary
-    shell is not an acceptable vault-consumer boundary. Trusted non-shell
-    callers may opt in explicitly; credentials then stay inside
-    :class:`Route` objects whose repr deliberately omits ``proxy_url``.
-
-    Normal HTTP callers should continue using :func:`proxies_for`.  The
-    ``include_bypassed`` escape is intentionally explicit: command egress can
-    treat ``NO_PROXY`` as the deployment's preferred path while testing a
-    configured global proxy, but local/loopback targets always remain direct.
+    Arbitrary commands never receive vault credentials. Their existing explicit
+    bypass challenge can test external targets; loopback remains direct.
     """
-    from lib.subscription_routes import Route
-
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or '').lower()
-    except (TypeError, ValueError) as error:
-        logger.debug('[Proxy] route-spec URL parse failed: %s', error)
-        return []
-    if not host:
-        return []
-
-    direct = Route('direct', 'direct', 'direct', priority=0)
-    if host in _ALWAYS_BYPASS:
-        return [direct]
-    try:
-        address = ipaddress.ip_address(host)
-        if address.is_loopback or address.is_link_local:
-            return [direct]
-    except ValueError:
-        pass
-
-    bypassed = (
-        _is_registered_bypass(host)
-        or _host_matches_bypass(host, _bypass_domains)
-    )
-    if bypassed and not include_bypassed:
-        return [direct]
-
-    try:
-        bounded_limit = max(1, min(8, int(limit)))
-    except (TypeError, ValueError):
-        bounded_limit = 4
-
-    with _pool_lock:
-        pool = [dict(entry) for entry in _proxy_pool
-                if entry.get('enabled')
-                and entry.get('scope') == _SCOPE_GLOBAL]
-    with _topology_lock:
-        topology_epoch = _proxy_topology_epoch
-
-    routes = [direct]
-    seen_proxy_urls = set()
-    for idx, entry in enumerate(_healthy_candidates(pool)):
-        if entry.get('credential_vault') and not include_credentialed:
-            continue
-        resolved = _resolve_entry(entry)
-        if not resolved or resolved in seen_proxy_urls:
-            continue
-        seen_proxy_urls.add(resolved)
-        pool_id = str(entry.get('id') or '')
-        routes.append(Route(
-            f'pool:{pool_id}:g{topology_epoch}',
-            'proxy ' + (str(entry.get('name') or pool_id) or '?'),
-            'proxy', priority=10 + idx, proxy_url=resolved,
-            pool_id=pool_id))
-        if len(routes) - 1 >= bounded_limit:
-            break
-
-    config = get_proxy_config()
-    scheme = (parsed.scheme or '').lower()
-    if scheme == 'http':
-        env_proxy = (config.get('http_proxy')
-                     or config.get('https_proxy') or '')
-    else:
-        # HTTPS and SSH both need an HTTP CONNECT-capable proxy.  Prefer the
-        # configured HTTPS route, with HTTP as the conventional fallback.
-        env_proxy = (config.get('https_proxy')
-                     or config.get('http_proxy') or '')
-    env_proxy = str(env_proxy or '').strip()
-    if env_proxy and env_proxy not in seen_proxy_urls \
-            and len(routes) - 1 < bounded_limit:
-        routes.append(Route(
-            f'proxy:environment:g{topology_epoch}',
-            'environment proxy', 'proxy',
-            priority=100, proxy_url=env_proxy))
-    return routes
+    routes = network_route_specs(
+        url, scope=_SCOPE_GLOBAL, include_bypassed=include_bypassed,
+        include_credentialed=include_credentialed)
+    return routes if limit is None else routes[:1 + max(0, int(limit))]
 
 
 def subscription_route_specs(url: str) -> list:
-    """Build every distinct server-side route eligible for ``url``.
-
-    The list contains an explicit direct path, all enabled scoped pool
-    proxies in user order, and the effective environment proxy when it is
-    not already represented by a pool row.  Credentials remain process-local
-    inside ``Route`` objects whose repr intentionally hides ``proxy_url``.
-    """
-    from lib.subscription_routes import Route
-
+    """Compatibility policy for the registered subscription destinations."""
     host = (urlparse(url).hostname or '').lower()
     if not is_subscription_host(host):
         return []
-    direct = Route('direct', 'direct', 'direct', priority=0)
-    if (_is_registered_bypass(host)
-            or _host_matches_bypass(host, _bypass_domains)):
+    return network_route_specs(url, scope=_SCOPE_SUBSCRIPTION)
+
+
+def network_topology_epoch() -> int:
+    """Generation fence for retaining transport pools after settings changes."""
+    with _topology_lock:
+        return _proxy_topology_epoch
+
+
+def network_route_specs(url: str, *, scope: str | None = None,
+                        include_bypassed: bool = False,
+                        include_credentialed: bool = True) -> list:
+    """Every eligible concrete HTTP route; no I/O and no cross-host circuits."""
+    from lib.network_routes import Route
+    from requests.utils import get_environ_proxies, should_bypass_proxies
+
+    parsed = urlsplit(url)
+    host = (parsed.hostname or '').lower()
+    if not host:
+        return []
+    if scope not in (None, _SCOPE_GLOBAL, _SCOPE_SUBSCRIPTION):
+        raise ValueError('unknown network scope')
+    direct = Route('direct', 'direct', 'direct')
+    local = host in _ALWAYS_BYPASS or host == '::1'
+    try:
+        address = ipaddress.ip_address(host)
+        local = local or address.is_loopback or address.is_link_local
+    except ValueError:
+        pass
+    if local or (not include_bypassed and (
+            _is_registered_bypass(host)
+            or _host_matches_bypass(host, _bypass_domains)
+            or should_bypass_proxies(url, no_proxy=None))):
         return [direct]
 
-    routes = [direct]
-    seen_proxy_urls = set()
-    for idx, entry in enumerate(_pool_candidates(host)):
-        pid = str(entry.get('id') or '')
+    subscription = scope == _SCOPE_SUBSCRIPTION or (
+        scope is None and is_subscription_host(host))
+    with _pool_lock:
+        enabled = [dict(entry) for entry in _proxy_pool if entry.get('enabled')]
+    scoped = ([entry for entry in enabled if entry.get('scope') == _SCOPE_SUBSCRIPTION]
+              if subscription else [])
+    scoped += [entry for entry in enabled if entry.get('scope') == _SCOPE_GLOBAL]
+    with _topology_lock:
+        epoch = _proxy_topology_epoch
+    routes, seen = [direct], set()
+    for entry in scoped:
+        if not include_credentialed and entry.get('credential_vault'):
+            continue
         resolved = _resolve_entry(entry)
-        if not resolved:
+        if not resolved or resolved in seen:
             continue
-        if resolved in seen_proxy_urls:
-            continue
-        seen_proxy_urls.add(resolved)
-        routes.append(Route(
-            f'pool:{pid}',
-            'proxy ' + (str(entry.get('name') or pid) or '?'),
-            'proxy', priority=10 + idx, proxy_url=resolved, pool_id=pid))
-
-    env_proxy = (os.environ.get('https_proxy')
-                 or os.environ.get('HTTPS_PROXY')
-                 or os.environ.get('http_proxy')
-                 or os.environ.get('HTTP_PROXY')
-                 or '')
-    if env_proxy and env_proxy not in seen_proxy_urls:
-        try:
-            from requests.utils import should_bypass_proxies
-            env_bypassed = should_bypass_proxies(url, no_proxy=None)
-        except Exception as e:
-            logger.debug('[Proxy] env bypass check failed for route specs: %s', e)
-            env_bypassed = False
-        if not env_bypassed:
-            routes.append(Route(
-                'env', 'environment proxy', 'env', priority=100,
-                proxy_url=env_proxy))
+        seen.add(resolved)
+        pid = str(entry.get('id') or '')
+        routes.append(Route(f'pool:{pid}:g{epoch}', 'proxy ' + pid, 'proxy',
+                            priority=len(routes), proxy_url=resolved, pool_id=pid))
+    if include_bypassed:
+        from urllib.request import getproxies
+        env = getproxies()
+    else:
+        env = get_environ_proxies(url)
+    scheme = 'https' if parsed.scheme == 'wss' else 'http' if parsed.scheme == 'ws' else parsed.scheme
+    configured = get_proxy_config()
+    if scheme == 'ssh':
+        scheme = 'https'
+    effective = (env.get(scheme) or env.get('all')
+                 or configured.get(scheme + '_proxy') or '')
+    if not include_credentialed and effective and urlsplit(effective).username is not None:
+        effective = ''
+    if effective and effective not in seen:
+        routes.append(Route(f'env:g{epoch}', 'environment proxy', 'proxy',
+                            priority=len(routes), proxy_url=effective))
     return routes
+
+
+def network_route_candidates(url: str, *, scope: str | None = None,
+                             wait_timeout: float | None = None, cancelled=None,
+                             force_probe: bool = False) -> list:
+    """Admit any HTTP origin through the shared route manager."""
+    from lib.network_routes import manager
+    routes = network_route_specs(url, scope=scope)
+    if len(routes) == 1 and routes[0].mode == 'direct':
+        return routes
+    subscription = scope == _SCOPE_SUBSCRIPTION or (
+        scope is None and is_subscription_host((urlsplit(url).hostname or '').lower()))
+    if subscription and os.environ.get('TOFU_SUBSCRIPTION_TRUST_CONFIGURED_PROXY', '').lower() in ('1', 'true', 'yes'):
+        configured = [route for route in routes if route.mode != 'direct']
+        if configured:
+            return configured
+    kwargs = {'cancelled': cancelled, 'force_probe': force_probe}
+    if wait_timeout is not None:
+        kwargs['wait_timeout'] = wait_timeout
+    return manager.candidates(url, routes, **kwargs)
+
+
+def report_network_route(url: str, route, ok: bool, latency_ms=None, *,
+                         failure_kind: str = 'network_fail') -> None:
+    """Record the exact route used, independently of concurrent host requests."""
+    if route.route_id.startswith('explicit:'):
+        # A private caller override is not an eligible automatic route. Do not
+        # retain its credential-derived identity in shared health diagnostics.
+        return
+    from lib.network_routes import manager
+    manager.report(url, route, ok, latency_ms, failure_kind)
+
+
+async def async_network_route_candidates(url: str, **kwargs) -> list:
+    """Keep route waits off the event loop and join the wait on cancellation."""
+    import asyncio
+    stopped = threading.Event()
+    caller_cancelled = kwargs.pop('cancelled', None)
+    def cancelled():
+        return stopped.is_set() or bool(caller_cancelled and caller_cancelled())
+    waiting = asyncio.create_task(asyncio.to_thread(
+        network_route_candidates, url, cancelled=cancelled, **kwargs))
+    try:
+        return await asyncio.shield(waiting)
+    except asyncio.CancelledError:
+        stopped.set()
+        while not waiting.done():
+            try:
+                await asyncio.shield(waiting)
+            except asyncio.CancelledError:
+                continue
+            except Exception as error:
+                logger.debug('Bounded network route wait failed; returning the routes found: %s', error)
+                break
+        # Retrieve a failed worker without replacing the caller's cancellation.
+        if not waiting.cancelled():
+            waiting.exception()
+        raise
 
 
 def subscription_route_candidates(url: str, *, wait_timeout: float = 5.5,
                                   force_probe: bool = False, cancelled=None) -> list:
     """Health-ordered server routes for one subscription endpoint."""
-    from lib.subscription_routes import manager
-    routes = subscription_route_specs(url)
-    # Some authenticated enterprise proxies intentionally answer the empty,
-    # unauthenticated health POST with 403 while allowing the real signed
-    # request.  A hermetic benchmark can explicitly trust its configured
-    # proxy and let the real request be authoritative.  Production never
-    # bypasses route health unless this process-local switch is set.
-    if os.environ.get('TOFU_SUBSCRIPTION_TRUST_CONFIGURED_PROXY', '').lower() \
-            in ('1', 'true', 'yes'):
-        configured = [route for route in routes if route.mode != 'direct']
-        if configured:
-            return configured
-    return manager.candidates(
-        url, routes,
-        wait_timeout=wait_timeout, force_probe=force_probe, cancelled=cancelled)
+    if not is_subscription_host((urlparse(url).hostname or '').lower()):
+        return []
+    return network_route_candidates(url, scope=_SCOPE_SUBSCRIPTION,
+                                    wait_timeout=wait_timeout, force_probe=force_probe,
+                                    cancelled=cancelled)
 
 
 def subscription_route_verdict(url: str) -> str:
     """Cached aggregate reachability verdict; never performs network I/O."""
-    from lib.subscription_routes import manager
+    from lib.network_routes import manager
     return manager.verdict(url, subscription_route_specs(url))
 
 
 def subscription_route_recovery_delay(url: str) -> float | None:
     """Cached transient recovery deadline, shared by every transport caller."""
-    from lib.subscription_routes import manager
+    from lib.network_routes import manager
     return manager.recovery_delay(url, subscription_route_specs(url))
 
 
@@ -818,13 +783,13 @@ def report_subscription_route(url: str, route, ok: bool,
                               latency_ms=None,
                               failure_kind: str = 'network_fail') -> None:
     """Attribute an actual connection result to its concrete route."""
-    from lib.subscription_routes import manager
+    from lib.network_routes import manager
     manager.report(url, route, ok, latency_ms, failure_kind)
 
 
 def _cached_subscription_route(url: str):
     """Best already-probed route, or None.  This hot-path helper never waits."""
-    from lib.subscription_routes import manager
+    from lib.network_routes import manager
     routes = subscription_route_specs(url)
     cached = manager.cached_candidates(url, routes)
     return cached[0] if cached else None
@@ -1233,8 +1198,8 @@ def proxies_for(url: str) -> dict:
     Returns an empty dict otherwise, letting ``requests`` use the
     environment-level ``http_proxy`` / ``https_proxy`` as normal.
 
-    This is the **single entry point** for proxy decisions — every module
-    that makes HTTP requests should call this.
+    Legacy explicit-proxy compatibility API. Application HTTP and SDK calls
+    use managed clients, whose automatic route plan also handles recovery.
     """
     host = (urlparse(url).hostname or '').lower()
     if not host:

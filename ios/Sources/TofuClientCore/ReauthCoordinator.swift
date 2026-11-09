@@ -117,6 +117,6 @@ public final class ReauthCoordinator {
 
     /// `…/login`, `…/login?…`, `…/login#…` — code-server's gate bounce.
     public static func looksLikeLogin(_ url: String) -> Bool {
-        ServerUrl.parse(url)?.path.split(separator: "/").last == "login"
+        ServerUrl.parseNavigation(url)?.path.split(separator: "/").last == "login"
     }
 }

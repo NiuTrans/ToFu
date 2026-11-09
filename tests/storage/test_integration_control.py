@@ -994,3 +994,182 @@ def test_invalid_local_policy_refuses_stable_with_typed_error(repository, tmp_pa
     with pytest.raises(control.IntegrationError, match='empty'):
         control.promote_stable(str(repository), user_id=1)
     assert _run(repository, 'git', 'rev-parse', 'refs/tofu/stable') == before
+
+
+def test_all_publication_gates_run_outside_repository_admission(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _worktree(repository, tmp_path / 'unlocked-gate-writer')
+    (writer / 'logic.py').write_text('VALUE = 2\n', encoding='utf-8')
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_CMD', f'{sys.executable} -c pass')
+    control.register_workspace(str(repository), 'unlocked-gate', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'unlocked-gate', user_id=1)
+    original_gate = control._gate_commands
+    gates = []
+
+    def gate_without_repository_admission(root, old, target, command, **kwargs):
+        # A separate descriptor contends with a live flock even in this process.
+        with control._file_lock(str(Path(root).resolve()), wait=False):
+            pass
+        gates.append((old, target, command))
+        return original_gate(root, old, target, command, **kwargs)
+
+    monkeypatch.setattr(control, '_gate_commands', gate_without_repository_admission)
+    assert control.process_ready_once()
+    assert _row(repository, 'unlocked-gate')['state'] == 'merged'
+
+    (repository / 'canonical.txt').write_text('committed canonical work\n', encoding='utf-8')
+    _run(repository, 'git', 'add', 'canonical.txt')
+    _run(repository, 'git', 'commit', '-m', 'canonical work')
+    assert control.reconcile_candidate_with_head(
+        str(repository), user_id=1)['changed'] is True
+    assert control.promote_stable(str(repository), user_id=1)['ok'] is True
+    assert len(gates) == 3
+
+
+def test_workspace_registration_proceeds_while_integration_gate_runs(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    writer = _worktree(repository, tmp_path / 'slow-gate-writer')
+    (writer / 'notes.txt').write_text('integration work\n', encoding='utf-8')
+    independent = _worktree(repository, tmp_path / 'independent-writer')
+    control.register_workspace(str(repository), 'slow-gate', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'slow-gate', user_id=1)
+    gate_started = threading.Event()
+    finish_gate = threading.Event()
+
+    def paused_gate(root, old, target, command, **kwargs):
+        gate_started.set()
+        assert finish_gate.wait(timeout=10)
+        return True, ''
+
+    monkeypatch.setattr(control, '_gate_commands', paused_gate)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        integration = pool.submit(control.process_ready_once)
+        assert gate_started.wait(timeout=5)
+        registration = pool.submit(
+            control.register_workspace,
+            str(repository), 'independent', str(independent), user_id=1,
+        )
+        try:
+            registered = registration.result(timeout=0.5)
+        finally:
+            finish_gate.set()
+        assert integration.result(timeout=10)
+
+    assert Path(registered['workspacePath']) == independent
+    assert _row(repository, 'slow-gate')['state'] == 'merged'
+    assert _row(repository, 'independent')['state'] == 'running'
+
+
+def test_gate_cannot_complete_an_explicitly_retried_delivery(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _worktree(repository, tmp_path / 'retry-gate-writer')
+    (writer / 'notes.txt').write_text('integration work\n', encoding='utf-8')
+    control.register_workspace(
+        str(repository), 'retry-gate', str(writer), user_id=1,
+        origin={'executionMode': 'isolated-task'})
+    submitted = control.submit_workspace(str(repository), 'retry-gate', user_id=1)
+    control._state.set_workspace_meta(
+        project_root=str(repository), task_id='retry-gate', user_id=1,
+        patch={'delivery': {
+            'state': 'pending', 'phase': 'integration', 'taskOutcome': 'completed',
+            'checkpointSha': submitted['checkpointSha']}}, now=control._now())
+    claimed = control._claim_next()
+    assert claimed is not None
+    monkeypatch.setattr(control, '_start_or_wake_worker', lambda: None)
+    import lib.project_mod.delivery_acceptance as acceptance
+    persisted_during_gate = []
+
+    def retry_during_gate(*args, **kwargs):
+        from lib.project_mod.delivery import retry_task_delivery
+        receipt = retry_task_delivery(str(repository), 'retry-gate', user_id=1)
+        assert receipt['state'] == 'pending'
+        return True, ''
+
+    def record_during_gate(row, record, *, checkpoint):
+        from lib.project_mod.delivery_acceptance import gate_record
+        persisted_during_gate.append(gate_record(
+            base='base', target='target', tree='tree', command='command',
+            passed=True, observed_at=1, observations={}))
+
+    monkeypatch.setattr(control, '_gate_commands', retry_during_gate)
+    monkeypatch.setattr(acceptance, 'persist_gate_record', record_during_gate)
+    control._integrate_row(claimed)
+
+    row = _row(repository, 'retry-gate')
+    assert row['state'] == 'ready'
+    assert row['origin']['delivery']['state'] == 'pending'
+    assert row['origin']['delivery']['phase'] == 'checkpoint'
+    assert persisted_during_gate == []
+
+
+def test_stale_gate_quarantine_emits_no_ref_or_failure_narrative(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _worktree(repository, tmp_path / 'revoked-gate-writer')
+    (writer / 'notes.txt').write_text('integration work\n', encoding='utf-8')
+    control.register_workspace(str(repository), 'revoked-gate', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'revoked-gate', user_id=1)
+    claimed = control._claim_next()
+    assert claimed is not None
+    monkeypatch.setattr(control, '_gate_commands', lambda *args, **kwargs: (False, 'failed'))
+    monkeypatch.setattr(control._state, 'quarantine', lambda **kwargs: False)
+    pushed = []
+    monkeypatch.setattr(control, '_push', lambda *args, **kwargs: pushed.append(args))
+    narratives = []
+    import lib.conversations.project_brain as project_brain
+    monkeypatch.setattr(project_brain, 'record_integration_failure',
+                        lambda *args, **kwargs: narratives.append(args))
+
+    control._integrate_row(claimed)
+
+    assert pushed == [] and narratives == []
+    assert not control._rev(repository, control._quarantine_ref(1, 'revoked-gate'))
+
+
+def test_candidate_moving_during_gate_requeues_the_stale_merge(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _worktree(repository, tmp_path / 'stale-gate-writer')
+    (writer / 'notes.txt').write_text('tested merge\n', encoding='utf-8')
+    control.register_workspace(str(repository), 'stale-gate', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'stale-gate', user_id=1)
+    claimed = control._claim_next()
+    assert claimed is not None
+    advanced = []
+
+    def move_candidate(root, old, target, command, **kwargs):
+        _run(repository, 'git', 'update-ref', control._CANDIDATE_REF, target)
+        advanced.append(target)
+        return True, ''
+
+    monkeypatch.setattr(control, '_gate_commands', move_candidate)
+    control._integrate_row(claimed)
+
+    assert advanced
+    assert _run(repository, 'git', 'rev-parse', control._CANDIDATE_REF) == advanced[0]
+    assert _row(repository, 'stale-gate')['state'] == 'ready'
+    monkeypatch.setattr(control, '_gate_commands', lambda *args, **kwargs: (True, ''))
+    assert control.process_ready_once()
+    assert _row(repository, 'stale-gate')['state'] == 'merged'
+
+
+def test_stable_gate_cannot_bypass_new_head_divergence_acknowledgement(
+        repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _worktree(repository, tmp_path / 'stable-race-writer')
+    (writer / 'candidate.txt').write_text('candidate\n', encoding='utf-8')
+    control.register_workspace(str(repository), 'stable-race', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'stable-race', user_id=1)
+    assert control.process_ready_once()
+    stable = _run(repository, 'git', 'rev-parse', control._STABLE_REF)
+
+    def advance_head_during_gate(root, old, target, command, **kwargs):
+        (repository / 'independent.txt').write_text('independent\n', encoding='utf-8')
+        _run(repository, 'git', 'add', 'independent.txt')
+        _run(repository, 'git', 'commit', '-m', 'independent canonical work')
+        return True, ''
+
+    monkeypatch.setattr(control, '_gate_commands', advance_head_during_gate)
+    with pytest.raises(control.IntegrationError, match='explicitly acknowledge'):
+        control.promote_stable(str(repository), user_id=1)
+    assert _run(repository, 'git', 'rev-parse', control._STABLE_REF) == stable

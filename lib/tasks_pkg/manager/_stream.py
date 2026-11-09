@@ -17,7 +17,7 @@ from lib.llm_dispatch.retry_i18n import (
     RetryPhaseEventBudget,
     retry_phase_fields,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.logging_pkg.log_record_values import text_value
 from lib.turn_verdict import (
     DISPATCH_AUTHORITY_ABORT_REASONS,
@@ -469,6 +469,8 @@ def _tool_wire_projection_fields(diagnostic, *, model, parent_span_id,
         'toolCount': _count('toolCount'),
         'schemaTokens': _count('schemaTokens'),
         'schemaFingerprint': str(diagnostic.get('schemaFingerprint') or '')[:64],
+        **({'contextLineage': diagnostic['contextLineage']}
+           if isinstance(diagnostic.get('contextLineage'), dict) else {}),
         'schemaBudgetTokens': _count('schemaBudgetTokens'),
         'budgetDroppedNames': _names('budgetDroppedNames'),
         'compactedNames': _names('compactedNames'),
@@ -508,6 +510,14 @@ def _waiting_phase_fields(status, status_kind, *, label, secs, idle_secs):
                 f'{label} subscription quota exhausted — retrying '
                 f'automatically while waiting for the usage window to reset '
                 f'(already {secs}s)…',
+                {'model': label, 'elapsed': secs})
+    if status_kind == 'waiting_headers':
+        # No HTTP response yet: the provider has not answered the request.
+        # Once headers arrive the model is connected but still silent, which
+        # keeps the generic label below.
+        return (Phase.WAITING_MODEL, 'stream.phase.waitingForProviderResponse',
+                f'Request sent {secs}s ago; the {label} model service has not '
+                f'responded yet…',
                 {'model': label, 'elapsed': secs})
     return (Phase.WAITING_MODEL, 'stream.phase.waitingForResponse',
             f'Waiting {secs}s for {label} to respond…',
@@ -580,7 +590,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     streaming so that even pure-LLM responses (no tool calls) survive
     a server crash with minimal data loss.
     """
-    pfx = f'[Task {task["id"][:8]}][{tag}]'
+    pfx = f'[Task {task_log_tag(task["id"])}][{tag}]'
     policy = task.get('_invocationPolicy')
     allowance = getattr(policy, 'max_429_attempts', None)
     if allowance is not None:

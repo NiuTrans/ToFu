@@ -64,6 +64,19 @@ class TestFingerprintNormalization:
                for v in variants}
         assert len(fps) == 1, fps
 
+    def test_whole_task_and_conversation_ids_collapse_to_one_fingerprint(self):
+        """Log text names whole ids (docs/LOGGING.md): one template per
+        message, never one per attempt UUID or Worker conversation."""
+        variants = [
+            '[Task 55f61236-291d-41f2-a573-4aed35636e26][R3] '
+            'conv=worker-1f0e9a2b3c4d5e6f708192a3 done',
+            '[Task a88de93e-92eb-40be-8a45-e374f928b2fa][R9] '
+            'conv=worker-0bf0900935c45b49b3270cfa done',
+        ]
+        fps = {la.fingerprint_text('INFO', 'lib.tasks_pkg.x', v)[0]
+               for v in variants}
+        assert len(fps) == 1, fps
+
     def test_url_path_digits_hex_are_placeholderized(self):
         _, t1 = la.fingerprint_text(
             'ERROR', 'lib.x',

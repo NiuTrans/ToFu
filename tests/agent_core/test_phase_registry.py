@@ -87,6 +87,7 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'integration': 'project delivery receipt stage',
     'adoption': 'project delivery receipt stage',
     'workspace_adoption': 'project delta delivery receipt stage',
+    'commit_adoption': 'project delta delivery receipt stage (reviewed delivery commit)',
     'dispatch_intent': 'research model-attempt journal',
     'executor_exception': 'task fault-attribution stage',
     'executor_returned': 'task fault-attribution stage',

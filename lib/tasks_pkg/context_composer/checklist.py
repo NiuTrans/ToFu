@@ -1,8 +1,9 @@
 """Accepted-checklist visibility and loss recovery, without changing todo state.
 
-Authority is the runtime task; evidence is a paired todo result or a managed
-context block. Opaque identities never belong in model-readable prose. A
-partial, foreign, or superseded result cannot prove that current state survived.
+Authority is the runtime task; evidence is a paired todo result, a paired task
+board receipt (a Coordinator's board is its checklist) or a managed context
+block. Opaque identities never belong in model-readable prose. A partial,
+foreign, or superseded result cannot prove that current state survived.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ logger = get_logger(__name__)
 
 CHECKLIST_HEADING = '## Active Task Checklist'
 _TODO_TOOL_NAMES = frozenset(('todo_write', 'todo_list'))
+_BOARD_TOOL_NAME = 'update_task_progress'
 _GATEWAY_TOOL_NAMES = frozenset(('execute_tools', 'multi_tool_use.parallel'))
 
 
@@ -65,6 +67,16 @@ def _accepted_result(text: str, state: dict) -> bool:
     return bool(separator and accepted_prefix and body == render_todo_snapshot(state))
 
 
+def _board_result_visible(text: str, state: dict) -> bool:
+    """An accepted task-board receipt renders the checklist it left as its ``plan``."""
+    try:
+        result = json.loads(text) if isinstance(text, str) else None
+    except ValueError:
+        return False
+    return (isinstance(result, dict) and 'error' not in result
+            and result.get('plan') == render_todo_snapshot(state))
+
+
 def _gateway_result_visible(text: str, state: dict) -> bool | None:
     """Read only gateway receipt structure, never arbitrary nested tool data."""
     try:
@@ -85,11 +97,13 @@ def _gateway_result_visible(text: str, state: dict) -> bool | None:
     for row in reversed(rows):
         if not isinstance(row, dict):
             continue
-        if row.get('name') not in _TODO_TOOL_NAMES:
+        name = row.get('name')
+        if name not in _TODO_TOOL_NAMES and name != _BOARD_TOOL_NAME:
             continue
+        visible = _accepted_result if name in _TODO_TOOL_NAMES else _board_result_visible
         if (row.get('status') == 'done' and not row.get('output_truncated')
                 and not row.get('retentionError')
-                and _accepted_result(row.get('output') or '', state)):
+                and visible(row.get('output') or '', state)):
             return True
     return None
 
@@ -149,6 +163,7 @@ def _receipt_visible(message: dict, state: dict, kind: str,
     else:
         body = _message_text(message)
         visible = (_accepted_result(body, state) if kind == 'todo'
+                   else _board_result_visible(body, state) if kind == 'board'
                    else bool(_gateway_result_visible(body, state)))
     if retained is not None:
         retained[id(message)] = (kind, text, visible)
@@ -171,8 +186,8 @@ def _evidence_scan(messages: list[dict], state: dict, *,
                 newest = message
         elif role == 'tool':
             name = open_calls.pop(message.get('tool_call_id'), '')
-            kind = 'todo' if name in _TODO_TOOL_NAMES else (
-                'gateway' if name in _GATEWAY_TOOL_NAMES else '')
+            kind = ('todo' if name in _TODO_TOOL_NAMES else 'board' if name == _BOARD_TOOL_NAME
+                    else 'gateway' if name in _GATEWAY_TOOL_NAMES else '')
             if kind and _receipt_visible(message, state, kind, cached, retained):
                 newest = message
     return newest

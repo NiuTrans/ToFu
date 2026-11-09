@@ -57,6 +57,10 @@ _TEMP_TARGET_TOKENS = (
     # fixed-name sibling copies / generated harnesses written NEXT TO a source
     # but never OVER it — they carry a distinguishing suffix:
     '.nc_copy', '_neuter', 'neutered', '_harness', 'harness.js', '.longpress.',
+    # Test-local project roots built from tmp_path (e.g. a LifecycleManager's
+    # disposable app copy), NOT the repository root — their lib/... children
+    # are scratch files, never the shipped source of the same relative path.
+    "project / '", 'project / "', '(project /',
 )
 
 # Write sinks we recognise, by AST shape.

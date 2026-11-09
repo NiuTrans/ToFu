@@ -21,6 +21,7 @@ import pytest
 import server_manager as sm
 from tofu_db._loopback import bind_ephemeral_loopback
 from tofu_dotenv import MAX_DOTENV_BYTES, load_dotenv_file
+from tests.support.owned_processes import retire_processes_under
 
 
 pytestmark = pytest.mark.unit
@@ -2328,6 +2329,7 @@ def test_real_failure_is_counted_before_orphan_sidecar_lease_wait(
 
     monkeypatch.setattr(manager, '_wait_for_stopped_sidecar_release', _wait)
 
+    failed_at = time.time()
     manager.reconcile()
 
     assert failure_count_at_wait == [1]
@@ -2336,7 +2338,9 @@ def test_real_failure_is_counted_before_orphan_sidecar_lease_wait(
     assert manager._state['failureHistory']
     assert manager._state['storageBlocker']['resumeSource'] \
         == 'automatic-recovery'
-    assert manager._state['nextRetryAt'] > time.time()
+    # The retry is scheduled after the failure. Comparing with the clock after
+    # reconcile instead raced the 2 s first backoff on a loaded host.
+    assert manager._state['nextRetryAt'] > failed_at
 
 
 def test_explicit_failure_budget_reset_preserves_lifetime_diagnostics(
@@ -2466,6 +2470,28 @@ def test_spawn_translates_project_allocator_override_after_env_merge(
     assert child_environment['MALLOC_ARENA_MAX'] == '3'
 
 
+@pytest.fixture
+def no_process_outlives_its_test(tmp_path):
+    """Spec: no process a lifecycle test started outlives the test.
+
+    Managed workers run in their own session, so pytest never reaps them. On
+    2026-11-06 seven workers of the real-worker tests below kept serving their
+    ports for hours (ppid 1, deleted cwd): each test had failed while its
+    worker was still booting, and the teardown killed only the instance-lock
+    holder. Every process these tests start runs with its cwd under
+    ``tmp_path``.
+    """
+    yield
+    leftovers = retire_processes_under(tmp_path)
+    assert leftovers == [], f'processes outlived the test: {leftovers}'
+
+
+def _retire_spawned_workers(manager, project):
+    """Teardown that owns every generation, booted or still booting, by its cwd."""
+    manager.close()
+    retire_processes_under(project)
+
+
 _WORKER = r'''import fcntl, json, os, signal, socket, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 data = os.path.join(os.getcwd(), 'data')
@@ -2508,6 +2534,22 @@ HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()
 '''
 
 
+@pytest.mark.usefixtures('no_process_outlives_its_test')
+def test_a_worker_still_booting_when_its_test_ends_does_not_outlive_it(tmp_path, monkeypatch):
+    """The 2026-11-06 leak: the test ended before its worker took the instance lock."""
+    port = _free_port()
+    project = _project(tmp_path, 'import time\ntime.sleep(3)\n' + _WORKER)
+    monkeypatch.setenv('PORT', str(port))
+    monkeypatch.setenv('TOFU_HEARTBEAT_DIR', str(tmp_path / 'heartbeat'))
+    manager = sm.LifecycleManager(str(project), sys.executable, monitor_interval=0.2)
+    try:
+        assert manager.start(source='slow-boot')['ok'] is True
+        assert not sm.read_lock_status(str(project)).get('running')
+    finally:
+        _retire_spawned_workers(manager, project)
+
+
+@pytest.mark.usefixtures('no_process_outlives_its_test')
 def test_real_worker_start_restart_stop_and_manual_stop_sticks(tmp_path, monkeypatch):
     port = _free_port()
     project = _project(tmp_path, _WORKER)
@@ -2564,16 +2606,11 @@ def test_real_worker_start_restart_stop_and_manual_stop_sticks(tmp_path, monkeyp
         assert manager.status()['observed'] == 'stopped'
         assert not sm.port_accepts(port)
     finally:
-        status = sm.read_lock_status(str(project))
-        if status.get('running'):
-            try:
-                os.kill(int(status['pid']), 9)
-            except OSError:
-                pass
-        manager.close()
+        _retire_spawned_workers(manager, project)
 
 
 @pytest.mark.serial
+@pytest.mark.usefixtures('no_process_outlives_its_test')
 def test_real_sigkill_worker_recovers_with_new_pid_and_measured_rto(
         tmp_path, monkeypatch):
     """A real untrappable death must recover, not merely update mock state."""
@@ -2615,16 +2652,11 @@ def test_real_sigkill_worker_recovers_with_new_pid_and_measured_rto(
         assert current['recentFailureCount'] == 1
         assert 0 < current['lastRecoverySeconds'] <= 20.0
     finally:
-        status = sm.read_lock_status(str(project))
-        if status.get('running'):
-            try:
-                os.kill(int(status['pid']), signal.SIGKILL)
-            except OSError:
-                pass
-        manager.close()
+        _retire_spawned_workers(manager, project)
 
 
 @pytest.mark.serial
+@pytest.mark.usefixtures('no_process_outlives_its_test')
 def test_real_unintended_clean_signal_recovers_with_failure_budget(
         tmp_path, monkeypatch):
     """An external graceful stop lacks intent and cannot bypass crash-looping."""
@@ -2671,18 +2703,13 @@ def test_real_unintended_clean_signal_recovers_with_failure_budget(
         assert current['lastWorkerExitKind'] == 'failure'
         assert current['lastWorkerExitReason'] == 'unintended_signal'
     finally:
-        status = sm.read_lock_status(str(project))
-        if status.get('running'):
-            try:
-                os.kill(int(status['pid']), signal.SIGKILL)
-            except OSError:
-                pass
-        manager.close()
+        _retire_spawned_workers(manager, project)
 
 
 @pytest.mark.serial
 @pytest.mark.skipif(not Path('/proc/self/stat').exists(), reason='Linux exit evidence')
 @pytest.mark.parametrize('retirement', ['sigkill', 'stop'])
+@pytest.mark.usefixtures('no_process_outlives_its_test')
 def test_real_worker_exit_status_survives_the_managers_own_subprocesses(
         tmp_path, monkeypatch, caplog, retirement):
     """Reconcile runs ``ss`` (and preflights spawn children); none may reap
@@ -2728,13 +2755,7 @@ def test_real_worker_exit_status_survives_the_managers_own_subprocesses(
         # Recorded, then reaped: no zombie outlives the retired generation.
         assert not Path(f'/proc/{pid}').exists()
     finally:
-        status = sm.read_lock_status(str(project))
-        if status.get('running'):
-            try:
-                os.kill(int(status['pid']), signal.SIGKILL)
-            except OSError:
-                pass
-        manager.close()
+        _retire_spawned_workers(manager, project)
 
 
 def _shared_checkout_state(project, clock, *, worker, desired='running',

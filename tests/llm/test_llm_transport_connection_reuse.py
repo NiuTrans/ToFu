@@ -134,8 +134,12 @@ def test_idle_pool_is_bounded_for_personal_server():
 
         async def _probe():
             client = get_async_client(None)
-            pool = client._transport._pool
-            return pool._max_connections, pool._max_keepalive_connections
+            key, transport = await client._transport._acquire(None)
+            try:
+                pool = transport._pool
+                return pool._max_connections, pool._max_keepalive_connections
+            finally:
+                await client._transport._release(key)
 
         active, idle = loop.run_until_complete(_probe())
         assert idle == LLM_MAX_KEEPALIVE_CONNECTIONS

@@ -1511,8 +1511,9 @@ def _approve_lifecycle_if_needed(
             print(f'Could not register pending approval: {exc}', file=sys.stderr)
             request_id = ''
         suffix = f' (request {request_id[:8]})' if request_id else ''
-        print(f'Approve the pending {action} action in the Tofu UI{suffix}, '
-              'then re-run this command; or run it from an interactive terminal.',
+        print(f'Approve and execute the pending {action} action in the Tofu UI{suffix}. '
+              'The UI runs the action; use "python serverctl.py status" to check completion. '
+              'Human operators may instead run this command in their own interactive terminal.',
               file=sys.stderr)
     return ok
 

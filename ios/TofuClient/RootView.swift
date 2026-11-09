@@ -27,17 +27,38 @@ struct RootView: View {
     @ObservedObject var model: AppViewModel
 
     var body: some View {
-        switch model.screen {
-        case .list:
-            ProfileListView(model: model)
-        case .addEdit:
-            AddEditProfileView(model: model)
-        case .web(let profile):
-            WebScreenView(
-                profile: profile,
-                session: model.session,
-                onBack: model.backToList
-            )
+        VStack(spacing: 0) {
+            if let pending = model.pendingConnection {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("A connection link is ready to review.").font(.headline)
+                    Text(ServerUrl.displayLabel(pending.baseUrl))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Use link replaces this form, including its unsaved password. Nothing is saved or signed in until you choose Save.")
+                        .font(.caption)
+                    HStack {
+                        Button("Use link", action: model.usePendingConnection)
+                        Button("Keep form", action: model.keepCurrentForm)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color.accentColor.opacity(0.10))
+            }
+            // Pending metadata never changes the form identity. Only explicit
+            // Use link, Add or Edit replaces its local state.
+            switch model.screen {
+            case .list:
+                ProfileListView(model: model)
+            case .addEdit:
+                AddEditProfileView(model: model).id(model.formRevision)
+            case .web(let profile):
+                WebScreenView(
+                    profile: profile,
+                    session: model.session,
+                    onBack: model.backToList
+                )
+            }
         }
     }
 }

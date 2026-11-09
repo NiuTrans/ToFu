@@ -52,6 +52,34 @@ class DiagnosticHttpTest {
         }
     }
 
+    @Test fun every_failure_stage_omits_unlabeled_exception_text_and_keeps_prior_instrumentation() {
+        val log = DiagLog()
+        var forwarded = 0
+        val original = OkHttpClient.Builder().eventListener(object : EventListener() {
+            override fun connectFailed(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?, ioe: IOException) { forwarded++ }
+            override fun requestFailed(call: Call, ioe: IOException) { forwarded++ }
+            override fun responseFailed(call: Call, ioe: IOException) { forwarded++ }
+            override fun callFailed(call: Call, ioe: IOException) { forwarded++ }
+        }).build()
+        val http = DiagnosticHttp.attach(original, log, "HealthHttp")
+        val call = http.newCall(Request.Builder().url("https://host.example/").build())
+        val listener = http.eventListenerFactory.create(call)
+        val error = IOException("fixture-private-value-without-a-key-label")
+        try {
+            listener.connectFailed(call, InetSocketAddress("127.0.0.1", 443), Proxy.NO_PROXY, null, error)
+            listener.requestFailed(call, error)
+            listener.responseFailed(call, error)
+            listener.callFailed(call, error)
+            val entries = log.snapshot()
+            assertEquals(4, forwarded)
+            assertEquals(4, entries.size)
+            for (entry in entries) {
+                assertTrue(entry.message.contains("failed=IOException"))
+                assertFalse(entry.message.contains("fixture-private-value"))
+            }
+        } finally { http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
+    }
+
     @Test fun thrown_transport_failure_keeps_exception_type_and_masks_credential_text() {
         val log = DiagLog()
         val http = DiagnosticHttp.attach(OkHttpClient.Builder().addInterceptor { throw IOException("token=private-exception-value") }.build(), log, "AuthHttp")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-agent"
-version = "0.19.0"
+version = "0.19.1"
 description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -68,7 +68,7 @@ tofu-agent = "tofu_agent.cli:main"
 # deliberately separate so embedding Tofu never implies PostgreSQL or a
 # checked-out web application.
 full = [
-    "tofu-search>=0.12.25",
+    "tofu-search>=0.12.28",
     "trafilatura>=2.3.1",
     "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
@@ -114,7 +114,7 @@ app = [
     # Internal exports carry installed skills whose bundled scripts run with the
     # application interpreter; codelab-ssh-connect imports paramiko (SSH/SFTP).
     "paramiko>=3.4",
-    "tofu-search>=0.12.25",
+    "tofu-search>=0.12.28",
     "trafilatura>=2.3.1",
     "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
@@ -179,7 +179,7 @@ test = [
     "networkx>=3.0",
     # The repository suite exercises document/media/search parsing too, so it
     # needs the `full` surface (duplicated — extras cannot compose).
-    "tofu-search>=0.12.25",
+    "tofu-search>=0.12.28",
     "trafilatura>=2.3.1",
     "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
@@ -218,7 +218,7 @@ dev = [
     "ruff",
     "pyright>=1.1.403",
     # Same `full` duplication as `test`.
-    "tofu-search>=0.12.25",
+    "tofu-search>=0.12.28",
     "trafilatura>=2.3.1",
     "Pillow>=13.0.0",
     "python-pptx>=0.6.21",
@@ -290,7 +290,7 @@ exclude = ["tests*", "benchmarks*", "debug*", "clients*", "desktop*",
 [tool.setuptools]
 # These top-level modules are runtime dependencies of the public package;
 # declaring them prevents editable installs from hiding a broken wheel.
-py-modules = ["runtime_guards", "runtime_path_policy", "tofu_dotenv"]
+py-modules = ["chromium_env", "runtime_guards", "runtime_path_policy", "tofu_dotenv"]
 # The repository has VCS manifest plugins installed in some build environments.
 # Never let their broad source list turn excluded application packages into
 # accidental package data; every non-Python runtime asset is declared below.
@@ -301,7 +301,7 @@ include-package-data = false
 "lib.tools.javascript" = ["bootstrap.js", "assets/*.wasm", "assets/*.json", "assets/*.LICENSE", "assets/NOTICE"]
 "tofu_agent" = ["setup_ui/*.html", "setup_ui/*.css", "setup_ui/*.js"]
 "lib.model_info" = ["data/*.json", "model_inference_defaults.json", "media_model_facts.json"]
-"lib.motion_video" = ["guide/*.md", "guide/*.html"]
+"lib.motion_video" = ["guide/*.md", "guide/*.html", "vendor/*.js"]
 "lib.slides" = ["guide/*.md"]
 "lib.design_sys" = ["bibles/*.md"]
 

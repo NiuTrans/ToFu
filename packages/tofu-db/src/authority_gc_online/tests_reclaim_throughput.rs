@@ -54,21 +54,25 @@ fn release_authority(held: &HeldAuthority) -> bool {
 }
 
 /// The collector hold seam: the first attempt after the authority was taken
-/// finds it held; the next one releases it first, so that attempt succeeds
-/// only because the run retried.
-fn release_on_the_second_attempt(held: &HeldAuthority) -> super::tests_short_holds::ResetHoldAttemptHook {
+/// finds it held and waits for it; the holder lets go on its own a moment
+/// later, so that attempt succeeds only because it waited.
+fn release_while_the_first_attempt_waits(held: &HeldAuthority) -> super::tests_short_holds::ResetHoldAttemptHook {
     let held = Arc::clone(held);
     before_every_hold_attempt(move |_, _| {
-        let release = {
+        let holder = {
             let mut state = held.lock().unwrap();
             if state.holder.is_none() {
                 return;
             }
             state.attempts_seen += 1;
-            state.attempts_seen > 1
+            state.holder.take()
         };
-        if release {
-            release_authority(&held);
+        if let Some((release, thread)) = holder {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                let _ = release.send(());
+                thread.join().unwrap();
+            });
         }
     })
 }
@@ -119,11 +123,11 @@ fn refusing(database: Arc<Mutex<AuthorityDatabase>>, refusals: &Arc<AtomicUsize>
     Arc::new(Mutex::new(RefusingHolds { authority, refusals: Arc::clone(refusals) }))
 }
 
-/// A contended authority postpones the next orphan removal instead of ending
+/// A contended authority makes the next orphan removal wait instead of ending
 /// the pass: every confirmed file goes in the pass that confirmed it. A
 /// foreground thread takes the authority while the second observation lists
-/// the directory and keeps it across the first removal attempt. Before the
-/// change the pass ended at that attempt; on the live volume a pass removed
+/// the directory and keeps it while the first removal attempt waits. Before
+/// the change the pass ended at that attempt; on the live volume a pass removed
 /// a few dozen of the confirmed files and the next pass came an hour later.
 #[test]
 fn contended_orphan_removals_retry_until_every_confirmed_file_goes() {
@@ -140,12 +144,12 @@ fn contended_orphan_removals_retry_until_every_confirmed_file_goes() {
         let held = Arc::clone(&held);
         *vfs.before_segment_listing.lock().unwrap() = Some(Box::new(move || hold_authority(&database, &held)));
     }
-    let reset = release_on_the_second_attempt(&held);
+    let reset = release_while_the_first_attempt_waits(&held);
     run_epoch_with_aborted_mark(&mut collector, &database, &vfs);
     drop(reset);
     let still_held = release_authority(&held);
 
-    assert!(!still_held, "the pass retried the contended removal");
+    assert!(!still_held, "the pass waited for the contended removal");
     assert_eq!(segment_files(&vfs), live_files, "every confirmed orphan goes in the contended pass");
     assert_eq!(metrics(&collector).total_orphan_segments_removed, 6);
     assert_live_value(&database, &live_key(), b"live-value");
@@ -209,8 +213,8 @@ fn a_failed_epoch_is_reported_until_an_epoch_completes() {
 /// A consolidation publish that finds the authority held waits for it like
 /// every other collector hold, so the epoch neither fails nor leaves the
 /// replacement it built behind. A foreground thread takes the authority at
-/// the replacement's directory barrier and keeps it across the first publish
-/// attempt. Before the change the epoch failed with "online GC consolidation
+/// the replacement's directory barrier and keeps it while the publish attempt
+/// waits. Before the change the epoch failed with "online GC consolidation
 /// hold contended" and the built segment stayed as an unreferenced file.
 #[test]
 fn a_contended_consolidation_publish_neither_fails_the_epoch_nor_leaks_its_segment() {
@@ -219,7 +223,7 @@ fn a_contended_consolidation_publish_neither_fails_the_epoch_nor_leaks_its_segme
     let blocks = database.lock().unwrap().block_store_shared();
     assert_eq!(segments_holding(&blocks, &packed).len(), 3);
     let held = HeldAuthority::default();
-    let reset = release_on_the_second_attempt(&held);
+    let reset = release_while_the_first_attempt_waits(&held);
     let mut collector =
         OnlineGarbageCollector::with_min_epoch_interval(test_budget(), Duration::from_millis(1));
     collector.set_catalog_pressure_floor_for_test(1);
@@ -295,4 +299,96 @@ fn one_epoch_deletes_every_confirmed_loose_victim_beyond_the_victim_byte_cap() {
         })
         .count();
     assert_eq!(survivors, 0, "confirmed victims outlived the epoch that confirmed them");
+}
+
+fn orphan_victims(database: &Arc<Mutex<AuthorityDatabase>>, count: u8) -> Vec<(BlockId, Vec<u8>)> {
+    let guard = database.lock().unwrap();
+    (0..count)
+        .map(|index| {
+            let payload = vec![index; 64];
+            (guard.write_orphan_block_for_test(&payload).unwrap(), payload)
+        })
+        .collect()
+}
+
+fn unlinked(authority: &AuthorityDatabase, victims: &[(BlockId, Vec<u8>)]) -> Vec<usize> {
+    victims
+        .iter()
+        .enumerate()
+        .filter(|(_, (block_id, _))| {
+            authority.read_block_for_test(*block_id).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// A loose-victim deletion hold refused with `WouldBlock` (a publication owns
+/// the physical lane) is retried after the run's backoff, as orphan segment
+/// removals and redundant copies already were, instead of ending the epoch's
+/// deletion. Live on 2026-11-08 every main-authority epoch since 11-07 ended
+/// with `reclaimed_blocks=0` while the scan's copy removals succeeded: history
+/// compaction, rotation and pack adoption own the lane most of the time.
+#[test]
+fn refused_loose_victim_deletions_retry_until_every_confirmed_victim_goes() {
+    let (_vfs, database) = authority();
+    let victims = orphan_victims(&database, 8);
+    let refusals = Arc::new(AtomicUsize::new(0));
+    let database = refusing(database, &refusals);
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    let stop = AtomicBool::new(false);
+    assert_eq!(collector.run_epoch(&database, &stop).unwrap(), OnlineGarbageCollectionOutcome::EpochComplete);
+    refusals.store(3, Ordering::SeqCst);
+    assert_eq!(collector.run_epoch(&database, &stop).unwrap(), OnlineGarbageCollectionOutcome::EpochComplete);
+    assert_eq!(refusals.load(Ordering::SeqCst), 0, "every refusal was met by a retry");
+    assert_eq!(unlinked(&database.lock().unwrap().authority, &victims).len(), victims.len());
+    assert_eq!(metrics(&collector).total_reclaimed_blocks, victims.len() as u64);
+}
+
+/// The scan unlinks each shard's confirmed victims before it lists the next
+/// shard, so no victim list and no count (`maximum_blocks_per_round` sizes the
+/// offline round) bounds what one epoch reclaims. Live, an epoch admitted at
+/// most 65,536 of ~30M garbage loose files.
+#[test]
+fn one_epoch_deletes_every_confirmed_loose_victim_beyond_the_offline_round_count() {
+    let (_vfs, database) = authority();
+    let victims = orphan_victims(&database, 8);
+    let budget = AuthorityGarbageCollectionBudget { maximum_blocks_per_round: 2, ..test_budget() };
+    let mut collector = OnlineGarbageCollector::new(budget);
+    run_epoch(&mut collector, &database);
+    run_epoch(&mut collector, &database);
+    assert_eq!(unlinked(&database.lock().unwrap(), &victims).len(), victims.len());
+}
+
+/// A scan that unlinked victims and then stopped leaves the next epoch to
+/// confirm from the older suspects, observed before those unlinks: a victim
+/// it unlinked and that is written again is a fresh observation and never
+/// confirms from them (rule S10).
+#[test]
+fn victims_a_stopped_scan_unlinked_never_confirm_from_the_older_suspects() {
+    let (_vfs, database) = authority();
+    let victims = orphan_victims(&database, 4);
+    let mut collector = OnlineGarbageCollector::with_min_epoch_interval(test_budget(), Duration::from_millis(1));
+    run_epoch(&mut collector, &database);
+    let stop = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let reset = {
+        let (stop, attempts) = (Arc::clone(&stop), Arc::clone(&attempts));
+        before_every_hold_attempt(move |_, _| {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                stop.store(true, Ordering::Release);
+            }
+        })
+    };
+    let stopped = collector.run_epoch(&database, &stop).unwrap_err();
+    drop(reset);
+    assert!(stopped.to_string().contains("online GC epoch stopped"), "{stopped}");
+    let first = unlinked(&database.lock().unwrap(), &victims);
+    assert_eq!(first.len(), 1, "the scan stops after its first unlink");
+    let rewritten = first[0];
+    database.lock().unwrap().write_orphan_block_for_test(&victims[rewritten].1).unwrap();
+    run_epoch(&mut collector, &database);
+    let guard = database.lock().unwrap();
+    assert!(guard.read_block_for_test(victims[rewritten].0).is_ok(),
+        "a rewritten victim confirmed from suspects observed before its unlink");
+    assert_eq!(unlinked(&guard, &victims).len(), victims.len() - 1);
 }

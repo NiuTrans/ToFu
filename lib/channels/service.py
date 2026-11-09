@@ -25,6 +25,9 @@ from lib.channels.model import (
     session_owns_status,
 )
 from lib.channels.store import ChannelStore, now_ms
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 CHANNEL = 'dx'
 COMMAND_CHAT_TITLE = 'Tofu Router'
@@ -80,8 +83,9 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
     The supervisor confirms the identity of the login MIS before a session
     starts (``starting``/``authorizing``); a MIS other than the bound
     identity's clears that identity and the command chat of the old account,
-    and ingress of the new one starts now. A robot secret is verified with a
-    token request (``robot_probe`` in tests) before it is stored.
+    and ingress of the new one starts now. Either change clears the robot's
+    binding (C6). A robot secret is verified with a token request
+    (``robot_probe`` in tests) before it is stored.
     """
     from lib.channels.dx.login import normalize_mis
     from lib.channels.dx.robot import robot_update
@@ -116,7 +120,7 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
                 # Another 大象 account: the old identity and its command chat
                 # group do not carry over, and ingress starts afresh.
                 switched = True
-                account.update(identity=None, commandChat=None, commandChatCreation=None,
+                account.update(identity=None, commandChat=None, commandChatCreation=None, robotBinding=None,
                                frontierAtMs=now_ms() if account.get('enabled') else None)
         if enabled is True:
             keep_status = session_owns_status(account) and not switched
@@ -133,6 +137,9 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
         elif switched and account.get('enabled'):
             account['status'] = starting()
         if command_chat is not _UNSET:
+            if command_chat != account.get('commandChat'):
+                # Another chat: the robot posts there only once it is bound anew (C6).
+                account['robotBinding'] = None
             account['commandChat'] = command_chat
         if robot is not _UNSET:
             account['robot'] = robot
@@ -153,11 +160,16 @@ def _ensure_thread(store: ChannelStore, thread: ThreadKey, title: str = '') -> N
 
 
 def create_command_chat(owner: int, *, store: ChannelStore | None = None,
-                        group_creator=None) -> dict[str, Any]:
-    """Create the single-member ``Tofu Router`` group on explicit owner request.
+                        group_creator=None, robot_factory=None) -> dict[str, Any]:
+    """Create the ``Tofu Router`` group on explicit owner request (C6).
 
-    Idempotent per account: an existing command chat is returned unchanged; a
-    creation claim stops a concurrent request from creating a second group.
+    With a notification robot the robot creates it with the owner as 群主,
+    so the robot is in the group from the start. A robot that creates nothing
+    leaves it to the owner's session, with the refusal recorded on the robot
+    and noticed in the new group; a creation of unknown outcome creates no
+    second group. Idempotent per account: an existing command chat is
+    returned unchanged; a creation claim stops a concurrent request from
+    creating a second group.
     """
     store = _store(owner, store)
     account = store.account(CHANNEL) or {}
@@ -179,9 +191,12 @@ def create_command_chat(owner: int, *, store: ChannelStore | None = None,
     if group_creator is None:
         from lib.channels.dx.adapter import create_command_group as group_creator
     from lib.channels.dx.login import account_login_mis
+    from lib.channels.dx.robot import record_robot_error, robot_notice
     try:
-        gid = group_creator(store.owner, name=COMMAND_CHAT_TITLE, member_uid=identity['uid'],
-                            mis=account_login_mis(account))
+        gid, refusal = _robot_created_group(store, account, identity['uid'], robot_factory)
+        if gid is None:
+            gid = group_creator(store.owner, name=COMMAND_CHAT_TITLE, member_uid=identity['uid'],
+                                mis=account_login_mis(account))
     except BaseException:
         store.update_account(CHANNEL, lambda value: {**value, 'commandChatCreation': None})
         raise
@@ -189,7 +204,38 @@ def create_command_chat(owner: int, *, store: ChannelStore | None = None,
     store.update_account(CHANNEL, lambda value: {**value, 'commandChat': str(thread),
                                                  'commandChatCreation': {'state': 'created', 'gid': gid}})
     _ensure_thread(store, thread, COMMAND_CHAT_TITLE)
+    if refusal is not None and record_robot_error(store, refusal):
+        robot_notice(store, thread, refusal)
     return account_view(store.owner, store=store)
+
+
+def _robot_created_group(store: ChannelStore, account: dict[str, Any], owner_uid: str,
+                         robot_factory) -> tuple[str | None, ChannelError | None]:
+    """``(gid, None)`` when the account's robot created the group; ``(None, refusal)`` when it created nothing.
+
+    ``(None, None)`` without a robot. An unknown outcome may have created a
+    group, so it is recorded and refused instead of creating another.
+    """
+    from lib.channels.dx.robot import (
+        DxRobot, RobotDeferred, RobotOutcomeUnknown, RobotRefused, effective_robot, record_robot_error,
+        robot_secret,
+    )
+    config = effective_robot(account)
+    if config is None:
+        return None, None
+    robot = (robot_factory or DxRobot)(str(config['clientId']), robot_secret(config))
+    try:
+        gid = robot.create_group(COMMAND_CHAT_TITLE, owner_uid=owner_uid)
+    except (RobotRefused, RobotDeferred) as error:
+        logger.warning('[Channels] dx robot created no command chat: %s; the owner creates it', error.code)
+        return None, error
+    except RobotOutcomeUnknown as error:
+        record_robot_error(store, error)
+        raise ChannelError('group_create_unknown', f'The robot may have created a {COMMAND_CHAT_TITLE} group '
+                                                   f'({error}); check 大象 before creating another') from error
+    if config.get('error'):
+        record_robot_error(store, None)
+    return gid, None
 
 
 def thread_view(record: dict[str, Any], account: dict[str, Any] | None) -> dict[str, Any]:

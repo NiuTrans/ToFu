@@ -116,7 +116,12 @@ section 7 of `tests/tasks_pkg/test_run_command_interrupt.py` and
 task admission depends on) without a total deadline: one fixed stall window,
 `lib/git_runtime.GIT_STALL_SECONDS`, renews whenever any thread of its process
 tree executes, and retirement reuses `process_group`. Never add a wall-clock
-refusal there.
+refusal there. `run_activity_supervised(input=...)` supplies a batched check's
+stdin from an anonymous file, so a child that reads late never blocks the
+waiting thread. `ActivitySupervisedExchange` applies the same window to one
+long-lived child answering request after request (`check-ignore --stdin`
+during discovery): the window runs only while an answer is awaited, and Stop,
+a stall or close retires its group.
 Verify `test_activity_supervised_process.py` and
 `tests/storage/test_integration_snapshot_liveness.py`.
 
@@ -140,10 +145,10 @@ isolation and accepts `atomic=true`. Both group one undo transition per physical
 file; neither promises cross-file rollback after later I/O failures. Read
 `docs/PROJECT_FILE_UNDO.md` for the preflight and applied-failure contract.
 
-`_finalize_insertion` owns insert echo checks shared by local and desktop
-writers. See `docs/modules/tools_execution.md` for the content-preservation
-boundary; verify `test_insert_structural_overlap.py` with the unified-edit,
-atomic-preflight and error-kind tests before changing it.
+`edit_file` only replaces (owner decision 2026-11-06, "Replace-only edit_file"
+in `docs/modules/tools_execution.md`); never reintroduce an insert operation or
+an echo/newline guard. Verify the unified-edit, atomic-preflight and error-kind
+tests.
 
 `git_command_scope.py` is the single Git target resolver for approval and the
 Git guard, including shell cwd control, prospective worktrees and Git metadata
@@ -193,14 +198,18 @@ under `<git-common-dir>/tofu-radar/` and turns them into notify-only advice and
 notices ("Integration radar" in `docs/modules/conversations_project_brain.md`).
 Keep the ordinary write path free of Git processes and whole-tree walks: Git runs
 only for a candidate overlap, a first touch or a landing. It never waits, locks or
-refuses. `landing_verification.py` verifies every merged tree: only the test files
-the merge can affect run (recorded runs decide), a record at the current tip
-answers its outcome without rerunning, and only a reproduced regression may
-refuse. `impact_recorder.py` (pytest plugin, `sys.monitoring` plus an audit
+refuses. `landing_verification.py` verifies merged trees for the CI candidate
+check and linear-checkpoint gate attribution; `git_land` runs no tests (owner
+decision 2026-11-08). Only the test files the merge can affect run (recorded
+runs decide), a record at the current tip answers its outcome without
+rerunning, and only a reproduced regression counts as `regressed`. `impact_recorder.py` (pytest plugin, `sys.monitoring` plus an audit
 hook) and `impact_selection.py` own the observations and selection policy;
 `lib/storage_authority_sql/impact_cache.py` owns their reconstructible cache
-next to the warm merge checkout, keyed by the project interpreter's
-environment. No records means the static selector answers, and an unrecorded or
+next to the warm merge checkout, keyed by the project interpreter, a canonical
+test environment (never the launching conversation's variables) and the
+recording semantics only — selection/orchestration edits must not invalidate
+evidence. Conftest dependencies are unit-level, but a helper reached from
+import-time setup is still an input to every test in scope. No records means the static selector answers, and an unrecorded or
 partially executed file is never trusted. `lanes.py` owns a branch plus a
 recycled local checkout per unit of work, its saved uncommitted state
 (`refs/tofu/lanes/<branch>`, written during settlement by
@@ -228,6 +237,17 @@ whose receipt asks for action) and runs only when due: start/error recovery, a c
 per-tick history scan or a per-row reread; a new receipt state that needs action changes
 both authorities' filter. Decision "Delivery resume demand" in
 `docs/modules/project_integration.md`; verify `test_delivery_resume_demand.py`.
+The worker loop only dispatches: rows run on per-project receiver lanes
+(`_queue_on_project_lanes`), one at a time per canonical project root. Never run row
+work on the loop thread or let one project's row wait for another project's lane; never
+add a lane cap, capture size limit or deadline. A settled conflict is rechecked at its
+task-delta paths (`task_delta_delivery._canonical_path_entries`) before any whole-checkout
+capture, and only once an input `_hold_observation` sees has changed: never move that
+gate under the claims lease, and never let a lane's own lease release wake the worker.
+Decisions "Receiver lanes" in `docs/modules/project_integration.md`, "A settled
+conflict is rechecked at its own paths" and "A held conflict is rechecked when an input
+changes" in `docs/CONTINUOUS_DELIVERY.md`; verify `test_delivery_project_lanes.py`,
+`test_continuous_delivery.py` and `test_delivery_integrity.py`.
 
 `managed_repository.py` prepares a plain folder or empty repository for isolated workers
 so people never run Git: one baseline commit, a content policy in `.git/tofu-managed.json`
@@ -235,8 +255,23 @@ rendered into `.git/info/exclude`, and a create-only default `AGENTS.md`
 (`managed_repository_guidance.py`). Repositories with their own history are never changed.
 Bulky data is shared through links in worker checkouts and never enters a snapshot. The
 decision record is "Worker workspace preflight" in `docs/PROJECT_COORDINATION.md`; verify
-`test_managed_repository.py`, `test_worker_workspace_refusal.py` and the plain-folder
-file-lifecycle and reclamation tests.
+`test_managed_repository.py`, `test_managed_repository_large_folders.py`,
+`test_worker_workspace_refusal.py` and the plain-folder file-lifecycle and reclamation tests.
+
+`managed_repository_discovery.py` owns the pruned, resumable walk for folders whose root
+holds no project manifest (`PROJECT_MANIFESTS`), or whose owner chose to share nested
+projects: it never enters nested repositories, environments, nested projects or paths the
+folder's own ignore files hide, and journals each listing outside the folder
+(`integration_control._control_root()/preparations/`). Preparation supplies the skip
+predicate (`_ignore_rules`: one supervised `check-ignore --stdin` exchange plus the
+runtime patterns), progress and the journal; discovery stays standard-library only. A
+folder with other projects but no root manifest is refused as `ambiguous_project_root`
+until the owner's answer is supplied (`nested_projects=shared|versioned`, recorded as
+`nestedProjects`), never guessed. `shared_folders=[...]` (recorded as `sharedFolders`)
+additionally names whole read-only run/reference folders to share, the answer for a
+project whose `work/` holds distributions, wheels, bundles and reports rather than
+nested projects. `preview_preparation` / `scripts/prepare_project_folder.py` report a
+folder read-only (scratch repository and journal only) and apply those answers.
 
 `glob_match.py` is the one dialect for the `search_files` include and the
 `find_files` pattern on every backend: the index prefilter and Python walkers
@@ -263,6 +298,20 @@ rewriting; never turn a cache-size limit into a candidate/work limit. See
 `docs/INDEX_FASTPATH.md` and `test_content_shadow.py`.
 
 ## Verification
+
+`verification.py` is the default incremental development front door (`make test`);
+explicit and changed-snapshot scopes share the selector and recorded dependencies. It shares lane
+snapshot capture, landing execution and evidence storage. `verification_index.py`
+owns immutable source-index preparation, with the selector retaining import
+policy. `verification_dependencies.py` expands cold selection through Python
+imports; `scripts/test_execution.py` owns runtime arguments separately from
+selection. `landing_verification check` is the clean CI candidate entrypoint.
+Read "Incremental verification" in `docs/modules/project_integration.md`;
+verify `test_verification_defaults.py`, `test_verification_engine.py`, `test_verification_index.py`, completion,
+cache, landing and lane tests. Measurements use `scripts/benchmark_verification.py`.
+CI scope, cold dependency closure and execution-owner migration have focused
+specifications in `test_verification_ci.py`, `test_verification_dependencies.py`
+and `tests/meta/test_verification_policy.py`.
 
 `receipts.py` owns optional device write envelopes defined by
 `contracts/project_file_receipts_v1.schema.json`; verify with

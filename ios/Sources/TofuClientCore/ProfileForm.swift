@@ -36,9 +36,7 @@ public enum ProfileForm {
         if u.isEmpty {
             errors["baseUrl"] = "Server URL is required"
         } else if ServerUrl.parse(u) == nil {
-            errors["baseUrl"] = "Must be a full http(s):// URL"
-        } else if !u.hasPrefix("http://") && !u.hasPrefix("https://") {
-            errors["baseUrl"] = "Must start with http:// or https://"
+            errors["baseUrl"] = "Use a full http(s):// URL without username, password, tokens or secret parameters"
         }
 
         if authType == .codeServerPassword && secret.isEmpty && !secretAlreadyStored {
@@ -59,7 +57,8 @@ public enum ProfileForm {
         lastUsedAt: Int64,
         projectPath: String? = nil
     ) -> Profile {
-        let u = baseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Invalid input cannot silently become a saved credential-bearing URL.
+        let u = ServerUrl.parse(baseUrl)?.raw ?? ""
         let pp = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines)
         return Profile(
             id: id,

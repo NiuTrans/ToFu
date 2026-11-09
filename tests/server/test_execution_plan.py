@@ -61,6 +61,34 @@ def test_source_change_while_reading_refuses_the_plan(tmp_path, monkeypatch):
         prepare_plan(project, {}, python='/env/python')
 
 
+def test_preparation_checks_storage_ownership_before_a_service_can_be_stopped(tmp_path):
+    from serverctl_pkg.execution_plan import prepare_plan
+    project = _source(tmp_path)
+    (project / 'lib/task.py').write_text("import sqlite3\nconn = sqlite3.connect('application.db')\n")
+    with pytest.raises(RuntimeError, match='storage cutover refused'):
+        prepare_plan(project, {}, python='/env/python')
+    assert not (project / 'application.db').exists()
+
+
+@pytest.mark.parametrize('field, source_only', [
+    ('sourceSha256', True), ('sourceFiles', True),
+    ('python', False), ('configurationSha256', False),
+    ('environmentFingerprint', False), ('format', False),
+])
+def test_plan_admission_distinguishes_code_from_launch_policy(field, source_only):
+    from serverctl_pkg.execution_plan import ExecutionSourceChanged, require_plan_match
+    expected = {'format': 'tofu.execution-plan/v1', 'python': '/env/python',
+        'sourceSha256': 'first', 'sourceFiles': 3, 'environmentFingerprint': 'installed',
+        'configurationSha256': 'configuration'}
+    require_plan_match(expected, dict(expected), stage='before boot')
+    actual = {**expected, field: 4 if field == 'sourceFiles' else 'changed'}
+    with pytest.raises(RuntimeError) as failure:
+        require_plan_match(expected, actual, stage='before boot')
+    assert isinstance(failure.value, ExecutionSourceChanged) is source_only
+    assert field in str(failure.value)
+    assert 'configuration' not in str(failure.value) or field == 'configurationSha256'
+
+
 def test_unreadable_package_cannot_disappear_from_prepared_identity(tmp_path, monkeypatch):
     import os
     from serverctl_pkg.execution_plan import prepare_plan

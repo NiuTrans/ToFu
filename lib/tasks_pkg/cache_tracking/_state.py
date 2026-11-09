@@ -430,7 +430,7 @@ def get_prev_turn_cache_read(conv_id: str, *, user_id: int) -> int:
         return read_last_turn_cache_read(conv_id, user_id=user_id)
     except Exception as e:
         logger.debug('[CacheTrack] durable prev-turn read fallback '
-                     'unavailable conv=%s: %s', conv_id[:8], e)
+                     'unavailable conv=%s: %s', conv_id, e)
         return 0
 
 
@@ -449,7 +449,7 @@ def cleanup_cache_state(conv_id: str, *, user_id: int) -> None:
     _flush_released_roi(pending)
     if keys:
         logger.debug('[CacheTrack] Cleaned up %d state(s) for conv=%s',
-                     len(keys), conv_id[:8])
+                     len(keys), conv_id)
 
 
 def cleanup_stale_cache_states(max_age_s: float = 3600) -> int:

@@ -12,7 +12,7 @@ logger=get_logger(__name__)
 
 def finish_committed_task(task,*,messages,cfg,project_enabled,project_path,
                           commit_round=None,consolidate_profile=None):
-    tid=(task.get('id') or '')[:8]
+    tid=(task.get('id') or '')
     if commit_round is None:
         from lib.tasks_pkg.commit_round._commit import _spawn_async_commit_round
         commit_round=_spawn_async_commit_round

@@ -22,7 +22,7 @@ from typing import Any
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.agent_core.events import EventType, build_event
 from lib.llm.tool_call_ids import portable_tool_call_id
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.logging_pkg.log_record_values import text_value
 from lib.model_info import model_supports_vision
 from lib.tasks_pkg.compaction.api import (
@@ -236,23 +236,28 @@ def _reject_by_dispatch_contract(item: tuple, refusal: ToolContractError,
 
 
 def _admit_dispatch_tool_calls(task: dict[str, Any], parsed_tcs: list,
-                               project_path: str | None, tid: str) -> None:
+                               project_path: str | None, tid: str) -> Any:
     """Admit every still-executable call of a project dispatch before any runs.
 
-    One authority refusal therefore fails the turn ahead of all sibling
-    effects. A call already rejected at parse/contract validation never
-    executes: its rejection, with the next_action, is its result. A file-scope
-    argument-shape refusal becomes that call's contract rejection in place.
+    One live validation admits the whole batch: every call decides from it,
+    and it is returned for the batch's executors, whose gates share it. One
+    authority refusal therefore fails the turn ahead of all sibling effects.
+    A call already rejected at parse/contract validation never executes: its
+    rejection, with the next_action, is its result. A file-scope argument-shape
+    refusal becomes that call's contract rejection in place.
     """
-    from lib.project_dispatch.scope import admit_tool
+    from lib.project_dispatch.scope import admit_call
+    admission = None
     for admission_index, item in enumerate(parsed_tcs):
         if item[6]:
             continue
         try:
-            admit_tool(task, item[1], item[3], project_path=project_path)
+            _, admission = admit_call(task, item[1], item[3], project_path=project_path,
+                                      admission=admission)
         except ToolContractError as refusal:
             parsed_tcs[admission_index] = _reject_by_dispatch_contract(
                 item, refusal, tid)
+    return admission
 
 
 def _expire_collected_tool(task: dict[str, Any], expiry: _ToolCollectionExpiry,
@@ -445,13 +450,13 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
             logger.warning(
                 '[Task %s] conv=%s Recovered completed tool=%s tc_id=%s '
                 'round=%d after %s; handler was not repeated',
-                task['id'][:8], task.get('convId', ''), name, call_id,
+                task_log_tag(task['id']), task.get('convId', ''), name, call_id,
                 round_num, reason)
         except Exception as error:
             logger.warning(
                 '[Task %s] conv=%s Tool=%s tc_id=%s completed with error '
                 'at round=%d after %s: %s',
-                task['id'][:8], task.get('convId', ''), name, call_id,
+                task_log_tag(task['id']), task.get('convId', ''), name, call_id,
                 round_num, reason, text_value(error))
             from lib.tasks_pkg.executor._effects import tool_exception_result
             item = items_by_id.get(call_id)
@@ -1499,7 +1504,7 @@ def _apply_round_aggregate_budget(
                     logger.info(
                         '[L0] tool_compacted emitted: tc_id=%s tool=%s '
                         'round=%s %dch→%dch (%+.0f%% chars)',
-                        tool_call_id[:12] if tool_call_id else '?',
+                        tool_call_id if tool_call_id else '?',
                         tool_name or '?', entry_round_num,
                         original_chars, compacted_chars,
                         (compacted_chars / original_chars - 1) * 100
@@ -1509,7 +1514,7 @@ def _apply_round_aggregate_budget(
                     logger.warning(
                         '[L0] tool_compacted SSE emit failed: tc_id=%s '
                         'tool=%s round=%s err=%s',
-                        tool_call_id[:12] if tool_call_id else '?',
+                        tool_call_id if tool_call_id else '?',
                         tool_name or '?', entry_round_num, event_error,
                     )
         settled = (settled_results if settled_results is not None
@@ -2612,7 +2617,7 @@ def _admit_on_worker(
         # renders the static "interrupted" affordance at once.
         if task.get('aborted'):
             logger.info('[Task %s] Skipping tool %s (tc_id=%s) — task aborted',
-                        tid, fn_name, tc_id[:8])
+                        tid, fn_name, tc_id)
             settle_current(
                 task, fn_name, tc_id, fn_args, rn, round_entry,
                 'Task aborted by user.', idempotent_tools=idempotent_tools,
@@ -2773,7 +2778,7 @@ def _run_tool_pipeline(
     all_search_results_text, round_num, model, *, internal_result_sink,
     publish_direct_gateway_siblings, sibling_turn,
 ) -> bool:
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     # One dispatch invocation owns one settlement barrier.  In particular, a
     # nested execute_tools pipeline must not share or retain the outer call's
     # complete results through the task dict.
@@ -2869,8 +2874,9 @@ def _run_tool_pipeline(
     _used_call_ids = set(_historical_used_call_ids)
 
     from lib.project_dispatch.admission import is_dispatch_task
+    dispatch_admission = None
     if is_dispatch_task(task) and parsed_tcs:
-        _admit_dispatch_tool_calls(task, parsed_tcs, project_path, tid)
+        dispatch_admission = _admit_dispatch_tool_calls(task, parsed_tcs, project_path, tid)
 
     admitted = []
     claimed_model_call_ids: set[str] = set()
@@ -2966,8 +2972,10 @@ def _run_tool_pipeline(
         timeout_setting=_bounded_tool_env_int,
         clock=time,
         submit=_submit_tool_future,
-        execute_one=_execute_tool_one,
-        execute_bounded=_execute_tool_one_in_pool,
+        execute_one=(_execute_tool_one if dispatch_admission is None else
+                     partial(_execute_tool_one, dispatch_admission=dispatch_admission)),
+        execute_bounded=(_execute_tool_one_in_pool if dispatch_admission is None else
+                         partial(_execute_tool_one_in_pool, dispatch_admission=dispatch_admission)),
         settle_content=_dispatch_settle_content,
         canonical_content=_canonical_settle_source,
         collect=_completed_tools_until_cancel,

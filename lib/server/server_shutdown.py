@@ -236,6 +236,44 @@ async def wait_for_shutdown_trigger(
         log.exception('[Server] Failed to close push connections before drain')
 
 
+# Whole-sequence budget for the registered owners' bounded joins.
+PROCESS_BACKGROUND_STOP_SECONDS = 10.0
+
+
+async def _stop_process_background_services(app, log: logging.Logger) -> None:
+    """Join process/plugin-owned workers; an owner still live keeps storage open.
+
+    A timeout raises naming the owner still stopping. A bare ``TimeoutError``
+    gave the 2026-11-06 14:10 restart an empty cause ("execution shutdown
+    failed: TimeoutError: ").
+    """
+    from lib.server.server_background_services import (
+        STOPPING_OWNER_KEY, stop_registered_background_services,
+    )
+    service_stop_started = time.monotonic()
+    try:
+        await asyncio.to_thread(
+            _call_within_wall_deadline, PROCESS_BACKGROUND_STOP_SECONDS,
+            stop_registered_background_services, app, timeout=2.0)
+        if app.extensions.get('tofu_registered_background_services'):
+            raise RuntimeError('Process background services have not quiesced')
+    except TimeoutError as timeout:
+        owner = app.extensions.get(STOPPING_OWNER_KEY) or 'an unnamed owner'
+        cause = (f'process background services did not stop within '
+                 f'{PROCESS_BACKGROUND_STOP_SECONDS:g}s; still stopping: {owner}')
+        log.warning('[Server] %s', cause)
+        _shutdown_timing_to_stderr(cause)
+        raise TimeoutError(cause) from timeout
+    except Exception as exc:
+        log.warning('[Server] process background shutdown failed: %s', exc)
+        raise  # A scheduler/bootstrap writer still owns its storage context.
+    service_stop_elapsed = time.monotonic() - service_stop_started
+    log.info('[Server] process background services stop took %.1fs', service_stop_elapsed)
+    if service_stop_elapsed >= 0.5:
+        _shutdown_timing_to_stderr(
+            f'process background services stop took {service_stop_elapsed:.1f}s')
+
+
 async def _stop_storage_boundary_for_shutdown(log: logging.Logger) -> bool:
     """Release storage and certify that a pending re-exec may proceed.
 
@@ -375,30 +413,7 @@ async def shutdown_production_runtime(
             # violate quiescence. Leave it live for the process shutdown backstop.
             raise
 
-        try:
-            from lib.server.server_background_services import (
-                stop_registered_background_services,
-            )
-            service_stop_started = time.monotonic()
-            await asyncio.to_thread(
-                _call_within_wall_deadline, 10.0,
-                stop_registered_background_services, app, timeout=2.0)
-            if app.extensions.get('tofu_registered_background_services'):
-                raise RuntimeError('Process background services have not quiesced')
-            service_stop_elapsed = time.monotonic() - service_stop_started
-            log.info('[Server] process background services stop took %.1fs',
-                     service_stop_elapsed)
-            if service_stop_elapsed >= 0.5:
-                _shutdown_timing_to_stderr(
-                    f'process background services stop took {service_stop_elapsed:.1f}s')
-        except TimeoutError:
-            log.warning('[Server] process background shutdown exceeded 10s')
-            _shutdown_timing_to_stderr('process background services stop exceeded 10s')
-            raise TimeoutError(
-                'process background services did not stop within 10s') from None
-        except Exception as exc:
-            log.warning('[Server] process background shutdown failed: %s', exc)
-            raise  # A scheduler/bootstrap writer still owns its storage context.
+        await _stop_process_background_services(app, log)
     try:
         from lib.storage.warmup import stop_keep_warm
         await asyncio.to_thread(stop_keep_warm, timeout=2.0)

@@ -13,7 +13,9 @@ from typing import Any, Optional
 
 import requests
 
+from tofu_search.config import get_config
 from tofu_search.log import get_logger
+from tofu_search.network_transport import request
 
 logger = get_logger(__name__)
 
@@ -36,7 +38,9 @@ def _search_http2_get(url, *, params, headers, timeout, proxies=None, deadline):
     remaining = min(float(timeout), deadline - time.monotonic())
     if remaining <= 0:
         raise requests.Timeout('Search HTTP request budget exhausted')
-    selected = requests.utils.get_environ_proxies(url) if proxies is None else proxies
+    factory = get_config().httpx_client_factory
+    selected = (requests.utils.get_environ_proxies(url)
+                if proxies is None and factory is None else (proxies or {}))
     proxy = requests.utils.select_proxy(url, selected) or None
     ca_file = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('CURL_CA_BUNDLE')
     try:
@@ -47,7 +51,9 @@ def _search_http2_get(url, *, params, headers, timeout, proxies=None, deadline):
             proxy = httpx.Proxy(proxy, ssl_context=verify)
         # Each call already has an admitted engine worker. No persistent pool,
         # background worker or cross-query cookie jar is introduced here.
-        with httpx.Client(http2=True, proxy=proxy, trust_env=False, verify=verify,
+        create = factory or httpx.Client
+        routing = {'automatic': proxies is None} if factory is not None else {}
+        with create(http2=True, proxy=proxy, trust_env=False, verify=verify, **routing,
                           headers=headers, timeout=remaining, follow_redirects=False) as client:
             remaining = min(float(timeout), deadline - time.monotonic())
             if remaining <= 0:
@@ -112,7 +118,7 @@ def http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT,
         headers: Optional headers (merged over a default UA).
         params: Optional query-string params.
         use_proxy: When False, bypass any env proxy for this call.
-        **extra: Passed through to ``requests.get``.
+        **extra: Additional Requests request options.
 
     Returns:
         The ``requests.Response`` (caller checks ``.ok``).
@@ -123,8 +129,8 @@ def http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT,
     if params is not None:
         extra['params'] = params
     if not use_proxy:
-        extra['proxies'] = {'http': None, 'https': None}
-    return requests.get(url, timeout=timeout, headers=final_headers, **extra)
+        extra['proxies'] = {'no_proxy': '*'}
+    return request('GET', url, timeout=timeout, headers=final_headers, **extra)
 
 
 def http_post(url: str, *, json: Optional[Any] = None,
@@ -140,7 +146,7 @@ def http_post(url: str, *, json: Optional[Any] = None,
         timeout: Request timeout in seconds.
         headers: Optional headers (merged over a default UA).
         use_proxy: When False, bypass any env proxy for this call.
-        **extra: Passed through to ``requests.post``.
+        **extra: Additional Requests request options.
 
     Returns:
         The ``requests.Response`` (caller checks ``.ok``).
@@ -149,6 +155,6 @@ def http_post(url: str, *, json: Optional[Any] = None,
     if headers:
         final_headers.update(headers)
     if not use_proxy:
-        extra['proxies'] = {'http': None, 'https': None}
-    return requests.post(url, timeout=timeout, headers=final_headers,
+        extra['proxies'] = {'no_proxy': '*'}
+    return request('POST', url, timeout=timeout, headers=final_headers,
                          json=json, **extra)

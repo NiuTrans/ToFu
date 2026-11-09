@@ -212,7 +212,7 @@ CATALOG: list[SkillCatalogEntry] = [
         'tags': ['openclaw', 'template', 'agentskills'],
     },
 
-    # \u2500\u2500 Meituan internal (stripped by export.py opensource mode) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # \u2500\u2500 YourProvider internal (stripped by export.py opensource mode) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     # (none bundled by default \u2014 users can drag-drop citadel.zip /
     #  mlp-skills.zip or configure an internal registry via
@@ -227,7 +227,7 @@ CATALOG: list[SkillCatalogEntry] = [
 #
 # Admission criterion, same as the MCP catalog: a normal developer must be
 # able to obtain credentials. Fliggy qualifies (self-service key, no company
-# verification); Ctrip and Meituan do not — corporate onboarding only, and the
+# verification); Ctrip and YourProvider do not — corporate onboarding only, and the
 # owner decided 2026-07-27 not to pursue it (option C, ticket
 #  CLOSED). The full rationale and the reopen condition live
 # next to the MCP-side entries in lib/mcp/registry.py; do not add cards for

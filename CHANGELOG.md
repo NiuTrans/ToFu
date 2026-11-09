@@ -1,6 +1,95 @@
 # Changelog
 
 
+## [0.19.1] - 2026-11-09
+
+### Added
+- 企业微信, QQ and 微信 bot adapters behind the shared channel boundary, with
+  bot account and thread routes and one collapsible 消息平台 tab in Settings
+  for every chat platform.
+- Channel protocol v1: a spec, contract, SDK and conformance baseline. The
+  core runs the catch-up for protocol adapters, records edits and recalls on
+  the message they change and carries the sender kind (bots are never reply
+  candidates); a file a platform cannot carry is named in the text instead of
+  refusing the send, and deferred sends wait in the outbox for the platform's
+  time.
+- 大象 robot: one robot serves many servers, each bound to its own 大象
+  account; the robot creates the Tofu Router group and posts fallback notices,
+  and Internal exports ship a built-in robot.
+- My Day decomposes owner goals into items with an explainable estimate and
+  tracks goals, items and progress.
+- Project coordination: task-board commitments with due-time wakes, one live
+  progress source for the task board and checklist, and a Coordinator that
+  follows up an ended Worker session as its next Turn. The Global Router keeps
+  a proactive question ledger with a quiet-hours hold, a digest and a
+  cross-project view.
+- Paged Turns: storage keeps a per-Turn usage projection, one client reader
+  reassembles a paged Turn at a single revision, and model context reads a
+  Turn larger than one page page by page.
+- The stream phase tells an unanswered model request apart from a silent
+  connected model, and streamed attempt usage records when response headers
+  arrived.
+- The owner may share whole run or reference folders with a project; a large
+  plain folder of other projects is prepared without being versioned.
+- The execution host's storage RPC histogram is exported through `/metrics`.
+
+### Changed
+- `edit_file` performs replace-only edits and `write_file` requires content.
+- Tofu-owned outbound HTTP and integration traffic goes through one shared
+  network routing authority; YourProvider native chat requests keep gateway cache
+  affinity.
+- Search settings keep operator URL bans apart from fetch-quality skips.
+- Internal exports leave the exporting owner's channel bindings out of the
+  carried credential vault and package the built-in 大象 robot; the Open
+  publication gate refuses the robot's values.
+- Coordinator tools read bounded pages of any conversation, return compact
+  review and cancel receipts, and read through dispatch contention.
+- A project delivery counts as delivered only once it is committed on the
+  branch; reviewed deliveries land as their own commit, and per-project
+  receiver lanes keep one project's capture from delaying another's.
+- Task checkouts stay on the data volume unless the operator opts into fast
+  local storage, where they remain reconstructible from Git.
+- Development: incremental verification is the default check entrypoint,
+  `scripts/lane.py` creates one branch with a recycled local checkout per unit
+  of work, and `scripts/git_land.py` lands without running a test ladder
+  (owner decision 2026-11-08).
+
+### Fixed
+- The requester hears every restart's outcome, and interrupted conversations,
+  including late-registered quiesced Turns and restart-paused Coordinator
+  request Turns, resume by themselves; Continue resumes an interrupted Turn's
+  exact working view.
+- A system-initiated abort or a reaped root is never recorded or shown as a
+  user Stop, and a slow volume or congested storage authority no longer fails
+  a task start.
+- Workers keep their process ownership through storage stalls, a lost lease
+  stays a storage fence during recovery, a refused exit receipt settles its job
+  once, and jobs are claimed in the order they became claimable.
+- Storage waits while its authority is alive and fails fast only when it is
+  proven down; crash recovery covers the complete reference set and batches
+  history routing.
+- TofuDB: Normal-tier WAL writes and worker heartbeats no longer wait on the
+  authority mutex, online GC deletes every confirmed loose victim, history
+  retirement no longer rewrites routing pages, and a long attempt keeps its
+  newest raw archives.
+- Compaction folds an unfit continuity packet into the narrative instead of
+  refusing forever.
+- Tool and program results repair unpaired surrogates, and tool-call logs show
+  declared content arguments only by size and digest.
+- Encrypted reasoning is retained only when the request replays it.
+- `spawn_agents` Workers of headless runs route through their run's own
+  authority, and a Router forward reaches the Coordinator as one authorized
+  request.
+- 微信 QR login keeps the session that completed it, keeps the QR key out of
+  failure logs and makes expiry and retries actionable; the channel core
+  chunks long texts and 企业微信 sends one message per intent.
+- FRIDAY Claude cache reads are billed at 0.1x of the base input price.
+- My Day runs one calendar cost computation per owner month and prices it from
+  per-Turn usage.
+- Mobile connection links and private release delivery are protected, and
+  Android and iOS onboarding are fenced against concurrent edits.
+- The Terminal-Bench verifier reward channel stays root-only.
+
 ## [0.19.0] - 2026-11-07
 
 ### Added

@@ -24,7 +24,8 @@ def services(tmp_path, monkeypatch):
                         lambda plan, env: calls.append(('ensure-storage', dict(env))) or str(project / 'connection.json'))
     monkeypatch.setattr(manager._execution, 'ensure',
                         lambda plan, env: calls.append(('ensure-execution', dict(env))) or '')
-    monkeypatch.setattr(manager._native_storage, 'stop', lambda: calls.append(('stop-storage', {})))
+    monkeypatch.setattr(manager._native_storage, 'stop',
+                        lambda **options: calls.append(('stop-storage', options)) or '')
     monkeypatch.setattr(manager._execution, 'stop',
                         lambda **options: calls.append(('stop-execution', options)) or '')
     monkeypatch.setattr(
@@ -129,6 +130,17 @@ def test_only_an_explicit_replacement_may_retire_a_failed_executor_close(service
     assert [name for name, _ in calls] == ['stop-execution', 'ensure-storage', 'ensure-execution']
 
 
+@pytest.mark.parametrize('explicit', [True, False])
+def test_only_an_explicit_replacement_may_retire_a_failed_storage_close(services, monkeypatch, explicit):
+    manager, calls = services
+    monkeypatch.setattr(manager._native_storage, 'needs_replacement', lambda *args, **kwargs: True)
+    manager._ensure_resident_services({}, {'storage': 2}, None, reset_failed=explicit)
+    assert ('stop-storage', {'retire_failed_close': explicit}) in calls
+    calls.clear()
+    manager._stop_resident_services()
+    assert calls == [('stop-execution', {}), ('stop-storage', {})]
+
+
 def test_missing_shared_authority_refuses_before_any_stop(services, monkeypatch):
     manager, calls = services
     monkeypatch.setattr(manager._native_storage, 'prepare', lambda env: None)
@@ -193,6 +205,49 @@ def test_recovery_refuses_changed_code_until_explicit_restart(departed_execution
     assert 'changed' in manager._state['lastError']
     assert manager._state['executionRecovery']['requiresRestart']
     assert calls == []
+
+
+@pytest.mark.parametrize('changed_field, permitted', [
+    ('sourceSha256', True), ('sourceFiles', True),
+    ('python', False), ('configurationSha256', False),
+    ('environmentFingerprint', False), ('format', False), ('unrecognized', False),
+])
+def test_only_source_drift_before_boot_can_reprepare_automatically(
+        departed_execution, monkeypatch, changed_field, permitted):
+    manager, calls, record = departed_execution
+    original = {'format': 'tofu.execution-plan/v1', 'python': '/env/python',
+        'sourceSha256': 'first', 'sourceFiles': 3, 'environmentFingerprint': 'installed',
+        'configurationSha256': 'configuration'}
+    record.update(state='failed', failureKind='source_changed_before_boot', plan=original)
+    next_plan = {**original, changed_field: 4 if changed_field == 'sourceFiles' else 'changed'}
+    monkeypatch.setattr(manager._execution, 'prepare', lambda env: next_plan)
+    before = dict(manager._state['worker'])
+    assert not manager._recover_execution_service()
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1010.0)
+    assert not manager._recover_execution_service()
+    assert manager._state['worker'] == before
+    assert manager._state['failureHistory'] == [1000.0]
+    assert bool(manager._state['executionRecovery'].get('requiresRestart')) is not permitted
+    assert [name for name, _ in calls] == (
+        ['prepare-storage', 'stop-execution', 'ensure-execution'] if permitted else [])
+
+
+def test_preboot_source_refresh_cannot_replace_the_storage_generation(
+        departed_execution, monkeypatch):
+    manager, calls, record = departed_execution
+    original = {'format': 'tofu.execution-plan/v1', 'python': '/env/python',
+        'sourceSha256': 'first', 'sourceFiles': 3, 'environmentFingerprint': 'installed',
+        'configurationSha256': 'configuration'}
+    record.update(state='failed', failureKind='source_changed_before_boot', plan=original)
+    monkeypatch.setattr(manager._execution, 'prepare',
+                        lambda env: {**original, 'sourceSha256': 'changed'})
+    monkeypatch.setattr(manager._native_storage, 'needs_replacement', lambda plan: True)
+    assert not manager._recover_execution_service()
+    monkeypatch.setattr(existing.sm, '_now', lambda: 1010.0)
+    assert not manager._recover_execution_service()
+    assert manager._state['executionRecovery']['requiresRestart']
+    assert 'storage generation changed' in manager._state['lastError']
+    assert [name for name, _ in calls] == ['prepare-storage']
 
 
 def _still_exiting():

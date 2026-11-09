@@ -11,7 +11,7 @@ import requests
 from lib.desktop import egress
 from lib.llm import _transport, egress_recovery
 from lib.llm.llm_errors import AbortedError, RequestTransportError
-from lib.subscription_routes import ProbeResult, Route, RouteManager
+from lib.network_routes import ProbeResult, Route, RouteManager
 
 pytestmark = pytest.mark.unit
 BASE = 'https://chatgpt.com/v1'
@@ -24,7 +24,7 @@ SSE = (b'data: {"choices":[{"delta":{"content":"recovered"}}]}\n\n'
 @pytest.fixture
 def network(monkeypatch):
     import lib.proxy as proxy
-    import lib.subscription_routes as routes
+    import lib.network_routes as routes
     now = [100.0]
     route = Route('fixture-proxy', 'test proxy', 'proxy',
                   proxy_url='http://fixture.invalid:8080')
@@ -32,7 +32,7 @@ def network(monkeypatch):
                            clock=lambda: now[0], jitter=lambda delay: delay)
     manager.report(URL, route, True)
     monkeypatch.setattr(routes, 'manager', manager)
-    monkeypatch.setattr(proxy, 'subscription_route_specs', lambda url: [route])
+    monkeypatch.setattr(proxy, 'network_route_specs', lambda url, **kw: [route])
     monkeypatch.setattr(egress, '_online_egress_agents', lambda owner: [])
     monkeypatch.setattr(egress_recovery, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(_transport, 'retry_wait', lambda attempt: 0.25)
@@ -80,8 +80,10 @@ def network(monkeypatch):
             raise error('fixture connect failure')
         return httpx.Response(200, content=SSE)
 
-    monkeypatch.setattr('lib.llm.stream.get_sync_session', lambda: SimpleNamespace(post=sync_send))
-    monkeypatch.setattr('lib.http_transport.client._sync_request', sync_send)
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, 'send', sync_send)
+    async def wire_send(_transport, request):
+        return async_send(request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', wire_send)
     state.async_send = async_send
     try:
         yield state
@@ -101,8 +103,9 @@ def run_stream(monkeypatch, network, asynchronous, **kwargs):
                    owner_user_id=7, on_retry=lambda **event: retries.append(event), **kwargs)
 
     async def arun():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(network.async_send)) as client:
-            monkeypatch.setattr('lib.llm.astream.get_async_client', lambda _: client)
+        from lib.http_transport.outbound_async import managed_async_client
+        async with managed_async_client() as client:
+            monkeypatch.setattr('lib.llm.astream.get_async_client', lambda **_: client)
             return await api.async_dispatch_stream([{'role': 'user', 'content': 'hi'}], **options)
 
     network.slot, network.dispatcher, network.retries = slot, dispatcher, retries
@@ -192,11 +195,11 @@ def test_exhaustion_keeps_safe_classification_without_proxy_credentials(monkeypa
 
     route = Route('proxy', 'test proxy', 'proxy',
                   proxy_url='http://user:secret@fixture.invalid:8080')
-    monkeypatch.setattr(client, 'subscription_route_candidates', lambda url: [route])
-    monkeypatch.setattr(client, 'report_subscription_route', lambda *args: None)
+    monkeypatch.setattr('lib.proxy.network_route_candidates', lambda url, **kw: [route])
+    monkeypatch.setattr('lib.proxy.report_network_route', lambda *args: None)
     def post(*args, **kwargs):
         raise requests.exceptions.ProxyError(route.proxy_url)
-    monkeypatch.setattr(client, '_sync_request', post)
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, 'send', post)
     with pytest.raises(requests.exceptions.ConnectionError) as caught:
         client.http_post(URL, json={})
     assert 'secret' not in str(caught.value)
@@ -237,10 +240,9 @@ def test_real_http_receives_body_once_after_connect_recovery(monkeypatch):
     manager = RouteManager(probe=lambda *_: ProbeResult('ok', 1),
                            clock=lambda: now[0], jitter=lambda delay: delay)
     manager.report(base, route, True)
-    session = requests.Session()
-    session.trust_env = False
+    from lib.http_transport.outbound import managed_session
     adapter = model_http_adapter(write_timeout=1, max_retries=0)
-    session.mount('http://', adapter)
+    session = managed_session(adapter=adapter)
     connection_class = adapter.poolmanager.pool_classes_by_scheme['http'].ConnectionCls
     connect = connection_class.connect
 
@@ -257,8 +259,14 @@ def test_real_http_receives_body_once_after_connect_recovery(monkeypatch):
 
     monkeypatch.setattr(connection_class, 'connect', flaky_connect)
     monkeypatch.setattr(stream, 'get_sync_session', lambda: session)
-    monkeypatch.setattr('lib.subscription_routes.manager', manager)
+    monkeypatch.setattr('lib.network_routes.manager', manager)
     monkeypatch.setattr('lib.proxy.subscription_route_specs', lambda url: [route])
+    monkeypatch.setattr('lib.proxy.network_route_specs', lambda url, **kw: [route])
+    monkeypatch.setattr('lib.proxy.subscription_route_candidates',
+                        lambda url, **kw: manager.candidates(url, [route], **kw))
+    monkeypatch.setattr('lib.proxy.network_route_candidates',
+                        lambda url, **kw: manager.candidates(
+                            url, [route], cancelled=kw.get('cancelled')))
     monkeypatch.setattr(egress, 'host_allowed', lambda url: True)
     monkeypatch.setattr(egress, '_online_egress_agents', lambda owner: [])
     monkeypatch.setattr(egress_recovery, 'time', SimpleNamespace(monotonic=lambda: now[0]))

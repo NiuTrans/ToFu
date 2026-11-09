@@ -856,22 +856,26 @@ def suspend_swarms_for_restart() -> int:
 
 
 def abort_swarm(task_id: str, *, user_id: int) -> dict:
-    """Abort a running swarm session (used by routes/api_v1/swarm)."""
+    """Abort this process's swarm session; ``outcome`` is not_found, aborted or failed.
+
+    Routes reach it through ``command_controls.abort_swarm_session`` in the
+    process that runs the conversation (``command_control_runtime``).
+    """
     from lib.identity import require_user_id
 
     owner_user_id = require_user_id(user_id, context='swarm abort')
     session = _get_session(task_id)
     if session is None or int(session.user_id) != owner_user_id:
-        return {'success': False, 'error': 'No active swarm for this task'}
+        return {'success': False, 'outcome': 'not_found', 'error': 'No active swarm for this task'}
     try:
         session.abort()
         _remove_session(task_id)
         logger.info('[swarm] Aborted swarm for task %s', task_id)
-        return {'success': True, 'task_id': task_id}
+        return {'success': True, 'outcome': 'aborted', 'task_id': task_id}
     except Exception as e:
         logger.error('[swarm] Error aborting %s: %s', task_id, e, exc_info=True)
         _remove_session(task_id)
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'outcome': 'failed', 'error': str(e)}
 
 
 _STOPPABLE_AGENT_STATUSES = frozenset({'running', 'retrying'})

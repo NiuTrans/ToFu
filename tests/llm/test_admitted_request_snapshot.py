@@ -101,6 +101,30 @@ def test_internal_fields_never_enter_provider_wire(protocol):
     assert plan.raw_dumper.request_identity == plan.body.diagnostics()
 
 
+@pytest.mark.parametrize('protocol', ['openai', 'responses', 'anthropic'])
+def test_transport_projection_and_final_usage_share_sealed_context_evidence(protocol):
+    from lib.llm._sse_core import SSEAccumulator
+    from lib.llm.body import build_body
+    from lib.tasks_pkg.context_composer import append_injection
+    messages = [{'role': 'user', 'content': 'question'}]
+    append_injection(messages, 'tool_progress', 'private source')
+    value = build_body('gpt-4o', messages, precomputed_input_tokens=100)
+    diagnostics = []
+    value['_request_activity_sink'] = diagnostics.append
+    plan = prepare(value, api_protocol=protocol)
+    projection, = [row for row in diagnostics if row['kind'] == 'wire_projection']
+    evidence = {**plan.body.context_diagnostics(), 'traceId': plan.trace_id}
+    assert projection['contextLineage'] == evidence
+    assert all(row['status'] == 'located' for row in evidence['sources'])
+    acc = SSEAccumulator(plan.body, plan.trace_id, plan.raw_dumper,
+                         plan.wire_translator, plan.t0)
+    _, _, usage = acc.finalize()
+    assert usage['_wire_context_lineage'] == evidence
+    assert usage['_request_identity'] == evidence['requestIdentity']
+    assert usage['trace_id'] == evidence['traceId']
+    assert '_context_lineage' not in plan.body.payload.decode()
+
+
 def test_mapping_reads_parse_only_requested_complex_fields(monkeypatch):
     from lib.llm.request import seal_request
     image = 'data:image/png;base64,' + 'A' * 1000000

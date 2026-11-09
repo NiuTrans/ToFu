@@ -816,6 +816,13 @@ pub struct DurabilityCounters {
     pub projection_checkpoint_bytes: u64,
     pub projection_patch_bytes: u64,
     pub projection_patches_applied: u64,
+    /// Live-head projections reused from their committed residency instead
+    /// of being materialized, stale entries dropped, and the current resident
+    /// entries with their exact encoded bytes (`turn::projection_residency`).
+    pub projection_resident_hits: u64,
+    pub projection_resident_stale: u64,
+    pub projection_resident_entries: u64,
+    pub projection_resident_bytes: u64,
     pub history_decode_attempts: u64,
     pub history_decode_source_bytes: u64,
     pub history_decoded_transactions: u64,
@@ -846,6 +853,10 @@ pub fn counters() -> DurabilityCounters {
         projection_checkpoint_bytes: PROJECTION_CHECKPOINT_BYTES.load(Ordering::Relaxed),
         projection_patch_bytes: PROJECTION_PATCH_BYTES.load(Ordering::Relaxed),
         projection_patches_applied: PROJECTION_PATCHES_APPLIED.load(Ordering::Relaxed),
+        projection_resident_hits: crate::turn::projection_residency::process_metrics().0,
+        projection_resident_stale: crate::turn::projection_residency::process_metrics().1,
+        projection_resident_entries: crate::turn::projection_residency::process_metrics().2,
+        projection_resident_bytes: crate::turn::projection_residency::process_metrics().3,
         history_decode_attempts: HISTORY_DECODE_ATTEMPTS.load(Ordering::Relaxed),
         history_decode_source_bytes: HISTORY_DECODE_SOURCE_BYTES.load(Ordering::Relaxed),
         history_decoded_transactions: HISTORY_DECODED_TRANSACTIONS.load(Ordering::Relaxed),

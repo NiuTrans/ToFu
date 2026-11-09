@@ -336,6 +336,43 @@ short pages, 128 writes and bounded merges, checks final content, reports
 latency and resident overlay bytes, and verifies all delta memory is released.
 Its timings describe the test host and build, not production p99 improvements.
 
+## Workspace metadata and worker settlement preparation
+
+Problem (2026-11-07): production `integration.workspace.set_meta` held the
+writer for 121,608 ms (121,544 ms inside command execution), and
+`worker_job.complete` later held it for 31,250 ms (31,245 ms in execution).
+Neither operation was admitted to the existing snapshot preparation path.
+The trace does not identify the exact inner wait or prove a remote filesystem
+latency cause.
+
+Decision: certify these two point-mutation paths for the existing preparation
+and OCC publication mechanism. Receipt lookup, workspace/job reads and response
+construction run against the immutable snapshot outside the writer. Commit
+revalidates their dependencies, publishes the existing atomic indexes and WAL,
+and retains strict acknowledgement. Conflict/rotation still uses the existing
+exclusive retry; there is no new timer, scheduling pool or weakened durability.
+The regression exercises both operations with unrelated concurrent commits,
+conflicting metadata/Stop changes, unchanged pre-commit WAL and released pins.
+It measures removal of whole-command exclusive preparation, not a production
+P99 improvement. Alternatives rejected: a larger worker timeout preserves the
+blocking path, and trusting a prepared response without OCC loses concurrent
+metadata or ignores Stop.
+
+Heartbeats (2026-11-08): `worker_job.heartbeat` stayed exclusive, although
+every running durable worker sends one every 20 s by default. In the 6 hours
+after the 2026-11-07 restart, 6 of the 16 authority holds of at least 1 s that
+command execution dominated were heartbeats (115 s in total, up to 44.4 s).
+A heartbeat makes the same point reads and writes as `complete` (the job
+document and its old and new lease-index entries) and is certified the same
+way. Like `complete`'s claim check, the new deadline is computed from the
+lease clock at preparation, at most the preparation's latency earlier than at
+commit. The commit still revalidates the job document, so a claim that changed
+in between (settlement, a new claim after expiry) refuses the preparation and
+the exclusive retry answers as before. The regression adds a heartbeat beside
+an unrelated commit (the prepared lease and replay cursor are what commits)
+and beside the holder's concurrent settlement (refused; the retry reports
+`stale_fence`).
+
 ## Parallel preparation and embedded execution
 
 **Decision (2026-09-30): parallel preparation and bounded embedded execution.**

@@ -60,6 +60,8 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
         'file_text': 'content', 'contents': 'content', 'text': 'content',
         'data': 'content',
     },
+    # The insert tools are retired; the read gate still reads their stored
+    # calls as prior-write evidence through these aliases.
     'insert_content': {
         'file_path': 'path', 'filepath': 'path', 'filename': 'path',
         'text': 'content',
@@ -382,9 +384,19 @@ def _transform_legacy_edit_to_edit_file(
         if not isinstance(edit, dict):
             normalized.append(edit)
             continue
-        if edit.get('operation'):
-            normalized.append(dict(edit))
-            continue
+        if 'operation' in edit:
+            # ``replace`` is the only edit, so the retired field is dropped;
+            # any other value stays for edit_batch_operation_refusal to
+            # explain, since executing it as a replace would drop its anchor.
+            if edit['operation'] in (None, 'replace'):
+                edit = {k: v for k, v in edit.items() if k != 'operation'}
+                changed = True
+            else:
+                normalized.append(dict(edit))
+                continue
+            if 'anchor' in edit:
+                normalized.append(edit)
+                continue
         path = next((edit.get(k) for k in (
             'path', 'file_path', 'filepath', 'filename', 'filePath')
             if edit.get(k)), shared_path)
@@ -396,13 +408,14 @@ def _transform_legacy_edit_to_edit_file(
             if k in edit), None)
         if search is not None:
             unified = {
-                'path': path, 'operation': 'replace',
+                'path': path,
                 'anchor': search, 'content': replacement if replacement is not None else '',
             }
         elif 'anchor' in edit and 'position' in edit:
-            # Only the retired insert shape carries ``position``. Without it
-            # an anchored item is ambiguous (a replace removes the anchor, an
-            # insertion keeps it), so it stays for the contract to reject.
+            # Only the retired insert shape carries ``position``. It becomes
+            # the insert it meant, which the ingest refusal then rewrites as
+            # a replace for the model; guessing the line break between anchor
+            # and new text here is what made inserts fail.
             unified = {
                 'path': path,
                 'operation': ('insert_before' if edit['position'] == 'before'

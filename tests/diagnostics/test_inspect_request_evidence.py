@@ -54,3 +54,48 @@ def test_request_evidence_does_not_accept_another_tasks_archive():
         'messages': [{'toolRounds': [{'taskId': 'owned-task'}]}]}))
     assert 'ownership mismatch' in output
     assert 'foreign-archive' not in output
+
+
+@pytest.mark.parametrize('owned_source', [None, 'parent'])
+def test_parent_evidence_selects_own_request_from_merged_child_catalog(owned_source):
+    paths = []
+
+    class API:
+        def get(self, path, **kwargs):
+            paths.append(path)
+            if path.endswith('/requests'):
+                return {'requests': [
+                    {'roundNum': 14, 'turn': 'request:parent',
+                     'sourceTaskId': owned_source},
+                    {'roundNum': 25, 'turn': 'swarm-agent:child',
+                     'sourceTaskId': 'parent#agent:child'},
+                ]}
+            if path.endswith('/requests/14?turn=request%3Aparent'):
+                return {'rawArchives': [
+                    {'taskId': 'parent', 'archiveId': 'parent-archive'}]}
+            raise DiagnosticAPIError('wrong request owner')
+
+    output = '\n'.join(_render_request_evidence(API(), {
+        'messages': [{'toolRounds': [{'taskId': 'parent'}]}]}))
+    assert 'parent-archive' in output
+    assert 'wrong request owner' not in output
+    assert len(paths) == 2
+    assert paths[-1].endswith('/requests/14?turn=request%3Aparent')
+
+
+def test_child_only_catalog_does_not_fetch_child_request_as_parent():
+    paths = []
+
+    class API:
+        def get(self, path, **kwargs):
+            paths.append(path)
+            if path.endswith('/requests'):
+                return {'requests': [
+                    {'roundNum': 25, 'turn': 'swarm-agent:child',
+                     'sourceTaskId': 'parent#agent:child'}]}
+            raise DiagnosticAPIError('wrong request owner')
+
+    output = '\n'.join(_render_request_evidence(API(), {
+        'messages': [{'toolRounds': [{'taskId': 'parent'}]}]}))
+    assert 'no task-owned request' in output
+    assert paths == ['/api/v4/tasks/parent/requests']

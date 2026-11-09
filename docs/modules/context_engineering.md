@@ -11,6 +11,10 @@ Problem: importing storage for limits crossed core boundaries. Decision: share c
 | Concern | Owner |
 |---|---|
 | Context assembly and provider ordering | `lib/tasks_pkg/context_composer/` |
+| Snapshot selection, history reconciliation, budget, carrier placement and receipts | `lib/tasks_pkg/context_composer/_render.py::render_context` (ordered stages; [contract](../CONTEXT_INJECTIONS.md#composition-stages-and-investigation-boundary)) |
+| Exported request/source attribution and first changed prefix | `scripts/inspect_context.py`, `lib/tasks_pkg/context_composer/inspection.py` ([usage and evidence limits](../CONTEXT_INJECTIONS.md#source-attribution-from-exported-requests)); shared section identity in `lib/llm_sanitize/context_sections.py` |
+| Source ranges through sanitization and protocol emission | `lib/llm_sanitize/lineage.py`; `contracts/context_lineage_v1.schema.json` |
+| Sealed request binding, export validation and exact cache-record join | `lib/llm/request.py`, `context_composer/_lineage_inspection.py`; existing `cache_tracking` owns verdicts |
 | Automatic injection inventory, necessity, authority, placement, and cost policy | `lib/tasks_pkg/context_composer/registry.py` |
 | Chronological/auxiliary injection writer and bounded debug receipts | `lib/tasks_pkg/context_composer/injections.py` |
 | System/project/user context sources | `lib/tasks_pkg/context_composer/_providers.py` |

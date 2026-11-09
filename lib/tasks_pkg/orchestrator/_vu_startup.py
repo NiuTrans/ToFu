@@ -54,7 +54,7 @@ def _vu_phase(
             fields['detailArgs'] = detail_args
         append_event(task, build_phase(Phase.WORKING, **fields))
     except Exception as _e:
-        _tid = (task.get('id') or '')[:8]
+        _tid = (task.get('id') or '')
         logger.debug('[Task %s] vu startup phase emit failed: %s', _tid, _e)
 
 

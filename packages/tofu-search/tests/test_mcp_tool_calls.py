@@ -317,6 +317,7 @@ def test_fetch_page_failure_is_explained_not_silent(server, monkeypatch):
     ('bot_wall', 'access challenge'),
     ('ssrf_blocked', 'network-address policy'),
     ('skip_domain', 'configured fetch policy'),
+    ('fetch_skip', 'not a source ban'),
     ('empty_extract', 'readable text'),
 ])
 def test_fetch_page_reports_safe_failure_category_without_private_details(

@@ -23,10 +23,10 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from lib.channels.model import (
-    LIMITS, NAMESPACE, ChannelError, ChannelEvent, OutboxItem, ThreadKey, order_key,
+    LIMITS, NAMESPACE, ChannelChange, ChannelError, ChannelEvent, OutboxItem, ThreadKey, order_key,
 )
 from lib.identity import require_user_id
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 # Storage authority page limit for record.list (contract of record.list).
 _RECORD_LIST_MAX = 1000
@@ -157,6 +157,10 @@ class ChannelStore:
     def account(self, channel: str) -> dict[str, Any] | None:
         return self._get(self._account_key(channel))[0]
 
+    def accounts(self) -> list[dict[str, Any]]:
+        """Every channel account of this owner, in one list query."""
+        return [row['value'] for row in self._list(f'{self._root}account/') if isinstance(row.get('value'), dict)]
+
     def update_account(self, channel: str,
                        change: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
         def apply(current):
@@ -227,7 +231,8 @@ class ChannelStore:
         """Record an event once (CAS create). Returns ``(record, newly_recorded)``.
 
         An existing record is a duplicate (replay, reconnect, at-least-once
-        delivery); its ``state`` says whether routing completed.
+        delivery); its ``state`` says whether routing completed and, while
+        ``pending``, its ``deliveries`` name the targets that already accepted it.
         """
         key = self._event_key(event.thread, event.external_id)
         record = {**event.to_record(), 'disposition': disposition, 'state': 'pending',
@@ -254,16 +259,99 @@ class ChannelStore:
             return current
         self._update(key, change)
 
-    def mark_routed(self, event: ChannelEvent, deliveries: list[dict[str, Any]]) -> None:
+    def record_delivery(self, event: ChannelEvent, delivery: dict[str, Any]) -> list[dict[str, Any]]:
+        """Append one accepted ``(event, target)`` delivery; returns the event's deliveries.
+
+        Written as soon as the target accepts, before any other target is
+        dispatched, so a re-route after a later failure skips it.
+        """
+        key = self._event_key(event.thread, event.external_id)
+
+        def change(current):
+            if current is None:
+                raise ChannelError('event_missing', 'Recorded channel event disappeared')
+            current['deliveries'] = [*(current.get('deliveries') or []), delivery]
+            return current
+        return list(self._update(key, change)['deliveries'])
+
+    def mark_routed(self, event: ChannelEvent) -> None:
+        """Routing of the event finished; each accepted delivery is already recorded."""
         key = self._event_key(event.thread, event.external_id)
 
         def change(current):
             if current is None:
                 raise ChannelError('event_missing', 'Recorded channel event disappeared')
             current['state'] = 'routed'
-            current['deliveries'] = deliveries
             return current
         self._update(key, change)
+
+    def record_change(self, change: ChannelChange) -> str:
+        """Apply an edit or recall to its recorded message; returns the ingest outcome.
+
+        ``recorded``: an edit appended as a revision (the original text stays,
+        never a new message), or a recall that marked the message recalled and
+        removed its text, revision texts and voice transcripts. ``duplicate``:
+        this change was applied before. ``dropped``: nothing recorded to change
+        (a message the policy dropped or Tofu never saw, an unresolvable
+        target), or an edit of a recalled message.
+        """
+        if not change.target:
+            return 'dropped'
+        outcome: list[str] = []
+
+        def apply(current):
+            if current is None:
+                outcome.append('dropped')
+                return None
+            revisions = list(current.get('revisions') or [])
+            if change.kind == 'recall':
+                if current.get('recalled'):
+                    outcome.append('duplicate')
+                    return current
+                current.update(recalled=True, recalledAtMs=change.sent_at_ms or now_ms(),
+                               recallId=change.change_id, text='', revisions=[])
+                current['media'] = [{**item, 'transcript': ''} for item in current.get('media') or []]
+            elif current.get('recalled'):
+                outcome.append('dropped')
+                return current
+            elif any(revision.get('id') == change.change_id for revision in revisions):
+                outcome.append('duplicate')
+                return current
+            else:
+                current['revisions'] = [*revisions, {
+                    'id': change.change_id, 'text': change.text, 'senderId': change.sender_id,
+                    'atMs': change.sent_at_ms or None, 'recordedAtMs': now_ms()}]
+            outcome.append('recorded')
+            return current
+        self._update(self._event_key(change.thread, change.target), apply)
+        return outcome[-1]
+
+    def provider_message_alias(self, channel: str, provider_id: str) -> str | None:
+        """The external ID ``provider_message_id`` minted for an opaque provider message ID, if any."""
+        current, _ = self._get(f'{self._root}msgid/{channel}/{_digest(provider_id)}')
+        return str(current['externalId']) if current else None
+
+    def provider_message_id(self, channel: str, provider_id: str, mint: Callable[[], str]) -> str:
+        """The external ID of an opaque provider message ID, minted once (CAS create).
+
+        For a provider whose message IDs carry no time (企业微信, C12): ``mint``
+        makes a time-ordered external ID at first sight and a redelivery maps
+        to the same one, so the event record still decides duplicates (C1).
+        """
+        key = f'{self._root}msgid/{channel}/{_digest(provider_id)}'
+        current, version = self._get(key)
+        if current is None:
+            minted = mint()
+            try:
+                self._put(key, {'externalId': minted}, version)
+                return minted
+            except StorageError as error:
+                if not is_conflict(error):
+                    raise
+            current, _ = self._get(key)
+            if current is None:
+                raise StorageError('database_conflict', 'Provider message alias changed concurrently')
+        return str(current['externalId'])
 
     def event_page(self, thread: ThreadKey, *, before: str = '') -> tuple[list[dict[str, Any]], str | None]:
         """Newest-first page; ``before`` is the previous page's cursor."""

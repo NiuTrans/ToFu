@@ -194,10 +194,13 @@ _SAMPLE_EXCERPT = 240
 # 速率地板:首见即爆发时 age≈0,没有地板 lifetime_rate 会爆 ∞。
 _MIN_SPAN_HOURS = 1.0 / 60.0
 
+# Task lines carry the whole attempt UUID (lib.log.task_log_tag); older lines
+# carry its first 8 hex characters.
+_ATTEMPT_UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 _RID_PATTERNS = (
     re.compile(r'\[rid:([0-9A-Za-z._-]{1,64})\]'),
-    re.compile(r'\[Task ([0-9a-f]{6,12})\]'),
-    re.compile(r'\[([0-9a-f]{8}(?:-\d+)?)\]'),
+    re.compile(rf'\[Task ({_ATTEMPT_UUID}|[0-9a-f]{{6,12}})\]'),
+    re.compile(rf'\[({_ATTEMPT_UUID}|[0-9a-f]{{8}}(?:-\d+)?)\]'),
 )
 
 

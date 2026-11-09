@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 
 logger = get_logger(__name__)
@@ -75,7 +75,7 @@ def complete_orchestration_autopilot_flow(
     """
     ports = ports or OrchestrationAutopilotCompletionPorts.defaults()
     task_id = str(task.get('id') or '')
-    short_id = task_id[:8]
+    task_tag = task_log_tag(task_id)
     conversation_id = str(task.get('convId') or '')
     reason = (
         'task_done' if terminal.category == 'success'
@@ -109,21 +109,21 @@ def complete_orchestration_autopilot_flow(
         concluded = False
         logger.warning(
             '[FlowChat] autopilot run conclusion failed '
-            '(non-fatal) task=%s: %s', short_id, exc)
+            '(non-fatal) task=%s: %s', task_tag, exc)
     try:
         ports.clear_marker(task, conversation_id)
     except Exception as exc:
         marker = False
         logger.warning(
             '[FlowChat] autopilot marker cleanup failed '
-            '(non-fatal) task=%s: %s', short_id, exc)
+            '(non-fatal) task=%s: %s', task_tag, exc)
     try:
         ports.clear_run_id(task, conversation_id)
     except Exception as exc:
         run_id = False
         logger.warning(
             '[FlowChat] autopilot run-id cleanup failed '
-            '(non-fatal) task=%s: %s', short_id, exc)
+            '(non-fatal) task=%s: %s', task_tag, exc)
 
     return OrchestrationAutopilotCompletionResult(
         reason=reason,

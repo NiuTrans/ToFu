@@ -275,7 +275,7 @@ class MessageEditor:
         self.removed_messages += len(remove)
         logger.info('[Editor] conv=%s  dropped %d turn(s) / %d message(s) '
                     '(~%d tokens saved)',
-                    self._ctx.conv_id[:8] if self._ctx.conv_id else '?',
+                    self._ctx.conv_id if self._ctx.conv_id else '?',
                     dropped, len(remove), saved)
         return saved
 

@@ -25,8 +25,10 @@ from lib.llm.responses_outbound._sse import (
     _CAPTURE_ITEM_TYPES,
     _MAX_RESPONSE_ITEM_ID_CHARS,
     _MAX_RESPONSE_TOOL_NAME_CHARS,
+    _UNREPLAYED_REASONING_NOTE,
     _multi_agent_message_is_user_visible,
     _program_needs_followup,
+    _retained,
     _usage_to_openai,
 )
 from lib.log import get_logger
@@ -52,11 +54,14 @@ def _string_part(value: object, *, field: str) -> tuple[str, str | None]:
 
 
 def responses_response_to_openai(data: object,
-                                  tool_name_reverse: dict | None = None) -> dict:
+                                  tool_name_reverse: dict | None = None, *,
+                                  reasoning_replay: bool = True) -> dict:
     """Convert a Responses API response object to chat.completion shape.
 
     ``tool_name_reverse`` (the request converter's second return value)
     restores truncated tool names on echoed function_call items.
+    ``reasoning_replay`` is the request's ``responses_reasoning_replay``
+    decision; when it is false no encrypted reasoning is retained.
     """
     if not isinstance(data, dict):
         return _invalid_response('top-level Responses payload must be an object')
@@ -101,6 +106,7 @@ def responses_response_to_openai(data: object,
     reasoning_parts: list = []
     tool_calls: list = []
     response_items: list[dict] = []
+    unreplayed_reasoning = False
 
     for item_index, item in enumerate(output):
         if not isinstance(item, dict):
@@ -142,7 +148,10 @@ def responses_response_to_openai(data: object,
                         return _invalid_response(error)
                     content_parts.append(text)
         elif itype == 'reasoning':
-            response_items.append(dict(item))
+            if _retained(item, reasoning_replay=reasoning_replay):
+                response_items.append(dict(item))
+            else:
+                unreplayed_reasoning = True
             for field_name in ('summary', 'content'):
                 raw_parts = item.get(field_name, [])
                 if raw_parts is None:
@@ -212,6 +221,8 @@ def responses_response_to_openai(data: object,
             logger.warning('[Responses] unhandled non-stream output item '
                            'type=%s; response remains usable', itype or '?')
 
+    if unreplayed_reasoning:
+        logger.info(_UNREPLAYED_REASONING_NOTE)
     finish = 'tool_calls' if tool_calls else 'stop'
     if status == 'incomplete':
         details = data.get('incomplete_details') or {}

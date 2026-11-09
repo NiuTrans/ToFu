@@ -354,8 +354,9 @@ def _run_tool(task, call_id):
     budget.finish_tool_attempt(event, phase='executor_returned')
 
 
-def _restart_continuation(r, worker, assignment, *, resumed=True, predecessor='interrupted'):
-    """The accepted Continue of a restart-paused Worker: same root, next attempt."""
+def _restart_continuation(r, worker, assignment, *, resumed=True, predecessor='interrupted',
+                          cause='server_restart', operation='continue'):
+    """The accepted successor of the Worker's settled attempt: same root, next attempt."""
     from lib.project_dispatch import admission
     old = r.c.repo.read(assignment['id'])['execution']
     r.attempts[old['attemptId']].update(status='interrupted', taskId=worker['id'])
@@ -366,17 +367,28 @@ def _restart_continuation(r, worker, assignment, *, resumed=True, predecessor='i
     trusted = admission.TrustedDispatch(r.c.repo.admission(assignment['id']))
     config = trusted.capture({}, 7, trusted.principal, worker['convId'])
     config.update(_turnOwnerUserId=7, _turnId=old['turnId'], _attemptId='restart-continuation',
-                  _turnOperation='continue')
+                  _turnOperation=operation)
     if resumed:
         config['_resumeSource'] = {'attemptId': old['attemptId'], 'taskId': worker['id'],
-                                   'status': 'interrupted', 'cause': 'server_restart'}
+                                   'status': predecessor, 'cause': cause}
     return {**{key: worker[key] for key in ('id', 'convId', 'status', '_userId', '_principalContext', '_attended')},
             '_turnId': old['turnId'], '_attemptId': 'restart-continuation', 'config': config,
             'abort_event': threading.Event(), 'usage': {}}
 
 
-def test_restart_resumed_worker_continues_its_tool_reservation_counter(runtime):
-    """Regression for worker-a6fc75aa9a89380be3061b9e: every resume refused to start."""
+@pytest.mark.parametrize(('operation', 'status', 'cause'), [
+    ('continue', 'interrupted', 'server_restart'),
+    ('continue', 'interrupted', 'user_abort'),
+    ('continue', 'failed', 'generation_error'),
+    ('checkpoint_resume', 'failed', 'generation_error'),
+    ('continue', 'truncated', 'max_tokens'),
+    ('answer_guidance', 'interrupted', 'human_guidance'),
+    ('regenerate', 'failed', 'generation_error'),
+    ('regenerate', 'completed', 'model_finished'),
+])
+def test_accepted_resume_continues_the_worker_tool_reservation_counter(
+        runtime, operation, status, cause):
+    """A settled predecessor's work remains charged across accepted resumes."""
     from lib.project_dispatch import admission
     r = runtime; row = bind(r)
     worker, assignment = _worker_task(r)
@@ -388,7 +400,8 @@ def test_restart_resumed_worker_continues_its_tool_reservation_counter(runtime):
     assert counter['rootTaskId'] == assignment['execution']['taskId'] != worker['id']
     assert counter['count'] == 3
 
-    resumed = _restart_continuation(r, worker, assignment)
+    resumed = _restart_continuation(r, worker, assignment, predecessor=status,
+                                    cause=cause, operation=operation)
     admission.bind_account(resumed)
     assert r.c.repo.read(assignment['id'])['toolReservations'] == counter
     _run_tool(resumed, 'after-restart')
@@ -405,7 +418,46 @@ def test_restart_resumed_worker_continues_its_tool_reservation_counter(runtime):
     assert usage(r, row)['toolCalls'] == 4 and not resumed.get('aborted')
 
 
-@pytest.mark.parametrize('replenish', ['fresh_start', 'foreign_nonce', 'foreign_root', 'settled_predecessor'])
+@pytest.mark.parametrize('predecessor, cause, operation', [
+    # 2026-11-07 08:57 (worker-b1c0c8af, 4647b89b): a restart interrupted the
+    # Worker after 123 tool calls, its boot-recovery Continue failed before
+    # entry, and the Coordinator's continue of that failed attempt never started.
+    ('failed', 'generation_error', 'continue'),
+    ('failed', 'provider_error', 'checkpoint_resume'),
+    ('interrupted', 'user_abort', 'continue'),
+    ('completed', 'stop', 'regenerate'),
+])
+def test_every_successor_of_the_bound_turn_continues_the_worker_tool_account(
+        runtime, predecessor, cause, operation):
+    """Not only a restart Continue: any settled predecessor's successor keeps the one account."""
+    from lib.project_dispatch import admission
+    r = runtime; row = bind(r)
+    worker, assignment = _worker_task(r)
+    spend(worker)
+    for number in range(2):
+        _run_tool(worker, f'before-{number}')
+    counter = r.c.repo.read(assignment['id'])['toolReservations']
+    assert counter['count'] == 2
+
+    resumed = _restart_continuation(r, worker, assignment, predecessor=predecessor,
+                                    cause=cause, operation=operation)
+    admission.bind_account(resumed)
+    assert r.c.repo.read(assignment['id'])['toolReservations'] == counter
+    _run_tool(resumed, 'after')
+
+    stored = r.c.repo.read(assignment['id'])
+    assert stored['toolReservations'] == {**counter, 'count': 3}
+    assert [(item['tool_ordinal'], item['tool_call_id'], item['account_nonce']) for item in stored['toolAttempts']] == [
+        (1, 'before-0', counter['accountNonce']), (2, 'before-1', counter['accountNonce']),
+        (3, 'after', counter['accountNonce'])]
+    lease = resumed['_executionBudget'].reserve_model(resumed, input_tokens=1, max_output_tokens=10)
+    assert lease.ordinal == 2
+    lease.settle(unsent=True)
+    assert usage(r, row)['toolCalls'] == 3 and not resumed.get('aborted')
+
+
+@pytest.mark.parametrize('replenish', ['fresh_start', 'foreign_nonce', 'foreign_root', 'live_predecessor',
+                                       'foreign_turn'])
 def test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter(runtime, replenish):
     from lib.llm.llm_errors import AbortedError
     from lib.project_dispatch import admission
@@ -419,7 +471,31 @@ def test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_count
         r.c.repo.mutate(assignment['id'], lambda row: row['toolReservations'].update({key: value}))
     before = r.c.repo.read(assignment['id'])['toolReservations']
     resumed = _restart_continuation(r, worker, assignment, resumed=replenish != 'fresh_start',
-                                    predecessor='completed' if replenish == 'settled_predecessor' else 'interrupted')
-    with pytest.raises(AbortedError, match='replenished|interrupted predecessor'):
+                                    predecessor='running' if replenish == 'live_predecessor' else 'interrupted')
+    if replenish == 'foreign_turn':
+        r.attempts[resumed['config']['_resumeSource']['attemptId']]['turnId'] = 'another-turn'
+    with pytest.raises(AbortedError, match='replenished|settled predecessor'):
+        admission.bind_account(resumed)
+    assert r.c.repo.read(assignment['id'])['toolReservations'] == before
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('attemptId', 'foreign-attempt'), ('taskId', 'foreign-task'),
+    ('turnId', 'foreign-turn'), ('conversationId', 'foreign-conversation'),
+    ('status', 'running'), ('status', 'failed'),
+])
+def test_resume_receipt_must_match_exact_predecessor_before_restoring_counts(runtime, field, value):
+    from lib.llm.llm_errors import AbortedError
+    from lib.project_dispatch import admission
+
+    r = runtime
+    bind(r)
+    worker, assignment = _worker_task(r)
+    _run_tool(worker, 'before-resume')
+    resumed = _restart_continuation(r, worker, assignment)
+    before = r.c.repo.read(assignment['id'])['toolReservations']
+    source = resumed['config']['_resumeSource']['attemptId']
+    r.attempts[source][field] = value
+    with pytest.raises(AbortedError, match='settled predecessor'):
         admission.bind_account(resumed)
     assert r.c.repo.read(assignment['id'])['toolReservations'] == before

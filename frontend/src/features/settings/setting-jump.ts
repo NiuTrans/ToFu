@@ -27,6 +27,9 @@ import { t } from '../../i18n';
 export interface SettingJumpTarget {
   /** Settings tab id — matches [data-tab] in the settings modal shell. */
   readonly tab: string;
+  /** A chat platform: its collapsible section of the 消息平台 tab, expanded by
+   * the jump (messaging-platforms.ts). */
+  readonly platform?: string;
   /** Element id of the control in static/settings_panels/<tab>.html.
    * Omitted for tab-level targets: the jump ends at the tab switch (dynamic
    * panel content like provider cards has no stable anchor). */
@@ -56,9 +59,14 @@ export const SETTING_JUMP_TARGETS: Readonly<Record<string, SettingJumpTarget>> =
   'mcp': { tab: 'mcp' },
   'experiments': { tab: 'experiments' },
   'advanced': { tab: 'advanced' },
-  'feishu': { tab: 'feishu' },
-  'dx': { tab: 'dx' },
-  'github': { tab: 'github' },
+  'messaging': { tab: 'messaging' },
+  /* ── Chat platforms: sections of the 消息平台 tab ── */
+  'feishu': { tab: 'messaging', platform: 'feishu' },
+  'dx': { tab: 'messaging', platform: 'dx' },
+  'github': { tab: 'messaging', platform: 'github' },
+  'wecom': { tab: 'messaging', platform: 'wecom' },
+  'qq': { tab: 'messaging', platform: 'qq' },
+  'wechat': { tab: 'messaging', platform: 'wechat' },
   /* ── Control-level targets ── */
   'language': { tab: 'general', elementId: 'settingLanguage' },
   'system-prompt': { tab: 'general', elementId: 'settingSystem' },
@@ -117,7 +125,8 @@ export function jumpToSetting(key: unknown): void {
    * unsaved edits — so only pay for it when the modal is actually closed. */
   const modal = document.getElementById('settingsModal');
   if (!modal?.classList.contains('open')) bridge.openSettings?.();
-  bridge.switchSettingsTab?.(target.tab);
+  /* A platform id opens the 消息平台 tab with that section expanded. */
+  bridge.switchSettingsTab?.(target.platform ?? target.tab);
   /* Tab-level target: the tab switch IS the landing — panel content is
    * rendered on demand and has no stable anchor to flash. */
   if (!target.elementId) return;

@@ -725,7 +725,7 @@ with workspace_read_lease(checkout_or_descendant_path, timeout=0.0):
 | Stable integration snapshot (`integration_control.py`) | stable read of the source checkout |
 | Integration submit and delivery publication (`integration_control.py`, `delivery.py`) | checkout write, or metadata plus the reclaimed tree |
 | Task-delta publication and clone reclamation (`task_delta_delivery.py`) | the published files |
-| Linear checkpoint capture and publication (`linear_git_checkpoint.py`) | checkout write |
+| Linear checkpoint capture (`linear_git_checkpoint.py`; publication writes no checkout file) | checkout write |
 | Dependency setup (`workspace_delivery.workspace_runtime_setup_lease`) | stable read of the checkout plus its runtime-setup key |
 | Git maintenance (`scripts/git_maintenance.py --apply`) | Git metadata |
 
@@ -776,6 +776,15 @@ live in [project integration](../modules/project_integration.md). Added lifecycl
 barriers have an explicit overhead; independent-task throughput comes from
 removing false exclusion, not claiming every uncontended call is faster. No
 resident cache/worker or concurrency cap was introduced.
+
+The rebinding check on every key entry is a lookup in a root -> active key
+index maintained beside the registry, never a scan of all active keys. A
+task-delta delivery admits one file claim per changed path, so a 1,100-path
+delta holds about 3,700 keys at once; the former per-entry scan made that
+one admission quadratic (`benchmarks/workspace_claims_lease.py`, local disk:
+14.6-15.0 s CPU before, 7.1-8.8 s after). The remaining cost is per-claim
+chain/realpath stats and held-descriptor validation, which the admission
+still repeats for every public scope it reenters.
 
 **Problem:** implicit common-directory ownership made a checkpoint in one linked
 worktree fail while another checkout's writer/read snapshot was active.
@@ -987,12 +996,24 @@ Specs: `tests/project_mod/test_workspace_admission_wait_both_sides.py`.
   a Python registry claim. A command started by an internal lease holder
   inherits its descriptors, so its exclusion lasts until the group exits.
 - Registry entries exist only for active holders/waiters. Lock files have no
-  durable owner state: physical ancestor, metadata, checkout and file keys retain
-  small inodes, while released transactions leave no live registry ownership
-  or FDs. They are **never unlinked on
-  release**: live/inherited FDs could otherwise lock a displaced inode while a
-  replacement admitted another writer. Safe namespace reclamation requires a
-  quiescent ownership protocol, not age/TTL stealing. No polling service is added.
+  durable owner state: physical ancestor, metadata, checkout and file keys are
+  small inodes, and released transactions leave no live registry ownership or
+  FDs. A lock file is unlinked only under a quiescence proof, never by age/TTL
+  stealing: the last local release of a key (and the boot sweep
+  `reclaim_unheld_lock_files` of the per-user tree namespace, for files killed
+  holders left) opens a fresh descriptor, takes a non-blocking exclusive flock
+  and unlinks the name only if it still names that inode. Any holder, shared
+  holder or descendant that inherited a lease FD keeps the flock and therefore
+  the file. An acquirer that opened the name before such an unlink finds, after
+  its own flock, that the name no longer names its inode and reopens it, so no
+  writer is ever admitted on a displaced inode. A cross-process fail-fast
+  acquirer that races a reclamation sees the ordinary busy refusal, as if the
+  release had lasted the reclamation longer. Measured 2026-11-08: reclamation
+  adds about 0.05 ms per released key on local disk and 1.0 ms on the dolphinfs
+  FUSE mount (acquire plus release I/O was 0.15 ms and 1.15 ms). Before it,
+  2.45M never-unlinked files had accumulated under
+  `/tmp/tofu-workspace-tree-<uid>/tofu-workspace-leases`. No polling service is
+  added.
 - A lease is scheduling/exclusion, never write authorization. Non-Git ROOT,
   read and metadata scopes invent no checkout identity; canonical FILE and
   explicit TREE scopes still protect non-Git targets.
@@ -1113,9 +1134,13 @@ probe costs 0.001 ms against a 0.63 ms scan of 137 processes. Specs:
 ### Linear checkpoint publication
 
 `linear_git_checkpoint.py` acquires the same lease before its existing Git lock
-for capture/baseline activation and again for publication. Verification itself
-runs outside the checkout lease. Promotion rechecks HEAD, symbolic branch,
-stable identity, workspace tree, and candidate absence after verification.
+for capture/baseline activation. Verification runs on a private checkout of the
+captured commit, outside the lease; publication writes no checkout file and
+takes only the Git lock and `index.lock`. Promotion rechecks the symbolic
+branch, stable identity and candidate absence; a branch that moved since
+capture is carried or deferred, and writers may keep editing throughout (see
+[project integration](../modules/project_integration.md), "Linear checkpoints
+publish in a busy checkout").
 
 Initial baseline activation uses one ref transaction with HEAD/candidate CAS.
 It first archives publication refs that share no history with HEAD (a rewritten
@@ -1125,10 +1150,12 @@ HEAD/stable history rather than advancing another integration controller. A
 stable that merely trails HEAD is not divergent.
 Publication CAS verifies candidate absence and old branch/stable SHAs.
 
-The real index is reserved with Git's `index.lock`. Only an ordinary clean index
-proved equal to the base revision is synchronized from a private prepared index
-after successful ref publication. Staged work, sparse/assume-unchanged flags, or
-missing index are preserved. Failure removes only this operation's temporary
+The real index is reserved with Git's `index.lock`. Only the entries of the paths
+the publication changes move, each only from the base version to the target (an
+entry already at the target stays), in a private prepared index installed after
+successful ref publication. Entries another writer staged, unmerged or
+sparse/assume-unchanged entries and a missing index are preserved; a busy index
+or a Git operation in progress defers publication. Failure removes only this operation's temporary
 lock/index: it never `read-tree`s an old revision over a concurrent index and
 never rolls back another writer's refs or working files. A post-publication
 failure is reported; immutable checkpoint refs remain recoverable.

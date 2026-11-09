@@ -146,9 +146,26 @@ pub struct AuthorityTransaction {
     search_invalidated: bool,
     worker_queue_changed: bool,
     worker_cancelled_tasks: BTreeSet<String>,
+    resident_projections: crate::turn::projection_residency::PendingResidency,
 }
 
 impl AuthorityTransaction {
+    pub(crate) fn forget_resident_projection(&mut self, key: &EntityKey) {
+        self.resident_projections.forget(key);
+    }
+
+    pub(crate) fn publish_resident_projection(
+        &mut self,
+        key: EntityKey,
+        entry: crate::turn::projection_residency::ResidentProjection,
+    ) {
+        self.resident_projections.publish(key, entry);
+    }
+
+    pub(crate) fn clear_resident_projection_publications(&mut self) {
+        self.resident_projections.clear();
+    }
+
     pub(crate) fn note_worker_queue_change(&mut self) { self.worker_queue_changed = true; }
     pub(crate) fn note_worker_cancellation(&mut self, task_id: &str) {
         self.worker_cancelled_tasks.insert(task_id.to_owned());
@@ -266,6 +283,7 @@ pub struct AuthorityDatabase {
         Vec<(u64, crate::online_backup::BackupAnchorProjection)>,
     >,
     search_invalidations: std::sync::Mutex<Option<Arc<crate::search_dirty::SearchInvalidations>>>,
+    resident_projections: Arc<crate::turn::projection_residency::ResidentProjections>,
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -300,6 +318,11 @@ fn decode_counter(value: Option<Vec<u8>>, name: &str) -> io::Result<u64> {
 }
 
 impl AuthorityDatabase {
+    /// Committed live Turn projections shared by the writer and its replicas.
+    pub(crate) fn resident_projections(&self) -> &crate::turn::projection_residency::ResidentProjections {
+        &self.resident_projections
+    }
+
     /// Per-authority progress, observed without taking the contended mutex.
     pub(crate) fn foreground_admissions(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
         std::sync::Arc::clone(&self.foreground_admissions)
@@ -327,6 +350,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -348,6 +372,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -377,6 +402,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -403,6 +429,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -424,6 +451,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -452,6 +480,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -511,6 +540,7 @@ impl AuthorityDatabase {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             search_invalidations: Default::default(),
+            resident_projections: Arc::clone(&self.resident_projections),
         })
     }
 
@@ -606,6 +636,16 @@ impl AuthorityDatabase {
         self.entities.writer_engine_mut()?.compact_history(maximum_retained_segments)
     }
 
+    pub fn history_routing(&mut self) -> io::Result<Option<crate::engine::HistoryRouting>> {
+        self.entities.writer_engine_mut()?.history_routing()
+    }
+
+    /// The downgrade converter; retires no history, so the overlay's replay
+    /// boundary is unaffected (`Engine::rewrite_history_routing`).
+    pub fn rewrite_history_routing(&mut self) -> io::Result<bool> {
+        self.entities.writer_engine_mut()?.rewrite_history_routing()
+    }
+
     #[cfg(test)]
     pub(crate) fn engine_mut_for_test(&mut self) -> &mut crate::engine::Engine {
         self.entities
@@ -670,15 +710,8 @@ impl AuthorityDatabase {
         self.entities.writer_engine_mut()?.set_wal_durability(durability)
     }
 
-    pub(crate) fn start_wal_flusher(
-        &mut self,
-        interval: std::time::Duration,
-    ) -> io::Result<()> {
-        self.entities.writer_engine_mut()?.start_wal_flusher(interval)
-    }
-
-    /// Attaches a daemon-owned barrier coordinator: strict commits then post
-    /// their durability witness and callers wait outside the authority
+    /// Attaches a daemon-owned barrier coordinator: commits of either tier
+    /// queue their frame, post their witness and wait outside the authority
     /// mutex (group-barrier pipelining).
     pub(crate) fn attach_wal_barrier(&mut self, barrier: &crate::wal::WalBarrier) -> io::Result<()> {
         self.entities.writer_engine_mut()?.attach_wal_barrier(barrier)
@@ -1542,6 +1575,7 @@ impl AuthorityDatabase {
             search_invalidated: false,
             worker_queue_changed: false,
             worker_cancelled_tasks: BTreeSet::new(),
+            resident_projections: Default::default(),
         })
     }
 
@@ -1634,6 +1668,7 @@ impl AuthorityDatabase {
             search_invalidated: false,
             worker_queue_changed: false,
             worker_cancelled_tasks: BTreeSet::new(),
+            resident_projections: Default::default(),
         }))
     }
 
@@ -2824,6 +2859,7 @@ impl AuthorityDatabase {
             search_invalidated,
             worker_queue_changed,
             worker_cancelled_tasks,
+            resident_projections,
             ..
         } = transaction;
         if authority_uuid != self.entities.authority_uuid() {
@@ -2962,6 +2998,7 @@ impl AuthorityDatabase {
             .iter()
             .map(|prepared| prepared.committed_result(committed.sequence))
             .collect();
+        self.resident_projections.apply_committed(resident_projections);
         self.worker_control.publish(worker_queue_changed, &worker_cancelled_tasks);
         self.worker_control.publish_conversations(owner_user_id, conversation_notices.keys());
         if search_invalidated {
@@ -4270,6 +4307,119 @@ mod tests {
         );
         assert_eq!(pending[0].record.identity.sequence, 1);
         assert_eq!(pending[1].record.identity.sequence, 2);
+    }
+
+    const SPILL_ROWS: u32 = 768;
+
+    fn spill_value(row: u32) -> Vec<u8> {
+        let mut value = vec![(row % 251) as u8; 4096];
+        value[..4].copy_from_slice(&row.to_be_bytes());
+        value
+    }
+
+    fn seeded_spill_database(vfs: Arc<DeterministicVfs>) -> AuthorityDatabase {
+        let mut database =
+            AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs).unwrap();
+        database.set_write_overlay_for_test(false);
+        let mut seed = database.begin(7, 11).unwrap();
+        database.entity_put(&mut seed, entity_key(b"seed"), b"seed".to_vec()).unwrap();
+        database.commit(seed).unwrap();
+        database
+    }
+
+    /// One tree commit whose fresh copy-on-write pages exceed the WAL carry
+    /// ceiling, forcing the identifier-only spill.
+    fn commit_spill(database: &mut AuthorityDatabase) -> io::Result<()> {
+        let mut transaction = database.begin(7, 11)?;
+        for row in 0..SPILL_ROWS {
+            database.entity_put(
+                &mut transaction,
+                entity_key(format!("spill-{row:05}").as_bytes()),
+                spill_value(row),
+            )?;
+        }
+        database.commit(transaction).map(|_| ())
+    }
+
+    fn assert_recovered_spill_prefix(vfs: Arc<DeterministicVfs>) {
+        vfs.crash().unwrap();
+        vfs.arm_fault(None).unwrap();
+        let mut recovered = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        let sequence = recovered.entities.writer_engine().unwrap().state().durable_sequence;
+        assert!((1..=2).contains(&sequence), "recovered sequence {sequence}");
+        let mut inspect = recovered.begin(7, 11).unwrap();
+        assert_eq!(
+            recovered.entity_get(&mut inspect, &entity_key(b"seed")).unwrap(),
+            Some(b"seed".to_vec())
+        );
+        for row in 0..SPILL_ROWS {
+            let value = recovered
+                .entity_get(&mut inspect, &entity_key(format!("spill-{row:05}").as_bytes()))
+                .unwrap();
+            match sequence {
+                1 => assert_eq!(value, None),
+                _ => assert_eq!(value, Some(spill_value(row)), "row {row}"),
+            }
+        }
+        drop(inspect);
+        let mut after = recovered.begin(7, 11).unwrap();
+        recovered.entity_put(&mut after, entity_key(b"after"), b"after".to_vec()).unwrap();
+        recovered.commit(after).unwrap();
+    }
+
+    #[test]
+    fn oversized_reference_commit_spills_into_one_catalogued_segment() {
+        let vfs = prepared_simulated_vfs();
+        let mut database = seeded_spill_database(vfs.clone());
+        let segments_before = database.entities.writer_engine().unwrap().payload_segment_count();
+        let loose_before = database.block_store_shared().list_block_ids(1 << 20).unwrap().len();
+        let spills_before = crate::fsync_stats::counters().flush_deferred;
+        vfs.arm_fault(None).unwrap();
+        commit_spill(&mut database).unwrap();
+        let trace = vfs.trace().unwrap();
+        assert!(crate::fsync_stats::counters().flush_deferred > spills_before, "commit did not spill");
+        assert!(
+            database.entities.writer_engine().unwrap().payload_segment_count() > segments_before,
+            "spilled pages must be published in a payload segment"
+        );
+        let loose_after = database.block_store_shared().list_block_ids(1 << 20).unwrap().len();
+        // Only the published catalog manifest may appear as a new loose file.
+        assert!(loose_after <= loose_before + 1, "loose {loose_before} -> {loose_after}");
+        let syncs = trace
+            .iter()
+            .filter(|operation| matches!(operation, Operation::SyncAll | Operation::SyncData))
+            .count();
+        assert!(syncs <= 16, "spill paid {syncs} file syncs");
+    }
+
+    #[test]
+    fn every_spill_commit_io_fault_recovers_only_an_atomic_prefix() {
+        let baseline_vfs = prepared_simulated_vfs();
+        let mut baseline = seeded_spill_database(baseline_vfs.clone());
+        baseline_vfs.arm_fault(None).unwrap();
+        commit_spill(&mut baseline).unwrap();
+        let trace = baseline_vfs.trace().unwrap();
+        drop(baseline);
+
+        for (index, operation) in trace.iter().enumerate() {
+            let operation_number = index as u64 + 1;
+            let mut actions = vec![FaultAction::ErrorBefore(io::ErrorKind::Interrupted)];
+            match operation {
+                Operation::Write => actions.push(FaultAction::ShortWrite(7)),
+                Operation::SyncAll | Operation::SyncData | Operation::SyncDirectory => {
+                    actions.push(FaultAction::DropSync)
+                }
+                _ => {}
+            }
+            for action in actions {
+                let vfs = prepared_simulated_vfs();
+                let mut database = seeded_spill_database(vfs.clone());
+                vfs.arm_fault(Some(FaultRule { operation_number, action })).unwrap();
+                let _ = commit_spill(&mut database);
+                drop(database);
+                assert_recovered_spill_prefix(vfs);
+            }
+        }
     }
 
     #[test]

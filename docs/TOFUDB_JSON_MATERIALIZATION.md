@@ -65,9 +65,87 @@ prevent attributing wall-clock differences to this change. Exact producer
 parity, guidance, retirement, text-tail, commit-fault and recovery coverage stays
 in the Turn, execution-frame and projection-patch suites.
 
-Alternatives considered: a parsed-head cache requires version/owner fencing,
-budget accounting and reclamation and leaves cold replay's repeated-copy work;
-skipping JSON, identity, revision or byte-witness checks weakens correctness. Moving copies to another thread would retain their CPU and memory costs.
+Alternatives considered: skipping JSON, identity, revision or byte-witness
+checks weakens correctness; moving copies to another thread would retain their
+CPU and memory costs. Reuse across events is owned by committed live-head
+residency below, not by a capacity-bounded parsed-head cache.
+
+## Committed live-head residency
+
+Problem: each structural `turn.event.record` on a live Turn decoded its whole
+head again (checkpoint, patch chain, text pages) to apply a patch of a few KiB.
+In production (2026-11-08, 210 s) 3,142 materializations decoded 12.85 GB of
+checkpoints for 3,816 events, about 65 ms of engine time per event. The
+execution-frame witness covers only top-level metadata patches; tool rounds,
+segments and nested paths still materialized.
+
+Decision: `src/turn/projection_residency.rs` keeps, per Turn document key, the
+exact public projection one committed event produced, its exact encoded size
+and that commit's complete stored Turn header. An event consumes the entry only
+when its own transactional read returns the identical header, which is the
+adjacency proof of one IR transaction extended across commits: a committed
+header names its projection revision and head chain, and no committed writer
+repeats it with another projection. Publication rides on the
+`AuthorityTransaction` and is applied only after `AuthorityDatabase::commit`
+succeeded; `metadata_summary::put_document`, the single Turn document writer,
+forgets the key in every other committed write; an IR step that is not an event
+clears the transaction's publications; a take removes the entry, so a failed or
+conflicting commit loses it and the next event materializes the durable head.
+Text and frame fast paths advance the entry by exactly their stored delta, and
+opening a text tail uses its projection and byte count instead of
+materializing. Reused projections carry no stable-segment proof: the shared
+normalizer still runs for each request, as for the in-transaction slot. Entries
+are volatile; a restart, failover or replica never reads one.
+
+Lifetime and memory: the terminal event consumes the entry and publishes
+nothing, and lifecycle writes forget it, so resident memory is the committed
+projections of live heads whose next event would otherwise decode them. There
+is no count, byte or age bound to tune. A live Turn removed without a Turn
+document write (purging a still-running conversation) keeps its entry until
+the next event of that key or process exit. `system.metrics.durability`
+reports `projectionResidentHits`, `projectionResidentStale` (entries dropped
+because a newer committed header superseded them), `projectionResidentEntries`
+and `projectionResidentBytes` (exact encoded projection bytes; heap use is
+larger by the parsed-value overhead).
+
+Integrity: durable heads are still fully verified by every cold
+materialization (reopen, first event after restart, any reader). A warm event
+does not re-verify the unchanged checkpoint bytes it would previously have
+re-read; corruption of a live head's checkpoint or patch documents is then
+reported by the next cold materialization instead of the next event.
+
+Alternatives considered: a capacity-bounded LRU of parsed heads (the SQL
+authority's `TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB` design) needs a tuned byte
+budget, idle expiry and its own invalidation, and its hit rate depends on the
+budget; caching only the decoded immutable checkpoint keeps the per-event
+clone and patch replay; extending the frame witness to nested and tool-round
+patches cannot reproduce the shared segment normalizer and guidance repair
+without the full projection.
+
+Measurement (`turn::event_load_tests`, 3.75 MB production-shaped projection,
+one IR transaction per event, tmpfs, same event sequence on both engines,
+medians of three alternating runs): 180 streaming events decode 322.9 MB of
+checkpoints before (84 materializations) and 0 after; prepare+commit latency
+mean 22.0 to 3.7 ms, p99 74.0 to 13.6 ms. 96 back-to-back tool events decode
+371.6 MB before and 0 after; mean 33.3 to 11.6 ms, p99 44.9 to 15.1 ms.
+Settlement reuses the resident projection: 74 to 55 ms (streaming) and 84 to
+59 ms (tool burst). A cold read of the live Turn costs the same on both engines
+(39 ms; 48 chain patches instead of 0 add under 1 ms beside the checkpoint
+decode). The reopened Turn, Attempt, events, sync, header and raw events,
+live and settled, are byte-identical between the engines.
+The remaining ~10 ms per structural event is the normalizer copy and compare
+and the exact size encoding of the next projection. In the daemon,
+`turn.event.record` is prepared on a preparation replica outside the authority
+hold, so this work is event latency and engine CPU, not hold time, except for
+exclusive fallbacks. On the production-shaped load test
+(`scripts/tofudb_load_test.py`, tmpfs, alternating runs of both engines) checkpoint
+decoding fell 80% at 1x and 93% at 3x, event preparation from 2.2 to 1.1 ms;
+its synthetic projections are small and highly compressible, so WAL bytes did
+not move. Its 1x client p50s moved within 0.5 ms except settlement (55-69 to
+105-190 ms, 29 samples per run), which the engine-only harness does not
+reproduce; that cause is not established. Specifications:
+`turn::reuse_specs` (fails on the previous engine), `turn::residency_tests`,
+`turn::projection_residency::tests`.
 
 ## Measurement boundaries
 
@@ -78,7 +156,9 @@ fences; applied patches include successful members of a later-rejected head. The
 Global totals include background consumers; request work identifies the caller.
 Patch counters cover the structural prefix; text-tail reconstruction is included
 in the total materialization time and keeps its separate text-page counters.
-No counter retains identities or content, and no new resident worker or cache is introduced.
+A reused resident projection is counted as a residency hit, never as a
+materialization. No counter retains identities or content, and no worker is
+introduced.
 
 The executable allocation contract replays 64 small Unicode text additions
 without copying an unrelated 192-KiB evidence string or replacing a text buffer

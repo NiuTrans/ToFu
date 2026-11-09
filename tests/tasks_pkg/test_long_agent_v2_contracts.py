@@ -1094,7 +1094,7 @@ def test_source_results_share_round_budget_without_artifact(monkeypatch):
             for index in range(3)
         })
 
-    assert sum(_budget._result_tokens(value[0], "")
+    assert sum(_budget._result_tokens(model_text_from_tool_result(value[0]), "")
                for value in reduced.values()) <= 24_000
     partial = [json.loads(value[0]) for value in reduced.values()
                if json.loads(value[0])["status"] == "partial"]
@@ -1134,7 +1134,7 @@ def test_tool_result_v2_round_aggregate_keeps_honest_preview_on_store_failure(
     reduced = _budget.enforce_round_aggregate_budget_v2(
         values, user_id=9, model="", observed_at_ms=123)
 
-    assert sum(_budget._result_tokens(value[0], "")
+    assert sum(_budget._result_tokens(model_text_from_tool_result(value[0]), "")
                for value in reduced.values()) <= 24_000
     partial = [json.loads(value[0]) for value in reduced.values()
                if value[0].startswith("{")]

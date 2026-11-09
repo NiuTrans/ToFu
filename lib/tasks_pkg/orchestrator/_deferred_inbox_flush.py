@@ -95,7 +95,7 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
         8-char task-id prefix used for structured log context.
     """
     from lib.tasks_pkg.context_dependencies import confirm
-    from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+    from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
     # Every carrier drained before this verified return was consumed by it,
     # whatever the outcome of the per-lane acknowledgements below.
     task.pop(UNVERIFIED_INBOX_DELIVERY, None)

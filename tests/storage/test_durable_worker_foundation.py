@@ -15,6 +15,7 @@ from lib.durable_worker import (
     WorkerExecutionContext,
     WorkerJobClaim,
     WorkerJobOutcome,
+    WorkerJobSuspension,
     WorkerLeaseLost,
     WorkerKindRegistration,
     WorkerKindSafety,
@@ -473,6 +474,112 @@ def test_runner_heartbeat_fence_loss_prevents_terminal_write():
     assert result.state == 'lease_lost'
     assert store.heartbeat_calls
     assert store.complete_calls == []
+
+
+def test_transient_claim_and_heartbeat_failures_do_not_revoke_authority():
+    class Store(_FakeStore):
+        initial_probes = 0
+        beats = 0
+        recovered = threading.Event()
+
+        def claim_state(self, *args, **kwargs):
+            self.initial_probes += 1
+            if self.initial_probes == 1:
+                raise StorageError('database_unavailable', 'temporarily stalled')
+            return super().claim_state(*args, **kwargs)
+
+        def heartbeat(self, *args, **kwargs):
+            self.beats += 1
+            if self.beats == 1:
+                raise StorageError('database_timeout', 'temporarily stalled')
+            self.recovered.set()
+            return super().heartbeat(*args, **kwargs)
+
+    store = Store(_job_document())
+    def handler(context, payload):
+        assert store.recovered.wait(5)
+        context.checkpoint()
+        return WorkerJobOutcome(status='succeeded')
+    runner = SynchronousWorkerRunner(worker_id='replica-a/worker-1', store=store,
+        registrations=[_registration(handler)], heartbeat_interval_ms=5)
+    assert runner.run_once().state == 'succeeded'
+    assert store.initial_probes == 2 and store.beats >= 2
+    assert len(store.complete_calls) == 1
+
+
+@pytest.mark.parametrize('process_bound', [False, True])
+def test_transient_deferral_retries_only_for_process_bound_owner(process_bound):
+    from lib.storage.worker_process import worker_process_id
+
+    worker = (worker_process_id(uuid.uuid4().hex, legacy_prefix='test')
+              if process_bound else 'replica-a/worker-1')
+
+    class Store(_FakeStore):
+        deferrals = 0
+
+        def defer(self, claim, **kwargs):
+            self.deferrals += 1
+            if self.deferrals == 1:
+                raise StorageError('database_unavailable', 'deferral reply unavailable')
+            return {'ok': True}
+
+    store = Store({**_job_document(), 'claimOwner': worker})
+    runner = SynchronousWorkerRunner(worker_id=worker, store=store,
+        registrations=[_registration(lambda *args: WorkerJobSuspension(available_at_ms=5000))],
+        heartbeat_interval_ms=5)
+    result = runner.run_once()
+    assert result.state == ('suspended' if process_bound else 'suspension_unconfirmed')
+    assert store.deferrals == (2 if process_bound else 1)
+
+
+def test_joined_process_bound_invocation_releases_unconfirmed_settlement():
+    from lib.storage.worker_process import worker_process_id
+    worker = worker_process_id(uuid.uuid4().hex, legacy_prefix='test')
+    released = []
+    class Store(_FakeStore):
+        def defer(self, claim, **kwargs):
+            released.append(claim)
+            assert len(self.complete_calls) == 1
+            return {'ok': True}
+    store = Store({**_job_document(), 'claimOwner': worker}, terminal_response={'unknown': True})
+    def unconfirmed(*args, **kwargs):
+        store.complete_calls.append(None)
+        raise StorageError('database_unavailable', 'lost acknowledgement')
+    store.complete = unconfirmed
+    runner = SynchronousWorkerRunner(worker_id=worker, store=store,
+        registrations=[_registration(lambda *args: WorkerJobOutcome(status='succeeded'))])
+    assert runner.run_once().state == 'terminal_unconfirmed'
+    assert len(released) == 1
+
+
+def test_lost_claim_ack_retries_same_receipt_without_hiding_owned_job():
+    from lib.durable_worker.service import _ObservedJobStore, _ClaimObservation
+    calls = []
+    horizons = []
+    class Client:
+        def query(self, operation, payload):
+            if operation == 'worker_job.claim_horizon':
+                horizons.append(payload)
+                assert len(horizons) == 1, 'retry must not hide the committed claim'
+                return {'claimableInMs': 0}
+            assert operation == 'worker_job.claim_state'
+            return {'ok': True}
+
+        def command(self, operation, payload, command_id):
+            if operation == 'worker_job.claim_next':
+                calls.append((payload, command_id))
+                if len(calls) == 1:
+                    raise StorageError('database_unavailable', 'ACK was lost after commit')
+                return _job_document()
+            assert operation == 'worker_job.complete'
+            return {'ok': True}
+    store = _ObservedJobStore(lambda **kwargs: Client(), _ClaimObservation(), threading.Event())
+    runner = SynchronousWorkerRunner(worker_id='replica-a/worker-1', store=store,
+        registrations=[_registration(lambda *args: WorkerJobOutcome(status='succeeded'))],
+        heartbeat_interval_ms=5)
+    assert runner.run_once().state == 'succeeded'
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0][0]['retain_claim'] is True and calls[0][1]
 
 
 def test_runner_refused_terminal_cas_reports_lease_loss():

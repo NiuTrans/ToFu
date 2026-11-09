@@ -48,7 +48,7 @@ def _publish_after_settings_write(
     except Exception as exc:
         logger.warning(
             "[SettingsStore] change notification failed conv=%s: %s",
-            conversation_id[:8],
+            conversation_id,
             exc,
         )
 
@@ -135,7 +135,7 @@ def update_conversation_settings(
     logger.warning(
         "[SettingsStore] settings contention exceeded %d attempts conv=%s",
         _MAX_CAS_ATTEMPTS,
-        conversation_id[:8],
+        conversation_id,
     )
     return None
 

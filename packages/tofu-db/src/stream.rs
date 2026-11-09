@@ -1436,7 +1436,9 @@ mod tests {
             assert_eq!(result.last_sequence, 20);
             assert!(result.segment_count >= 2);
             let metrics = engine.block_write_metrics();
-            assert_eq!(metrics.blocks_written, result.segment_count as u64);
+            // Stream segments spill through one payload segment; loose writes
+            // never exceed one per stream segment (no per-event blocks).
+            assert!(metrics.blocks_written <= result.segment_count as u64, "{metrics:?}");
             assert!(metrics.bytes_written < 6_000_000);
         }
         let engine = Engine::open(directory.path()).unwrap();

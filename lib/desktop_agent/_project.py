@@ -314,15 +314,16 @@ def cmd_project_apply_diff(params):
 
 
 def cmd_project_edit_file(params):
-    """Apply the unified mixed edit batch inside a declared remote root."""
+    """Apply the unified replacement batch inside a declared remote root."""
     def _go(p):
         edits = p.get('edits')
         if not isinstance(edits, list) or not edits:
             raise ProjectError('edits must be a non-empty array')
         edits = edits[:30]
         from lib.project_mod.write_tools._ops import (
-            _ECHO_REPAIR_MAX_CHARS, _finalize_insertion, _py_syntax_guard,
+            _SYNTAX_GUARD_MAX_CHARS, _py_syntax_guard,
         )
+        from lib.tools.project import retired_edit_operation_error
         lines = []
         committed = []
         # Bounded to 30 targets, only Python within the shared parser budget.
@@ -335,11 +336,11 @@ def cmd_project_edit_file(params):
             try:
                 if not isinstance(edit, dict):
                     raise ProjectError('edit must be an object')
-                operation = edit.get('operation')
                 anchor = edit.get('anchor')
                 content = edit.get('content')
-                if operation not in ('insert_after', 'insert_before', 'replace'):
-                    raise ProjectError(f'invalid operation: {operation!r}')
+                retired = retired_edit_operation_error(edit.get('operation'))
+                if retired:
+                    raise ProjectError(retired)
                 if not isinstance(anchor, str) or not anchor:
                     raise ProjectError('anchor must be a non-empty string')
                 if not isinstance(content, str):
@@ -359,58 +360,39 @@ def cmd_project_edit_file(params):
                         f'{edit_path!r}')
                 _check_write_allowed(target)
                 with open(target, 'r', encoding='utf-8', errors='replace',
-                          newline='' if operation == 'replace' else None) as f:
+                          newline='') as f:
                     text = f.read()
                 matches = text.count(anchor)
-                if matches == 0 and operation == 'replace':
+                if matches == 0:
                     # Read tools expose universal newlines. Try that existing
                     # spelling only after exact matching, never before it.
                     text = text.replace('\r\n', '\n').replace('\r', '\n')
                     anchor = anchor.replace('\r\n', '\n').replace('\r', '\n')
                     matches = text.count(anchor)
-                # Match the server backend: ignore replace_all for a unique
-                # insert, while keeping multi-site insertion unavailable.
-                replace_all = (operation == 'replace'
-                               and bool(edit.get('replace_all')))
+                replace_all = bool(edit.get('replace_all'))
                 if matches == 0:
                     raise ProjectError('anchor text not found')
                 if matches > 1 and not replace_all:
                     raise ProjectError(
                         f'anchor text matches {matches} locations — narrow it')
 
-                if operation == 'replace':
-                    new_text = (text.replace(anchor, content) if replace_all
-                                else text.replace(anchor, content, 1))
-                    extra = ''
-                else:
-                    anchor_idx = text.index(anchor)
-                    # Parity with the server-side boundary-echo auto-repair
-                    # (TOFU_EDIT_ECHO_REPAIR=0 disables both): anchor/neighbour
-                    # context echoed inside content is stripped when provably
-                    # safe, and provably-contentless echo edits fail here.
-                    fin = _finalize_insertion(
-                        text, anchor_idx, anchor, content,
-                        'before' if operation == 'insert_before' else 'after',
-                        edit.get('path', ''), syntax_guard=False)
-                    if not fin['ok']:
-                        raise ProjectError(fin['error'])
-                    new_text = fin['new_content']
-                    extra = ''.join(f' [{n}]' for n in fin['notes'])
+                new_text = (text.replace(anchor, content) if replace_all
+                            else text.replace(anchor, content, 1))
 
                 _snapshot(root_real, target)
                 _atomic_write(target, new_text)
                 _stamp_read(target)
                 if receipt_path:
-                    committed.append(committed_file(receipt_path, 'patched' if operation == 'replace' else 'inserted'))
+                    committed.append(committed_file(receipt_path, 'patched'))
                 ok_count += 1
                 lines.append(
-                    f'[{i}] OK {edit_path} [{operation}]{extra}')
+                    f'[{i}] OK {edit_path} [replace]')
                 if syntax_enabled and edit_path.endswith('.py'):
                     state = syntax_states.setdefault(target, {
                         'path': edit_path,
-                        'before': text if len(text) <= _ECHO_REPAIR_MAX_CHARS else None,
+                        'before': text if len(text) <= _SYNTAX_GUARD_MAX_CHARS else None,
                     })
-                    state['after'] = (new_text if len(new_text) <= _ECHO_REPAIR_MAX_CHARS
+                    state['after'] = (new_text if len(new_text) <= _SYNTAX_GUARD_MAX_CHARS
                                       else None)
                     state['line'] = len(lines) - 1
             except (ProjectError, FileReceiptError, OSError, UnicodeError) as exc:

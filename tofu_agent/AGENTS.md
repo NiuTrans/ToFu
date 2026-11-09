@@ -55,7 +55,12 @@ in `tests/repo_map/test_native_repository_capacity.py` and the SDK runtime suite
 Installed native model/tool verification is `test_native_model_loop_installed.py`:
 explicit wheel/dependency paths, `-S`, no configured-slot override, no source
 imports, shared scan image and joined teardown. Shared typed failure contracts
-live in `lib.agent_core.storage_errors`, never the excluded storage package.
+(`lib.agent_core.storage_errors`), event batch budgets
+(`lib.agent_core.storage_event_policy`) and persistence projections
+(`lib.task_replay.persistence_projection`) live outside the excluded storage
+package. `tests/tofu_agent/test_tofu_agent_run_installed.py` builds the wheel and
+runs `tofu-agent run` from it alone; a checkout `PYTHONPATH` or editable install
+hides modules the wheel does not ship.
 
 `NativeRepositoryConfiguration.from_launch_policy` defaults its explicit native
 configuration to the installed pinned grammar bundle; a supplied directory remains

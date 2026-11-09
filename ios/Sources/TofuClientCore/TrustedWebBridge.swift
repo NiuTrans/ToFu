@@ -12,7 +12,7 @@ public enum TrustedWebBridge {
     }
 
     public static func allowsURL(_ url: URL?, serverURL: String, isMainFrame: Bool) -> Bool {
-        guard let url, let parsed = ServerUrl.parse(url.absoluteString) else { return false }
+        guard let url, let parsed = ServerUrl.parseNavigation(url.absoluteString) else { return false }
         return allows(serverURL: serverURL, scheme: parsed.scheme, host: parsed.host,
                       port: parsed.components.port ?? 0, isMainFrame: isMainFrame)
     }

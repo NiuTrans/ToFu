@@ -107,7 +107,7 @@ def create_timer(*, user_id: int,
     from ._notify import notify_timer_changed
     notify_timer_changed('created', user_id=user_id)
     logger.info('[Timer:%s] Created — conv=%s poll_interval=%ds max_polls=%d kind=%s check_cmd=%s pred=%s',
-                timer_id, conv_id[:12], poll_interval, max_polls, condition_kind,
+                timer_id, conv_id, poll_interval, max_polls, condition_kind,
                 (check_command[:80] + '…') if len(check_command) > 80 else check_command or '(none)',
                 (condition_command[:80] + '…') if len(condition_command) > 80 else condition_command or '(none)')
     return timer

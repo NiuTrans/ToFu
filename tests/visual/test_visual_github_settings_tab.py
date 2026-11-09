@@ -1,9 +1,9 @@
 """Real Chromium: Settings lists GitHub after 大象 and its panel renders the live channel state.
 
-The GitHub tab sits in the 连接 group right after 大象. Opening it renders the
+GitHub is the 消息平台 tab's section right after 大象. Expanding it renders the
 panel from the application's own /api/v4/channels endpoints over isolated test
 storage (no route interception, no GitHub token, no network to GitHub), and the
-assistant's ``setting:github`` jump chip lands on the same tab.
+assistant's ``setting:github`` jump chip opens that section.
 
 A connected account needs a real GitHub token, so the connected-account
 journey answers the /api/v4/channels endpoints in the page; the panel and its
@@ -32,13 +32,15 @@ def _open_app_in_chinese(page, live_server):
 def test_github_tab_follows_dx_and_renders_live_channel_state(page, live_server, screenshot_dir):
     _open_app_in_chinese(page, live_server)
     page.evaluate('() => window.openSettings()')
-    tab = page.locator('.settings-tab[data-tab="github"]')
+    tab = page.locator('.settings-tab[data-tab="messaging"]')
     tab.wait_for(state='visible')
-    assert tab.inner_text().strip() == 'GitHub'
-    tabs = page.eval_on_selector_all('.settings-tab', 'els => els.map(el => el.dataset.tab)')
-    assert tabs.index('github') == tabs.index('dx') + 1
+    platforms = page.eval_on_selector_all('#messagingPlatforms > details', 'els => els.map(el => el.dataset.platform)')
+    assert platforms.index('github') == platforms.index('dx') + 1
 
     tab.click()
+    section = page.locator('#msgPlatform_github')
+    assert section.locator('.msg-platform-name').inner_text().strip() == 'GitHub'
+    section.locator('summary').click()
     page.wait_for_selector('#settingsTab_github .channel-card', state='visible')
     titles = page.locator('#settingsTab_github .channel-card-title').all_inner_texts()
     assert len(titles) == 5, titles
@@ -61,7 +63,8 @@ def test_github_tab_follows_dx_and_renders_live_channel_state(page, live_server,
 def test_a_refused_token_is_explained_beside_its_input(page, live_server, screenshot_dir):
     _open_app_in_chinese(page, live_server)
     page.evaluate('() => window.openSettings()')
-    page.locator('.settings-tab[data-tab="github"]').click()
+    page.locator('.settings-tab[data-tab="messaging"]').click()
+    page.locator('#msgPlatform_github > summary').click()
     token_card = page.locator('#settingsTab_github .channel-card').nth(1)
     secret = token_card.locator('input[type="password"]')
     secret.wait_for(state='visible')
@@ -92,8 +95,8 @@ def test_setting_github_jump_chip_opens_the_github_tab(page, live_server):
     }""")
     page.locator('#githubJumpChip').click()
     page.wait_for_selector('#settingsTab_github .channel-card', state='visible')
-    assert page.locator('.settings-tab[data-tab="github"]').evaluate("el => el.classList.contains('active')")
-    assert page.locator('#settingsTab_github').evaluate("el => el.classList.contains('active')")
+    assert page.locator('.settings-tab[data-tab="messaging"]').evaluate("el => el.classList.contains('active')")
+    assert page.locator('#msgPlatform_github').evaluate('el => el.open')
 
 
 def _issue(key, title, *, mode=None):
@@ -134,7 +137,8 @@ def test_connected_github_tab_keeps_its_rows_aligned(page, live_server, screensh
     _route_connected_github(page)
     _open_app_in_chinese(page, live_server)
     page.evaluate('() => window.openSettings()')
-    page.locator('.settings-tab[data-tab="github"]').click()
+    page.locator('.settings-tab[data-tab="messaging"]').click()
+    page.locator('#msgPlatform_github > summary').click()
     panel = page.locator('#settingsTab_github')
     panel.locator('.channel-row').first.wait_for(state='visible')
     assert panel.locator('.channel-card').first.locator('.channel-card-head .channel-status').inner_text() == '已连接'

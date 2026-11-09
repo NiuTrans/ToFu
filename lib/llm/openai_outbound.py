@@ -19,6 +19,8 @@ def openai_body_to_chat(body):
     preserve_text_parts = _gateway_honors_cache_markers(
         model, inference_profile=body_route_profile(body))
     projected = strip_internal_request_fields(body)
+    from lib.llm_sanitize.lineage import ProjectionLineage
+    lineage = ProjectionLineage(body, 'chat_projection')
     messages = []
     if not isinstance(body.get('messages', []), list):
         raise ProtocolConversionError('request_list_required')
@@ -27,7 +29,7 @@ def openai_body_to_chat(body):
     )
     wire_ids = wire_tool_call_ids(
         body.get('messages') or (), tool_call_id_contract('openai', model))
-    for message in body.get('messages') or ():
+    for index, message in enumerate(body.get('messages') or ()):
         if not isinstance(message, dict):
             raise ProtocolConversionError('message_object_required')
         # A message without private fields is its own projection; sharing it
@@ -44,8 +46,10 @@ def openai_body_to_chat(body):
         if wire_ids:
             clean = respell_chat_message(clean, wire_ids)
         messages.append(clean)
+        lineage.emit(index, message.get('content'), clean.get('content'), message=index)
     projected['messages'] = messages
     report = conversion_report(body, 'openai')
     if report:
         projected['_conversion_report'] = report
+    lineage.finish(projected)
     return projected

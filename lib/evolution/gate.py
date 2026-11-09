@@ -26,7 +26,7 @@ import hashlib
 import time
 import uuid
 
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 from .contracts import (
     EvolutionStateError,

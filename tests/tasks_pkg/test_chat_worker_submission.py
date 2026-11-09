@@ -269,7 +269,7 @@ def test_closed_serving_loop_falls_back_once_and_closes_unsubmitted_coroutine(
     class ImmediateThread:
         def __init__(self, *, target, name, daemon):
             self.target = target
-            assert name == 'run_task-loop-clo' and daemon
+            assert name == 'run_task-loop-closed' and daemon
         def start(self):
             self.target()
 

@@ -224,6 +224,17 @@ The optional adapters remain separate from the isolation core:
   `BaseEnvironment` over QEMU Guest Agent. It supports prebuilt Linux images,
   file/directory transfer, command execution, shared verifier runs, strict
   `network_mode = "no-network"`, and proxy-only `network_mode = "public"`.
+  The reward channel stays root's: Harbor prepares every writable mount with
+  `chmod 777` and empties and re-chmods `/logs/verifier` right before
+  verification, so this adapter re-seals that directory to root:root 0700 at
+  the end of each of those commands and runs verifier commands as root. A
+  task-level `[verifier] user` is honored by giving that user ownership of the
+  directory, never by re-opening it to every uid; `/logs/agent` keeps the
+  writability the agent user needs. Logs return by guest download, so a
+  root-only container directory does not impede the host reader. Without the
+  seal, any de-privileged process in the container could forge or delete
+  `reward.txt` (verified in the native runner's container on cluster 857;
+  specs in `tests/evaluations/test_harbor_verifier_log_permissions.py`).
 - `rootless_vm.harbor_tofu_agent:TofuHostAgent` runs Tofu's model dispatcher in
   the host process and exposes bounded `run_command` and `submit_result` tools.
   A submission is accepted only after its validation command exits zero.
@@ -366,8 +377,8 @@ The harness is an explicit score/provenance dimension. Inspect the registry with
 | --- | --- | --- | --- |
 | `deepseek-minimal` | model and credentials host-only; tools in QEMU | ATIF-v1.7 plus redacted host dispatch audit | Published DeepSeek Harness Minimal result |
 | `tofu` | model and credentials host-only; tools in QEMU | ATIF-v1.7 plus redacted host dispatch audit | Tofu recovery/checkpoint harness |
-| `tofu-kimi` | production AgentRuntime and Kimi credentials host-only; two exclusive client tools in QEMU | native events + runtime/tool audit + ATIF-v1.7 | Formal Tofu candidate over the same Meituan Kimi |
-| `codex-kimi` | pinned Codex in QEMU; Kimi credential in launcher-owned host proxy | raw Codex JSONL + tagged proxy usage + ATIF-v1.7 | Codex CLI 0.149.1 over the same Meituan Kimi |
+| `tofu-kimi` | production AgentRuntime and Kimi credentials host-only; two exclusive client tools in QEMU | native events + runtime/tool audit + ATIF-v1.7 | Formal Tofu candidate over the same YourProvider Kimi |
+| `codex-kimi` | pinned Codex in QEMU; Kimi credential in launcher-owned host proxy | raw Codex JSONL + tagged proxy usage + ATIF-v1.7 | Codex CLI 0.149.1 over the same YourProvider Kimi |
 | `codex` | Codex CLI, model access, and credential inside QEMU | Harbor's native ATIF-v1.7 conversion | Harbor Codex installed agent |
 | `claude-code` | Claude Code CLI, model access, and credential inside QEMU | Harbor's native ATIF-v1.7 conversion | Harbor Claude Code installed agent |
 
@@ -397,7 +408,7 @@ The published DeepSeek-V4-Flash reference uses the exact one-line system prompt
 result must not be presented as a Minimal reproduction.
 
 The Minimal profile uses DeepSeek Harness's 256,000-token default output cap.
-For the physically selected Meituan deployment it records the observed 393,216
+For the physically selected YourProvider deployment it records the observed 393,216
 combined context limit and conservatively shrinks the per-turn completion
 budget as the prompt grows. This preserves the official cap for ordinary turns
 while preventing `input + max_tokens` from becoming a harness-induced HTTP 400.
@@ -505,7 +516,7 @@ after any run:
 python scripts/rootless_terminal_bench_21.py collect-trajectories \
   $TOFU_EVAL_ROOT/tb21/jobs/deepseek-v4-attempt-1 \
   --output-root $TOFU_EVAL_ROOT/tb21/trajectory-bundle \
-  --expected-model deepseek-v4-flash-meituan
+  --expected-model deepseek-v4-flash-yourprovider
 ```
 
 The bundle contains one sanitized ATIF file and `attribution.json` per trial,
@@ -604,7 +615,7 @@ Long tool trajectories are checkpointed before 300,000 prompt tokens by
 default (`--context-checkpoint-tokens`). The disposable VM and its files keep
 running while old chat turns are replaced with the original task plus recent
 terminal evidence. A provider `PromptTooLongError` triggers the same recovery
-once as a defensive fallback. The threshold leaves room below the Meituan
+once as a defensive fallback. The threshold leaves room below the YourProvider
 route's observed context ceiling for the configured 32,768-token completion;
 checkpoint count and threshold remain in the audit metadata.
 If `submit_result` supplies the exact same command that immediately preceded

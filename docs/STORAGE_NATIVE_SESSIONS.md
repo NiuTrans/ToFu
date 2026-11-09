@@ -62,12 +62,13 @@ again as a failed startup prematurely exhausted the crash breaker.
 Decision: `StorageRuntime` records an exit generation and only publishes a
 handshake from that generation. It relinquishes restart ownership under the
 same lock that records crashes, and counts each observed exit once. Native
-clients bind a runtime-owned recovery resolver before publication. After an
-availability failure, ordinary replay-safe operations resolve the current
-client inside their original aggregate deadline, checking native protocol and
-owner/tenant scope. Replay keeps the same command ID and payload and uses the
-existing durable receipt. Managed availability retries consume the existing
-time budget instead of three immediate attempts at the dead endpoint.
+clients bind a runtime-owned recovery resolver before publication. After a
+transient failure, ordinary replay-safe operations pause on that resolver and
+continue on the current client, checking native protocol and owner/tenant
+scope; the wait has no aggregate deadline while the authority is alive
+([client retry contract](STORAGE.md#client-retry-contract)). Replay keeps the
+same command ID and payload and uses the existing durable receipt, so a dead
+endpoint is never retried while supervision publishes its replacement.
 Standalone retry counts, protocol/integrity refusal, SQL ambiguous-write rules
 and instance-bound checkpoint control remain independent of that resolver.
 Stopping or degraded runtimes refuse recovery; the resolver never starts a

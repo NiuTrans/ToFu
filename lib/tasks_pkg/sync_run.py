@@ -14,7 +14,7 @@ This owner is independent of orchestration and chat-flow execution.
 import threading
 
 from lib.ids import short_id
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -118,7 +118,7 @@ def run_task_sync(
             run_task(task)
         except Exception as exc:
             logger.error('[run_task_sync] Task %s failed: %s',
-                         task['id'][:8], exc, exc_info=True)
+                         task_log_tag(task['id']), exc, exc_info=True)
             from lib.error_envelope import from_exception as _err_from_exc
             task['error'] = _err_from_exc(
                 exc, model=cfg.get('model', ''),
@@ -131,7 +131,7 @@ def run_task_sync(
             done_event.set()
 
     worker = threading.Thread(target=_worker, daemon=True,
-                              name=f'run_task_sync-{task["id"][:8]}')
+                              name=f'run_task_sync-{task_log_tag(task["id"])}')
     worker.start()
 
     if progress_fn is None:
@@ -157,7 +157,7 @@ def run_task_sync(
     if not finished:
         task['aborted'] = True
         logger.error('[run_task_sync] Task %s timed out after %.0fs',
-                     task['id'][:8], timeout)
+                     task_log_tag(task['id']), timeout)
         return f'Task timed out after {timeout:.0f}s'
 
     content = result_box[0] if result_box else task.get('content', '')
@@ -165,7 +165,7 @@ def run_task_sync(
     if _err:
         _err_summary = _err.get('detail') or _err.get('message') or _err.get('raw') if isinstance(_err, dict) else str(_err)
         logger.warning('[run_task_sync] Task %s completed with error: %s',
-                       task['id'][:8], _err_summary)
+                       task_log_tag(task['id']), _err_summary)
     return content or ''
 
 

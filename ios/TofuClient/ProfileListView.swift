@@ -11,7 +11,7 @@ struct ProfileListView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            StatusBanner(status: model.status)
+            StatusBanner(status: model.status, onCancel: model.cancelOperation)
             if model.profiles.isEmpty {
                 emptyState
             } else {
@@ -114,10 +114,16 @@ struct ProfileListView: View {
 /// The login progress / error banner. Port of StatusBanner.
 struct StatusBanner: View {
     let status: UiStatus
+    var onCancel: (() -> Void)? = nil
 
     var body: some View {
         if let text, text.isEmpty == false {
-            Text(text)
+            HStack {
+                Text(text).frame(maxWidth: .infinity, alignment: .leading)
+                if case .loggingIn = status, let onCancel {
+                    Button("Cancel sign-in", action: onCancel)
+                }
+            }
                 .font(.callout)
                 .foregroundStyle(isError ? Color.red : Color.accentColor)
                 .frame(maxWidth: .infinity, alignment: .leading)

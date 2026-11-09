@@ -80,8 +80,9 @@ class NativeStorageService(ResidentService):
             env['TOFUDB_TRANSPORT'] = 'daemon'
         return env
 
-    def stop(self, timeout: float = NATIVE_SERVICE_STOP_SECONDS) -> None:
-        super().stop(timeout)
+    def stop(self, timeout: float = NATIVE_SERVICE_STOP_SECONDS, *,
+             retire_failed_close: bool = False) -> str:
+        return super().stop(timeout, retire_failed_close=retire_failed_close)
 
     def prepare(self, environment: dict[str, str]) -> dict | None:
         # Other projects and explicitly supplied co-containers keep their owner.

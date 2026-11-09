@@ -29,7 +29,11 @@ Sources (exactly one per run):
 
 Report: per-task and per-conversation buckets with ``waitMs`` split by span kind
 (admission_wait / retry_wait / spawn_wait) and ``orchestrationMs`` split by
-window (startup / round_prep / round_settle / finalize). With spans (API and
+window (startup / round_prep / round_settle / finalize), plus the two
+informational first-token figures inside ``llmMs``: ``ttftMs`` (attempts that
+showed their first token) and ``failedAttemptMs`` (pre-first-token waits of
+attempts that failed or were retried/stopped, e.g. a gateway hold ending in
+HTTP 504; 0 for lines/documents written before it existed). With spans (API and
 ``--events``): startup stage totals, the remaining unattributed time by
 position (before the first round, inside/between rounds, after the last) and
 the user-visible prompt it overlapped, and the longest admission waits with
@@ -75,7 +79,8 @@ ORCHESTRATION_KINDS = (('startup', 'startupMs'),
                        ('round_settle', 'roundSettleMs'),
                        ('finalize', 'finalizeMs'))
 SPLIT_KINDS = WAIT_KINDS + ORCHESTRATION_KINDS
-SUM_FIELDS = BUCKETS + tuple(field for _, field in SPLIT_KINDS) + ('ttftMs', 'rounds')
+SUM_FIELDS = BUCKETS + tuple(field for _, field in SPLIT_KINDS) + (
+    'ttftMs', 'failedAttemptMs', 'rounds')
 PHASE_ROWS = 15
 _REQUIRED_LINE_FIELDS = ('totalMs', 'llmMs', 'toolMs', 'waitMs', 'admissionWaitMs',
                          'retryWaitMs', 'compactionMs', 'approvalWaitMs',
@@ -155,6 +160,7 @@ def record_from_trace(trace, conv):
     record = {'task': str(trace.get('taskId') or ''), 'conv': conv,
               'status': trace.get('status') or '-', 'coverage': trace.get('coverage') or '-',
               'ttftMs': int(summary.get('ttftMs') or 0),
+              'failedAttemptMs': int(summary.get('failedAttemptMs') or 0),
               'rounds': sum(1 for span in spans if span.get('kind') == 'round'),
               'droppedSpans': int(trace.get('droppedSpans') or 0)}
     for name in BUCKETS:
@@ -422,10 +428,11 @@ def render_text(report, *, rows=40):
                         ('orchestration', 'orchestrationMs'),
                         ('  startup', 'startupMs'), ('  round prep', 'roundPrepMs'),
                         ('  round settle', 'roundSettleMs'), ('  finalize', 'finalizeMs'),
-                        ('unattributed', 'unattributedMs'), ('ttft (in llm)', 'ttftMs')):
+                        ('unattributed', 'unattributedMs'), ('ttft (in llm)', 'ttftMs'),
+                        ('failed attempt (in llm)', 'failedAttemptMs')):
         if name == 'otherWaitMs' and not overall[name]:
             continue
-        lines.append(f'  {label:18s} {_seconds(overall[name])}  {_share(overall[name], total)}')
+        lines.append(f'  {label:23s} {_seconds(overall[name])}  {_share(overall[name], total)}')
     lines.append('\n-- Per conversation --')
     lines.append(f"  {'conversation':24s} {'tasks':>5s} {'total':>10s} {'llm':>6s} "
                  f"{'tool':>6s} {'wait':>6s} {'admission':>10s} {'retry':>10s} "
@@ -442,7 +449,7 @@ def render_text(report, *, rows=40):
     ordered = sorted(report['tasks'], key=lambda record: -record['totalMs'])
     lines.append(f'\n-- Per task (largest {min(rows, len(ordered))} of {len(ordered)}) --')
     lines.append(f"  {'task':36s} {'conversation':16s} {'status':7s} {'total':>10s} "
-                 f"{'llm':>10s} {'tool':>10s} {'wait':>10s} {'admission':>10s} "
+                 f"{'llm':>10s} {'failedAtt':>10s} {'tool':>10s} {'wait':>10s} {'admission':>10s} "
                  f"{'retry':>10s} {'spawn':>10s} {'orchestr.':>10s} {'unattr':>10s} "
                  "rounds coverage")
     for record in ordered[:rows]:
@@ -450,7 +457,7 @@ def render_text(report, *, rows=40):
         lines.append(
             f"  {record['task'][:36]:36s} {record['conv'][:16]:16s} {record['status'][:7]:7s} "
             + ' '.join(_seconds(record[name]) for name in (
-                'totalMs', 'llmMs', 'toolMs', 'waitMs', 'admissionWaitMs',
+                'totalMs', 'llmMs', 'failedAttemptMs', 'toolMs', 'waitMs', 'admissionWaitMs',
                 'retryWaitMs', 'spawnWaitMs', 'orchestrationMs', 'unattributedMs'))
             + f" {record['rounds']:6d} {record['coverage']}"
             + (f' droppedSpans={dropped}' if dropped else ''))

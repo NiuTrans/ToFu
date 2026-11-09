@@ -87,7 +87,7 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
     source_budget = bind_source_account(task, repository=repo)
     source_lease = task['_executionBudget'].reserve_model(task, input_tokens=5, max_output_tokens=5)
     source_lease.mark_dispatched(); source_lease.settle({'prompt_tokens': 5, 'completion_tokens': 5})
-    sends, workspaces = [], []
+    sends, workspaces, work_ids = [], [], []
 
     def transport(conv, cfg, data, watermark, bind, **kwargs):
         identity = 'native-file-worker-' + uuid.uuid4().hex
@@ -116,7 +116,9 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
             return identity, None
         bind_worker_workspace(worker)
         work = Path(worker['config']['projectPath']); workspaces.append(work)
-        assert work != root and admission.owned_workspace(worker)['task_id'] == identity
+        # The checkout belongs to the assignment's work id, not the physical task.
+        work_ids.append(admission.owned_workspace(worker)['task_id'])
+        assert work != root and work_ids[-1] != identity
         schemas, available = assemble_round_tools(cfg, worker, {'model': 'fixture-model',
             'project_path': str(work), 'project_enabled': True, 'search_mode': 'off', 'search_enabled': False,
             'fetch_enabled': False, 'code_exec_enabled': True, 'browser_enabled': False,
@@ -195,7 +197,8 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
     assert usage(repo, repo._load()[0], source_budget['id'])['tokens'] == 20
     assert row['toolAttempts'][0]['phase'] == 'executor_returned'
     assert row['toolAttempts'][1]['phase'] == 'executor_returned'
-    delivery.settle_task_workspace(str(root), sends[0], user_id=owner, outcome='completed')
+    assert work_ids == ['project-worker:' + first['assignment_id']]
+    delivery.settle_task_workspace(str(root), work_ids[0], user_id=owner, outcome='completed')
     delivery.resume_pending_workspace_deliveries()
     view = service.view_for_coordinator(first['assignment_id'], scope={'user_id': owner,
         'project_path': str(root), 'conversation_id': conv, 'binding_revision': binding['revision']})
@@ -231,8 +234,8 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         'assignment_id': first['assignment_id'], 'result_revision': view['execution']['resultRevision'],
         'decision': 'accept', 'note': 'Worker file bytes and command verification confirmed.',
         'checkpoint_sha': view['delivery']['checkpointSha']}))
-    assert reviewed.get('review', {}).get('actor') == 'coordinator', reviewed
-    assert reviewed['canonicalDelivery'] is False
+    assert reviewed.get('decision') == 'accept', reviewed
+    assert reviewed['canonical_delivery'] is False
     delivery.resume_pending_workspace_deliveries()
     delivered = json.loads(execute_coordinator_tool(task, 'await_project_workers', {
         'assignment_ids': [first['assignment_id']], 'wait_for': 'delivery', 'timeout_seconds': 0}))

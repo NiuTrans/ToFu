@@ -2,9 +2,10 @@
 //!
 //! Jobs are globally claimable inside one authenticated numeric tenant while
 //! retaining their explicit user owner. Queue selection is bounded by a
-//! fixed 1001-priority summary per task kind; it never sorts or scans an
-//! unbounded eligible set.
+//! fixed 1001-priority summary per task kind. Recovery traverses active lease
+//! indexes, skipping protected processes without scanning terminal history.
 
+use std::cmp::Reverse;
 use std::io;
 
 use serde::{Deserialize, Serialize};
@@ -655,7 +656,8 @@ fn lease_candidates(
     db: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
     kind: &str,
-) -> io::Result<Vec<IndexEntry>> {
+    now_ms: u64,
+) -> io::Result<(Vec<IndexEntry>, Option<u64>)> {
     let base = task_kind_prefix(kind)?;
     let (_, end) = namespace_range(tx, WORKER_JOB_LEASE_INDEX_NAMESPACE, &base)?;
     let key = |raw: &[u8]| {
@@ -674,17 +676,68 @@ fn lease_candidates(
     let current = key(&marked)?;
     let (_, current_end) = namespace_range(tx, WORKER_JOB_LEASE_INDEX_NAMESPACE, &marked)?;
     let mut rows = Vec::new();
+    let mut recheck: Option<u64> = None;
     for (start, finish) in [
         (legacy, start_new.clone()),
         (start_new, current.clone()),
         (current, current_end.clone()),
         (current_end, end),
     ] {
-        if let Some((_, entry)) = first_lease_range(db, tx, kind, start, finish)? {
+        let mut cursor = start;
+        while let Some((key, entry)) = first_lease_range(db, tx, kind, cursor, finish.clone())? {
+            if epoch_matches(db, &entry.lease_authority_epoch) && entry.lease_deadline_ms <= now_ms {
+                let job = read_job(db, tx, &entry.task_id)?
+                    .ok_or_else(|| invalid_data("worker lease target is missing"))?;
+                if job.status != "running" || lease_key(tx, &job)? != key {
+                    return Err(invalid_data("worker lease target differs"));
+                }
+                if process_claim_protected(&job.claim_owner) {
+                    let delay = job.lease_deadline_ms.checked_sub(job.heartbeat_at_ms)
+                        .filter(|delay| *delay > 0)
+                        .ok_or_else(|| invalid_data("invalid process liveness interval"))?;
+                    recheck = Some(recheck.map_or(delay, |old| old.min(delay)));
+                    let mut next = key.key_bytes().to_vec();
+                    next.push(0);
+                    cursor = EntityKey::new(tx.tenant_id(), TENANT_GLOBAL_OWNER_ID,
+                        WORKER_JOB_LEASE_INDEX_NAMESPACE, &next)?;
+                    continue;
+                }
+            }
             rows.push(entry);
+            break;
         }
     }
-    Ok(rows)
+    Ok((rows, recheck))
+}
+
+/// Existing claimOwner carries a versioned kernel process incarnation. Foreign
+/// or unavailable evidence never permits timeout takeover; epoch/token still
+/// fence every mutation. The shared journal owner supplies kernel death proof.
+fn process_claim_protected(owner: &str) -> bool {
+    let Some(raw) = owner.strip_prefix(crate::generated_tofudb_ir::WORKER_PROCESS_OWNER_PREFIX) else {
+        return false;
+    };
+    let fields: Vec<_> = raw.split(':').collect();
+    if fields.len() != 5 || owner.len() > 256 {
+        return false;
+    }
+    let Ok(boot) = uuid::Uuid::parse_str(fields[0]) else { return false; };
+    if boot.hyphenated().to_string() != fields[0]
+        || fields[4].len() != 32 || !fields[4].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return false;
+    }
+    let number = |field: &str| field.parse::<u64>().ok()
+        .filter(|n| *n > 0 && n.to_string() == field);
+    let (Some(namespace), Some(pid), Some(start)) = (number(fields[1]), number(fields[2]), number(fields[3])) else {
+        return false;
+    };
+    if pid > i32::MAX as u64 { return false; }
+    #[cfg(feature = "native-runtime-checkpoints")]
+    { !tofu_runtime::checkpoint_writer::quiescent(&json!({
+        "boot_id": fields[0], "pid_namespace": namespace, "pid": pid, "start_ticks": start,
+    })).unwrap_or(false) }
+    #[cfg(not(feature = "native-runtime-checkpoints"))]
+    { let _ = (namespace, start); true }
 }
 fn epoch_matches(db: &AuthorityDatabase, epoch: &str) -> bool {
     uuid::Uuid::parse_str(epoch).is_ok_and(|value| value == db.event_read_epoch())
@@ -701,6 +754,34 @@ fn expired_order<'a>(db: &AuthorityDatabase, entry: &'a IndexEntry) -> (u64, u16
         entry.task_id.as_str(),
     )
 }
+/// One order across both sets: the candidate claimable for longer wins. Each
+/// wait is read on its own clock, because lease deadlines follow the advancing
+/// lease clock while queued availability follows UTC, which lags it after a
+/// rollback; their raw values are not comparable. A lease from another
+/// authority lifecycle has waited since before this lifecycle began. Ties use
+/// priority, creation time and task ID.
+fn lease_claimable_first(
+    db: &AuthorityDatabase,
+    lease_now_ms: u64,
+    utc_now_ms: u64,
+    lease: &IndexEntry,
+    waiting: &IndexEntry,
+) -> bool {
+    let leased_for = if epoch_matches(db, &lease.lease_authority_epoch) {
+        lease_now_ms.saturating_sub(lease.lease_deadline_ms)
+    } else {
+        u64::MAX
+    };
+    let waited_for = utc_now_ms.saturating_sub(waiting.available_at_ms);
+    (Reverse(leased_for), lease.priority, lease.created_at_ms, lease.task_id.as_str())
+        <= (Reverse(waited_for), waiting.priority, waiting.created_at_ms, waiting.task_id.as_str())
+}
+/// Claim the job that became claimable first: the earliest reclaimable lease
+/// (`lease_candidates` skips live protected holders) or the queued head
+/// (priority, then availability), compared by `lease_claimable_first`. A
+/// queued job waits only for leases that expired before it became claimable;
+/// each takeover moves its lease past that point, so a stream of expiring
+/// leases cannot starve queued work.
 pub(crate) fn claim_next(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -713,7 +794,7 @@ pub(crate) fn claim_next(
     let now_ms = clock.lease_now_ms;
     let mut expired: Option<IndexEntry> = None;
     for task_kind in task_kinds {
-        for entry in lease_candidates(database, transaction, task_kind)? {
+        for entry in lease_candidates(database, transaction, task_kind, now_ms)?.0 {
             if epoch_matches(database, &entry.lease_authority_epoch)
                 && entry.lease_deadline_ms > now_ms
             {
@@ -728,49 +809,52 @@ pub(crate) fn claim_next(
     }
 
     let mut queued: Option<IndexEntry> = None;
-    if expired.is_none() {
-        for task_kind in task_kinds {
-            let summary = read_summary(database, transaction, task_kind)?;
-            let Some((priority, _)) = summary
-                .iter()
-                .enumerate()
-                .find(|(_, available_at_ms)| **available_at_ms <= clock.utc_now_ms)
-            else {
-                continue;
-            };
-            let Some((_, entry)) =
-                first_queued_at_priority(database, transaction, task_kind, priority as u16)?
-            else {
-                return Err(invalid_data("worker job queue summary target is missing"));
-            };
-            if entry.available_at_ms != summary[priority]
-                || entry.available_at_ms > clock.utc_now_ms
-            {
-                return Err(invalid_data(
-                    "worker job queue summary differs from its index",
-                ));
-            }
-            let order = (
-                entry.priority,
-                entry.available_at_ms,
-                entry.created_at_ms,
-                entry.task_id.as_str(),
-            );
-            if queued.as_ref().is_none_or(|current| {
-                order
-                    < (
-                        current.priority,
-                        current.available_at_ms,
-                        current.created_at_ms,
-                        current.task_id.as_str(),
-                    )
-            }) {
-                queued = Some(entry);
-            }
+    for task_kind in task_kinds {
+        let summary = read_summary(database, transaction, task_kind)?;
+        let Some((priority, _)) = summary
+            .iter()
+            .enumerate()
+            .find(|(_, available_at_ms)| **available_at_ms <= clock.utc_now_ms)
+        else {
+            continue;
+        };
+        let Some((_, entry)) =
+            first_queued_at_priority(database, transaction, task_kind, priority as u16)?
+        else {
+            return Err(invalid_data("worker job queue summary target is missing"));
+        };
+        if entry.available_at_ms != summary[priority] || entry.available_at_ms > clock.utc_now_ms
+        {
+            return Err(invalid_data(
+                "worker job queue summary differs from its index",
+            ));
+        }
+        let order = (
+            entry.priority,
+            entry.available_at_ms,
+            entry.created_at_ms,
+            entry.task_id.as_str(),
+        );
+        if queued.as_ref().is_none_or(|current| {
+            order
+                < (
+                    current.priority,
+                    current.available_at_ms,
+                    current.created_at_ms,
+                    current.task_id.as_str(),
+                )
+        }) {
+            queued = Some(entry);
         }
     }
 
-    let Some(selected) = expired.as_ref().or(queued.as_ref()) else {
+    let takeover = match (&expired, &queued) {
+        (Some(lease), Some(waiting)) => {
+            lease_claimable_first(database, now_ms, clock.utc_now_ms, lease, waiting)
+        }
+        (lease, _) => lease.is_some(),
+    };
+    let Some(selected) = (if takeover { expired.as_ref() } else { queued.as_ref() }) else {
         return Ok(None);
     };
     let mut job = read_job(database, transaction, &selected.task_id)?
@@ -781,7 +865,7 @@ pub(crate) fn claim_next(
     {
         return Err(invalid_data("worker job claim index target differs"));
     }
-    if expired.is_some() {
+    if takeover {
         if job.status != "running"
             || job.lease_deadline_ms != selected.lease_deadline_ms
             || job.lease_authority_epoch != selected.lease_authority_epoch
@@ -833,7 +917,9 @@ pub(crate) fn claim_horizon(
     let mut observe =
         |delay: u64| horizon = Some(horizon.map_or(delay, |current| current.min(delay)));
     for task_kind in task_kinds {
-        for entry in lease_candidates(database, transaction, task_kind)? {
+        let (entries, recheck) = lease_candidates(database, transaction, task_kind, clock.lease_now_ms)?;
+        if let Some(delay) = recheck { observe(delay); }
+        for entry in entries {
             observe(if epoch_matches(database, &entry.lease_authority_epoch) {
                 entry.lease_deadline_ms.saturating_sub(clock.lease_now_ms)
             } else {
@@ -914,7 +1000,7 @@ fn live_claim_matches(
         && job.status == "running"
         && job.claim_owner == worker_id
         && job.fencing_token == fence
-        && job.lease_deadline_ms > now_ms
+        && (job.lease_deadline_ms > now_ms || process_claim_protected(&job.claim_owner))
 }
 
 /// Explicit publication evidence. It never grants effect/replay authority.
@@ -1332,6 +1418,10 @@ mod tests {
     }
 
     fn seed(database: &mut AuthorityDatabase, id: &str) {
+        seed_at(database, id, 1_000);
+    }
+
+    fn seed_at(database: &mut AuthorityDatabase, id: &str, available_at_ms: u64) {
         let mut tx = database.begin_with_identity_claim_scopes(7, 41).unwrap();
         enqueue(
             database,
@@ -1345,7 +1435,7 @@ mod tests {
                 idempotency_key: id.to_owned(),
                 request_digest: "a".repeat(64),
                 priority: 100,
-                available_at_ms: 1_000,
+                available_at_ms,
                 now_ms: 1_000,
             },
         )
@@ -1453,6 +1543,46 @@ mod tests {
         let claimed = take(&mut db, "holder", 1).unwrap();
         assert_eq!(claimed["fencingToken"], 1);
         assert_eq!(claimed["leaseDeadlineMs"], 210_000);
+    }
+
+    #[test]
+    fn a_steady_stream_of_expiring_leases_cannot_starve_queued_work() {
+        let (_, mut db) = prepared();
+        // Holders that die in turn: one 10 s lease expires every 2.5 s, so an
+        // expired lease is due at every claim below.
+        for ordinal in 0..4_u64 {
+            db.set_worker_lease_test_time(100_000 + 2_500 * ordinal);
+            seed(&mut db, &format!("storm-{ordinal}"));
+            assert_eq!(take(&mut db, "storm", 1).unwrap()["taskId"], format!("storm-{ordinal}"));
+        }
+        // Claimable after storm-0's lease expired (110_000), before the others.
+        seed_at(&mut db, "waiting", 111_000);
+        let mut claimed = Vec::new();
+        for step in 0..8_u64 {
+            db.set_worker_lease_test_time(120_000 + 2_500 * step);
+            let job = take(&mut db, "storm", 1).expect("a claim is due at every step");
+            claimed.push((job["taskId"].as_str().unwrap().to_owned(), job["fencingToken"].as_u64().unwrap()));
+        }
+        // It waits only for the one lease that expired before it was claimable;
+        // the storm keeps its deadline order and every takeover advances the fence.
+        let expected: [(&str, u64); 8] = [("storm-0", 2), ("waiting", 1), ("storm-1", 2),
+            ("storm-2", 2), ("storm-3", 2), ("storm-0", 3), ("waiting", 2), ("storm-1", 3)];
+        assert_eq!(claimed, expected.map(|(id, fence)| (id.to_owned(), fence)));
+    }
+
+    #[test]
+    fn claim_order_measures_each_wait_on_its_own_clock_after_a_utc_rollback() {
+        let (_, mut db) = prepared();
+        seed(&mut db, "held");
+        assert_eq!(take(&mut db, "holder", 1).unwrap()["leaseDeadlineMs"], 110_000);
+        seed_at(&mut db, "queued", 95_000);
+        // UTC fell 20 s behind the advancing lease clock: the lease has been
+        // claimable for 10 s, the queued job for 5 s though its raw time is earlier.
+        db.set_worker_lease_test_time(120_000);
+        db.set_worker_queue_test_time(100_000);
+        let first = take(&mut db, "successor", 1).unwrap();
+        assert_eq!((&first["taskId"], &first["fencingToken"]), (&json!("held"), &json!(2)));
+        assert_eq!(take(&mut db, "successor", 1).unwrap()["taskId"], "queued");
     }
 
     #[test]

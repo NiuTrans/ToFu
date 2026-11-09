@@ -135,6 +135,7 @@ describe('live status wait tick', () => {
     const catalog: Record<string, string> = {
       'stream.phase.preparingToolCall': '{tool} の呼び出しを準備中（{elapsed}秒）',
       'stream.phase.waitingForResponse': '{model}の応答を待っています（{elapsed}秒経過）…',
+      'stream.phase.waitingForProviderResponse': '{model} のモデルサービスはまだ応答していません（送信から{elapsed}秒）…',
     };
     const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text,
       localizedText: (key, fallback, values) => (catalog[key] ?? fallback)
@@ -153,6 +154,11 @@ describe('live status wait tick', () => {
       detailArgs: { model: 'claude-opus-5.5', elapsed: 5 } }), ports);
     vi.advanceTimersByTime(2_000);
     expect(text()).toBe('claude-opus-5.5の応答を待っています（7秒経過）…');
+    render(node, block({ phase: 'waiting_model', detailKey: 'stream.phase.waitingForProviderResponse',
+      detailArgs: { model: 'kunlunbedrock.claude-opus-5.5-m17', elapsed: 173 } }), ports);
+    expect(text()).toBe('kunlunbedrock.claude-opus-5.5-m17 のモデルサービスはまだ応答していません（送信から173秒）…');
+    vi.advanceTimersByTime(2_000);
+    expect(text()).toBe('kunlunbedrock.claude-opus-5.5-m17 のモデルサービスはまだ応答していません（送信から175秒）…');
   });
 });
 

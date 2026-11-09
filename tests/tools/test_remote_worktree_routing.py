@@ -252,6 +252,25 @@ class TestRouting:
         assert routed['meta'][0]['toolName'] == 'run_command'
         assert 'routedAs' not in routed['meta'][0]
 
+    def test_edit_file_forwards_replace_for_agents_predating_replace_only(
+            self, routed):
+        _call('edit_file', {'path': 'a.py',
+                            'edits': [{'anchor': 'x', 'content': 'y'}]})
+        call = routed['send'][0]
+        assert call['cmd_type'] == 'project_edit_file'
+        assert call['params']['edits'] == [
+            {'anchor': 'x', 'content': 'y', 'operation': 'replace'}]
+
+    @pytest.mark.parametrize('operation', [
+        'insert_after', 'insert_before', 'replace_all'])
+    def test_edit_file_retired_operation_is_refused_before_forwarding(
+            self, routed, operation):
+        _tc, content, _ = _call('edit_file', {'path': 'a.py', 'edits': [
+            {'anchor': 'x', 'content': 'y'},
+            {'anchor': 'x', 'content': 'x\nz', 'operation': operation}]})
+        assert not routed['send']
+        assert '`operation` is retired' in content
+
     def test_unsupported_tool_honest_error(self, routed):
         _tc, content, _ = _call('apply_diffs', {'edits': []})
         assert 'not supported' in content and not routed['send']

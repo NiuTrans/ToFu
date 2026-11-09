@@ -45,7 +45,14 @@ PI_NODE_VERSION = '22.23.4'
 PI_NODE_SHA256 = '1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce'
 # Provider carrying each run model in Pi 1.4.0's built-in catalog
 # (pi-ai dist/providers/data/zai.json: thinkingFormat zai, levels low/high/max).
-PI_CATALOG_PROVIDERS = {'glm-5.3': 'zai', 'glm-5.3-flash': 'zai'}
+PI_CATALOG_PROVIDERS = {'glm-5.3': 'zai', 'glm-5.3-flash': 'zai',
+                        # pi-ai dist/providers/data/anthropic.json chat:claude-opus-5-5:
+                        # reasoning true, adaptive thinking, levels low..max, no temperature,
+                        # promptCache short 300 / long 3600, supportsMidConvoEffort.
+                        'claude-opus-5.5': 'anthropic'}
+# Run model -> the id in Pi's built-in catalog. Anthropic spells it with dashes;
+# Pi therefore sends that id on the wire and the relay pins the FRIDAY wire name.
+PI_CATALOG_MODEL_IDS = {'claude-opus-5.5': 'claude-opus-5-5'}
 # Inside the runtime tree; ``npm install -g`` links ``bin/pi`` to this file.
 PI_CLI = 'pi/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'
 
@@ -111,6 +118,12 @@ def catalog_provider(model: str) -> str:
         raise ValueError(f'{model!r} has no pinned Pi {PI_VERSION} catalog provider') from None
 
 
+def catalog_model_id(model: str) -> str:
+    """The id Pi sends for a run model (its own catalog spelling)."""
+    catalog_provider(model)
+    return PI_CATALOG_MODEL_IDS.get(model, model)
+
+
 def check_guest_instruction(instruction: str) -> None:
     """Pi reads a prompt starting with ``@`` as a file argument, even after ``--``."""
     if instruction.startswith('@'):
@@ -129,7 +142,8 @@ def guest_models_config(*, base_url: str, model: str, context_tokens: int,
     return {'providers': {catalog_provider(model): {
         'baseUrl': base_url.rstrip('/'),
         'apiKey': 'relay-held',
-        'modelOverrides': {model: {'contextWindow': context_tokens, 'maxTokens': output_tokens}},
+        'modelOverrides': {catalog_model_id(model): {'contextWindow': context_tokens,
+                                                     'maxTokens': output_tokens}},
     }}}
 
 
@@ -151,7 +165,7 @@ def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = 
     node, helper = f'{home}/node/bin/node', f'{log_dir}/{GUEST_HELPER_FILE}'
     agent_dir, session_dir = f'{log_dir}/pi/agent', f'{log_dir}/pi/sessions'
     base = [node, f'{home}/{PI_CLI}', '--print', '--mode', 'json', '--session-dir', session_dir,
-            '--provider', catalog_provider(model), '--model', model, '--thinking', thinking]
+            '--provider', catalog_provider(model), '--model', catalog_model_id(model), '--thinking', thinking]
     for extension in extensions:
         base += ['--extension', extension]
     run = shlex.join(base + ['--']) + ' "$(< ' + shlex.quote(f'{log_dir}/instruction.md') + ')"'

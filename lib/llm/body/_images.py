@@ -145,13 +145,25 @@ def _project_images_for_text_model(
 
         projected = []
         marker_inserted = False
-        for block in content:
+        spans = message.get('_contextLineageSpans', ())
+        positions = {} if spans else None
+        for part, block in enumerate(content):
             if isinstance(block, dict) and block.get('type') == 'image_url':
                 if not marker_inserted:
                     projected.append(marker)
                     marker_inserted = True
                 continue
+            if positions is not None:
+                positions[part] = len(projected)
             projected.append(block)
+        # Map actual retained occurrences. Equal text in a later part cannot
+        # stand in for a source shifted by the collapsed image positions.
+        for span in spans:
+            position = positions.get(span['part'])
+            if position is None:
+                span['spanHash'] = ''
+            else:
+                span['part'] = position
 
         if (len(projected) == 1 and isinstance(projected[0], dict)
                 and projected[0].get('type') == 'text'):

@@ -73,6 +73,9 @@ def waiting(semantic_authority, monkeypatch, tmp_path):
     monkeypatch.setattr('lib.router.home.router_home_root', lambda: str(tmp_path / 'router'))
     spawned = []
     monkeypatch.setattr('lib.tasks_pkg.spawn.spawn_task', lambda task, **kwargs: spawned.append(task))
+    # Relay wakes are held during the owner's quiet hours (00:00–08:00); this
+    # specification exercises delivery, so it must not depend on the host clock.
+    monkeypatch.setattr('lib.router.proactive.held.quiet_hours_active', lambda *args, **kwargs: False)
     registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     monkeypatch.setattr(human_guidance, '_ABORT_POLL_INTERVAL', 0.01)
@@ -160,17 +163,18 @@ def test_the_owners_forwarded_daxiang_answer_ends_the_project_routers_wait(waiti
     forwarded = route_to_project(waiting.router_task, waiting.router_scope, {
         'project_path': waiting.project, 'source_steer_id': steer_id,
         'note': 'Answers question ' + row['guidanceId']})
-    assert forwarded['disposition'] == 'steered' and forwarded['context_disposition'] == 'steered'
+    assert forwarded['disposition'] == 'steered' and forwarded['context_disposition'] is None
 
     worker.join(10)
     assert not worker.is_alive() and result[0][1] == SUPERSEDED
     assert row['guidanceSuperseded'] is True and len(waiting.registry) == 0
-    # The Project Router's model reads the owner's own words; the router's note is evidence only.
-    answer, note = agent_inbox.pending_items(waiting.target, modes=['user-steer'])
-    assert answer['value'] == ANSWER
+    # One steer carries the owner's own words and the router's note as evidence;
+    # its committed author keeps the verbatim words the forward is judged by.
+    [answer] = agent_inbox.pending_items(waiting.target, modes=['user-steer'])
+    assert answer['value'].startswith(ANSWER) and row['guidanceId'] in answer['value']
+    assert answer['steerAuthor']['text'] == ANSWER
     assert answer['steerAuthor']['origin']['forwardedFrom'] == {
         'conversationId': waiting.router, 'turnId': waiting.router_turn, 'steerId': steer_id}
-    assert note['steerAuthor'] is None and row['guidanceId'] in note['value']
     assert waiting.spawned == []
 
 

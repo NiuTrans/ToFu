@@ -8,7 +8,7 @@ import time
 
 from lib.agent_core.events import Phase, build_phase
 from lib.llm.llm_errors import AbortedError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager._events import append_event
 
 logger = get_logger(__name__)
@@ -73,7 +73,7 @@ def stream_with_credential_recovery(stream, task, body, **kwargs):
 
     def report_retry(attempt, cause):
         logger.warning('[%s] Shared credential preparation retry attempt=%d source=%s issue=%s',
-                       task['id'][:8], attempt, cause.credential_source, cause.reason)
+                       task_log_tag(task['id']), attempt, cause.credential_source, cause.reason)
         append_event(task, build_phase(
             Phase.RETRYING,
             detail='正在恢复共享登录凭据 / Recovering shared sign-in credentials',

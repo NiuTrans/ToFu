@@ -292,11 +292,12 @@ def build_update_search_settings_tool() -> dict:
         "function": {
             "name": "update_search_settings",
             "description": (
-                "SERVER-WIDE fetch blocklist: domains web_search and fetch_url never "
-                "visit. No arguments: PURE READ of the current list. block_domain/"
+                "SERVER-WIDE source blocklist: URLs no tool may reach (web_search "
+                "listings, fetch_url, browser navigation, URLs in run_command). No "
+                "arguments: PURE READ of the current list. block_domain/"
                 "unblock_domain add or remove one normalized host; changes persist, "
                 "hot-reload and affect every conversation. Block only when the user "
-                "asks or a domain repeatedly returns junk. Search limits are fixed "
+                "asks. Search limits are fixed "
                 "defaults, not settings. Returns applied and rejected values and the "
                 "new list; explain the outcome."
             ),
@@ -305,7 +306,7 @@ def build_update_search_settings_tool() -> dict:
                 "properties": {
                     "block_domain": {
                         "type": "string",
-                        "description": "Host to stop fetching, e.g. example.com."
+                        "description": "Host every tool must refuse, e.g. example.com."
                     },
                     "unblock_domain": {
                         "type": "string",

@@ -15,7 +15,9 @@ for retained runs and follow-up waves; persisted field names remain compatible.
 `docs/TASK_EXECUTION_MODES.md` for input, cancellation and evidence contracts.
 Ordinary and retained parent proxies preserve the read-only requirement source
 and, like wave-preparation policy copies, borrow live native identity through
-`tasks_pkg/native_parent.py` instead of holding a copied port. Durable
+`tasks_pkg/native_parent.py` instead of holding a copied port. They borrow a
+storage-free run's request routing authority the same way
+(`model_routing/request_authority.py`). Durable
 session metadata retains source IDs and native recovery admission, never ports.
 Verify `test_native_delegation_recovery.py` and the production delegation test.
 Under a durable spawning attempt, parent carriers borrow that task's worker

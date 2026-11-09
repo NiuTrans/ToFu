@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.observability import measure_task_startup
 from lib.tasks_pkg.manager import (
     cleanup_old_tasks,
@@ -108,7 +108,7 @@ def _discard_unstarted_task(task: dict[str, Any], conv_id: str) -> None:
         # tells the command service to settle the accepted attempt.
         logger.exception(
             '[Chat] Failed to discard unstarted task=%s conv=%s',
-            task_id[:8], conv_id[:8],
+            task_log_tag(task_id), conv_id,
         )
 
 
@@ -145,7 +145,7 @@ def _prepare_unbound_task_dispatch(
             logger.info('[Chat] Task %s conv=%s — abort marker predates task '
                         'registration; spawning pre-aborted (unwinds at the '
                         'prep gate before any LLM call)',
-                        task_id[:8], conv_id[:8])
+                        task_log_tag(task_id), conv_id)
 
     # A user-SELECTED orchestration flow (Mode dropdown) is mutually
     # exclusive with goal mode (autopilot). The flow is the execution mode.
@@ -154,7 +154,7 @@ def _prepare_unbound_task_dispatch(
     if flow_selected and config.get('autopilot'):
         logger.info('[Chat] conv=%s autopilot dropped — '
                     'an orchestration flow is selected (flow takes precedence)',
-                    conv_id[:8])
+                    conv_id)
         config = dict(config)
         config['autopilot'] = False
         task['config'] = config
@@ -305,7 +305,7 @@ def start_conversation_attempt_executor(
         _discard_unstarted_task(task, conv_id)
         logger.exception(
             '[Chat] Pre-spawn task preparation/binding failed task=%s conv=%s',
-            task_id[:8], conv_id[:8],
+            task_log_tag(task_id), conv_id,
         )
         raise
     _announce_resume_model_switch(task, config)
@@ -329,10 +329,10 @@ def start_conversation_attempt_executor(
         if _flow_selected:
             task['_flow_projection'] = 'flow'
         logger.info('[Chat] Queueing FLOW task %s for conv %s model=%s via=%s',
-                    task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
+                    task_log_tag(task_id), conv_id, _cfg_model, _flow_entry.__name__)
     else:
         logger.info('[Chat] Queueing task %s for conv %s model=%s',
-                    task_id[:8], conv_id[:8], _cfg_model)
+                    task_log_tag(task_id), conv_id, _cfg_model)
     if worker_context is not None:
         # A claimed job owns this physical thread through domain settlement.
         # Exceptions after entry retain the task and its pending receipts;
@@ -346,7 +346,7 @@ def start_conversation_attempt_executor(
                 spawn_task(task, **({'runner': _flow_entry} if _flow_entry else {}))
         except Exception:
             logger.exception('[Chat] Failed to start task %s conv=%s',
-                             task_id[:8], conv_id[:8])
+                             task_log_tag(task_id), conv_id)
             _discard_unstarted_task(task, conv_id)
             return None, 'executor_start_failed'
 

@@ -227,6 +227,38 @@ def test_frozen_generation_refuses_new_application_modules(checkout):
         checkout.load('added')
 
 
+@pytest.mark.parametrize('linked_environment', [False, True])
+def test_frozen_application_does_not_own_an_installed_environment_under_its_root(
+        checkout, monkeypatch, linked_environment):
+    environment = checkout.root / '.venv'
+    if linked_environment:
+        target = checkout.root.parent / 'shared-environment'
+        target.mkdir()
+        environment.symlink_to(target, target_is_directory=True)
+    packages = environment / 'lib' / 'python3' / 'site-packages'
+    dependency_name = 'installed_' + checkout.package
+    dependency = packages / dependency_name
+    dependency.mkdir(parents=True)
+    (dependency / '__init__.py').write_text('VALUE = "installed dependency"\n')
+    (dependency / 'helper.py').write_text('VALUE = "lazy installed module"\n')
+    monkeypatch.syspath_prepend(str(packages))
+    checkout.names.append(dependency_name)
+    source = checkout.install()
+    identity = source.freeze()
+
+    assert importlib.import_module(dependency_name).VALUE == 'installed dependency'
+    assert importlib.import_module(dependency_name + '.helper').VALUE == 'lazy installed module'
+    assert source.freeze() == identity
+
+
+def test_frozen_generation_still_refuses_new_nested_application_packages(checkout):
+    source = checkout.install()
+    source.freeze()
+    checkout.write('new_package/__init__.py', 'VALUE = "new checkout"\n')
+    with pytest.raises(ImportError, match='generation'):
+        checkout.load('new_package')
+
+
 def test_frozen_generation_requires_every_source_to_be_read(checkout, monkeypatch):
     import lib.runtime.pinned_import_source as pins
     checkout.write('helper.py', 'VALUE = "prepared"\n')

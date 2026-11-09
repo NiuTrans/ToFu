@@ -3,9 +3,38 @@
 Tests protect product behavior and architecture ownership. They are not an
 archive of incidents, implementation line numbers, or past migrations.
 
+Backend-specific restart specifications select their backend through indirect
+fixture parametrization. This avoids constructing SQL authorities for native-only
+cases that immediately skip, and lets complete-file verification retain the
+actual coverage. Shared lease/fencing behavior still runs on every authority.
+
+The context injection writer audit resolves aliases within their lexical scope.
+Problem: a file-wide name table attributed one function's local prompt to an
+unrelated function's parameter. Decision: function arguments shadow outer names,
+and assignments belong to their declaring scope. An allowlist for those false
+positives would hide future real writes; negative fixtures cover both genuine
+aliased writes and unrelated functions with the same variable name.
+
 Observation wrappers around production recorders must return their receipts.
 System-note injection uses the recorder's block identity and rolls back when
 recording fails; collecting call arguments must preserve that boundary.
+
+Problem: lazy imports retained patched dispatch factories and attempt readers
+after fixture teardown, so real Worker resume tests failed only after unit tests.
+Decision: load command and recovery consumers before replacing their source factories, and
+patch the review consumer's reader without replacing its source export. The
+factory-identity spec in `test_coordinator_dispatch_tools.py` and ordered runs of
+`test_project_dispatch_runtime.py` with `test_worker_attempt_real_start.py` cover
+restoration. Alternatives rejected: forcing isolated test processes hides the
+leak; reloading production modules during teardown can invalidate other aliases.
+
+Problem: the production shutdown wiring test closed the process-global event
+delivery coordinator, so a later real claimed-attempt test failed only in a
+shared pytest process. Decision: isolate the event-delivery shutdown dependency
+alongside the other runtime owners and assert its drain order, worker thread,
+and timeout argument. The ordered claimed-attempt → shutdown → claimed-attempt
+reproduction exercises fixture restoration. Automatically reopening a closed
+production coordinator would weaken shutdown ownership and hide the fixture leak.
 
 ## Agent-session audit
 
@@ -59,7 +88,75 @@ previously hid the actionable failure. The original subprocess exception retains
 full output; source builds still refuse stale binaries and retire all toolchain
 descendants on interruption. Verify `test_tofudb_source_build_retirement.py`.
 
+## Synchronous test-client interruption
+
+**Problem:** `pytest-timeout` raises its failure from a one-shot SIGALRM.
+Asyncio can retain that failure in a child Task or report it from a callback
+while the synchronous Quart test client continues awaiting its response.
+A configured deadline alone therefore does not prove that this bridge exits.
+
+**Decision:** the private-loop owner in `tests/conftest.py` delegates to the
+already installed signal handler, retains its original exception outside Task
+state, and cancels the awaited request. Its final close guard covers the entire
+bridge delegation, including the prelude; handler installation belongs inside
+the request cleanup and handler restoration boundary. It joins cancellation before
+propagating the original failure. A recorded alarm while awaiting the request
+settles pending tasks, async generators and the default executor, even when
+application code suppresses cancellation and returns a value or raises another
+error. Direct calls, including calls from a worker thread, retain their original
+close-only boundary for every non-alarm outcome: values, ordinary exceptions,
+explicit cancellation, `KeyboardInterrupt` and `SystemExit`. Accepted application
+background work remains outside that request's teardown, including when its
+Task factory fails during setup. The existing helper entry used from a running
+loop delegates its lifecycle to the original `asyncio.run`: policy registration,
+context propagation and complete settlement remain standard-library owned.
+Its coroutine only registers the running loop and current Task for caller
+interruption. Completed root exceptions are observed before the
+loop closes; the final alarm decision follows both that observation and signal
+handler restoration, so an alarm received during restoration cannot be lost.
+Without a recorded alarm, cleanup failures retain the original `finally`
+precedence; an exception already handled by the caller is not a request failure.
+An alarm received during the close-only handoff still propagates after close
+without reclaiming accepted application background work. During full settlement,
+signal failures are retained without cancelling the physical join. A deadline
+raised during cleanup remains a deadline failure, even when another application
+exception preceded cleanup. A caller interrupted while using the existing
+helper thread waits for its cleanup receipt and thread exit. Ordinary values,
+application exceptions and cancellation retain their meaning; non-main threads
+do not install signal handlers. The existing timer is never replaced or extended.
+
+**Alternatives rejected:** an asyncio exception handler alone cannot observe a
+still-referenced failed child Task; a larger deadline, another timer or changing
+all pytest jobs to thread timeouts changes the testing contract without fixing
+exception ownership. Boundary specifications in
+`tests/conversation_sync/test_sync_client_event_loop_bridge.py` inject the signal
+at the root, callback, child and cleanup boundaries, keep failure probes finite,
+and cover ordinary and interrupted resource settlement. The existing hang-guard
+suite separately verifies the pytest plugin and Makefile entrypoint.
+
 ## Test layers
+
+The billing payment tie-order differential case seeds its two private
+authorities before serving: the SQL schema owner initializes the temporary
+database, and the native offline migration restore writes the same documents
+and indexes. Each payment has `created_at=100`, inserted in `b, a, c` order;
+the real list operations must return `c, b, a` and the offset-one, limit-two
+page `b, a`, with timestamps included in the comparison. Calling
+`billing.payment.record` cannot establish a shared clock across processes;
+other billing scripts continue to exercise that write operation.
+
+Single and multiplexed conversation replay tests share
+`tests/support/conversation_replay.py`. Its repository publishes
+owner/conversation-scoped broker invalidations after advancing scripted state.
+Quiet stream
+heartbeats carry liveness without re-reading storage, so a finite script must
+announce its next page or cursor expiry to finish the real stream. Ownership
+probes leave the script untouched; empty pages still announce its next state.
+Catch-up specs cover quiet and caught-up transitions between pages with
+`hasMore=False`; the multiplex suite directly consumes replay, reset and close
+frames and checks subscription cleanup and notification scope. Restoring
+heartbeat polling or forcing `hasMore` would
+hide a stale fixture contract and weaken coverage of the production wait path.
 
 Conversation navigation browser checks follow the current reader controls:
 settled tool panels open at the newest calls and page backward through their
@@ -160,9 +257,12 @@ in `data/pg_dynshmem` and leaves with the root. On Linux the postmaster starts
 through an exec wrapper that arms `PR_SET_PDEATHSIG` with SIGINT and refuses to
 start if its owner already exited: owner death, SIGKILL included, requests the
 fast shutdown that removes the segment. The separate session keeps signals to
-the owner's process group from SIGKILLing it. Teardown sends SIGINT and waits
-for exit without its own deadline (the hang guard owns wall-clock limits) and
-never SIGKILLs. The root is removed only after that exit; an interrupted wait
+the owner's process group from SIGKILLing it. Explicit restart sends SIGINT and
+waits for the durable shutdown. Final disposal sends SIGQUIT to the postmaster:
+PostgreSQL retires its children and releases IPC without checkpointing files
+that the fixture will delete. It still waits for exit without its own deadline
+(the hang guard owns wall-clock limits), and never SIGKILLs the postmaster.
+The root is removed only after that exit; an interrupted wait
 leaves it to the reclaim. Every fixture start runs the shared dead-owner
 reclaim, which retires a postgres root through `retire_cluster_root`: a process
 still working in the recorded data directory gets SIGINT and keeps the root for
@@ -184,6 +284,80 @@ record). **Limits:** owner binding and segment proofs are Linux-only (elsewhere
 a root with a `postmaster.pid` is kept); `initdb`'s own bootstrap backends keep
 the default DSM type; `tofu-pg-*` directories from before this change carry no
 owner and are not reclaimed.
+
+**Startup readiness:** the existing pytest/harness test deadline owns the wait,
+and a postmaster that exits still fails immediately. Problem: an additional
+20 s fixture deadline repeatedly interrupted live PostgreSQL processes still
+reporting startup in progress, including during serial checks, and forced reruns.
+Decision: remove that redundant deadline while retaining the
+readiness probe, process-exit check and cleanup barrier. A larger nested deadline
+was rejected because the next slower healthy startup would fail again. The slow
+live-start regression is covered by `tests/meta/test_postgres_bootstrap_reuse.py`.
+
+Startup reclamation imports the stdlib-only `tests/support/postgres_cleanup.py`
+owner. The cluster fixture re-exports its retirement entry point for existing
+callers. Problem: importing the complete fixture from root conftest made every
+cluster-construction change a transitive input to all tests. Decision: separate
+the unchanged cleanup protocol from construction and clock fixtures. With
+`pytest_plugins` edges included, the same frozen 4,540-file inventory selects
+102 files for a cluster-helper change, down from 4,540, including nested plugin
+consumers and the core guards. This is a selection measurement, not a runtime
+claim; changes to root conftest or shared cleanup still retain their full scope.
+Reject ignoring plugin declarations or weakening the startup reclaim merely to
+reduce the selected count. The fresh-process boundary is specified in
+`tests/meta/test_postgres_bootstrap_reuse.py`.
+
+**Repeated PostgreSQL verification work (2026-11-08).** A live global-network
+integration selected 66,631 cases and had completed about 24% after 105 minutes.
+Both the dependency-manifest change and the transitive shared initialization
+closure selected the whole inventory; removing the manifest trigger alone did
+not narrow it. Worker stacks showed repeated private-cluster preparation and
+shutdown waits. Selection counts therefore did not establish task latency.
+
+**Decision:** the PostgreSQL fixture initializes one pristine, unstarted data
+directory per pytest worker, then copies it into each case's private cluster.
+Data, roles, WAL, sockets, processes and restart hooks remain independently
+owned. Executable identity or launch-environment changes require fresh initdb;
+the template captures those inputs before initialization, so replacement during
+the build cannot relabel old data with a new executable's identity. Partial
+copies are removed without damaging the bootstrap. Semantic-authority
+tests compile the unchanged default C clock once per worker; custom clock
+sources retain their explicit compilation and injection path. Each server still
+creates its own random clock epoch, including after restart.
+
+Final disposal uses PostgreSQL's documented immediate-shutdown protocol only
+after the case is finished and the cluster's files are destined for deletion.
+Committed writes, fsync, full-page writes, explicit restart, owner-death binding
+and exact IPC/root reclamation retain their existing checks. See
+[PostgreSQL shutdown modes](https://www.postgresql.org/docs/current/server-shutdown.html).
+The fixture waits for all owned server processes to exit; it does not report
+completion early or leave a background cleanup queue.
+
+**Measurement:** three alternating pairs over fresh private clusters, each
+running the real sidecar schema initializer and committing it, changed median
+final teardown from 17.345 s to 0.111 s and the complete cluster/schema/disposal
+cycle from 18.986 s to 1.722 s. Every pair improved; the host was concurrently
+running other global gates. A separate three-pair bootstrap comparison with
+the same query changed the cluster-cycle median from 1.885 s to 1.078 s;
+initdb itself took about 0.919 s versus 0.153 s to copy the pristine data.
+These are component measurements, not a full-suite or live-conversation speedup.
+The same 41-case serial neighbor command (clock reuse, native worker clock,
+worker-lease authority and transaction locks) passed 40 cases and skipped one
+before and after the disposal change: 495.72 s versus 97.17 s. The bootstrap
+and clock-compilation reuse were already enabled in both runs, isolating the
+disposal change; the variable host load prevents treating this as a universal
+suite multiplier.
+The bootstrap retains 40,603,336 bytes and the default clock 16,584 bytes per
+worker on this PostgreSQL installation, for that pytest session only. Normal
+teardown removes them; a dead owner's bootstrap uses the existing exact-root
+reclaim. There is no cross-session artifact cache or history of old bootstraps.
+
+**Alternatives rejected:** dropping PostgreSQL parity cases; sharing a mutable
+database across cases; disabling WAL/fsync; SIGKILLing the postmaster; dropping
+the process-exit barrier; treating the manifest alone as the full-scope cause.
+Specs: `tests/meta/test_postgres_bootstrap_reuse.py`,
+`tests/meta/test_postgres_clock_reuse.py`, the existing cluster lifetime suite,
+and the native-clock/worker-lease/transaction-lock neighbors.
 
 Problem: individual SDK tests depended on extra `PYTHONPATH` settings, and an
 installed editable package could supply different code. Decision: `tofu_sdk`
@@ -309,6 +483,14 @@ authority. Program-execution tests explicitly select
 and disabled-policy cases remain separate assertions. These are required
 fixture inputs, not reasons to weaken production admission or change defaults.
 
+Problem: repeated tool-budget assertions counted the internal canonical carrier,
+including private evidence metadata, instead of the text delivered to the model.
+Decision: budget tests count `model_text_from_tool_result` or the actual dispatched
+model message, and verify canonical/recovery metadata separately. Alternatives
+rejected: raising the limit conceals measurement error; shrinking production views
+to satisfy an internal-carrier count discards usable evidence. The long-agent
+aggregate source and failed-retention cases exercise this distinction.
+
 Final-wire lifecycle fixtures cover default batching and explicit JavaScript
 separately. Problem: an old `_programmatic_tier=program` hint was treated as
 opt-in evidence. Decision: exercise `auto` and `on` through real projection while
@@ -343,6 +525,36 @@ and results as well as request digests before promoting `.next` files.
 
 ## Development and delivery loop
 
+The default development entrypoint is the shared incremental verification engine:
+
+```sh
+make test
+make test-plan
+make test TESTS="tests/project_mod/test_verification_defaults.py"
+# Across committed branch changes and current working bytes:
+.venv/bin/python3 scripts/verify.py run --changed --base main --json
+```
+
+`make test-affected` uses the same entrypoint. With no `TESTS` argument, the
+snapshot diff, the existing static guards and recorded dynamic dependencies
+determine the scope. No diff is reported as `unchanged`, not a test pass.
+For explicit scopes the underlying command remains `scripts/verify.py run <paths>`.
+`make test-full` aliases `test-all`; explicit domain and full qualification
+commands continue to execute their entire declared scopes. The engine orchestrates
+the Python development loop; pytest, Vitest and browser tools keep their own
+execution responsibilities.
+
+It tests an immutable snapshot including uncommitted/untracked source, reports
+the tested tree and phase timings, and shares complete evidence with landing
+verification (`record`/`check`).
+Unchanged observed inputs can reuse a pass; failures, skips, interrupted runs,
+changed environments and unobserved external inputs cannot masquerade as a cached
+pass. Missing paths refuse the entire selection. This development command
+does not claim to discover every test for a change or replace domain/release
+gates. `landing_verification record` continues to force committed-revision
+execution. Policy, cache lifetime and measurements:
+[`project_integration.md`](modules/project_integration.md#incremental-verification).
+
 **Problem:** written policies and numerous tests do not prove the changed user
 journey works. Directory migrations can silently break test discovery; local
 and CI lists can diverge; results from a changing shared checkout do not certify
@@ -358,6 +570,11 @@ an integrated candidate.
 3. Run the iteration ladder. For orchestration/tool/streaming changes, exercise
    the real loop via the existing record/replay seam; for UI changes, verify the
    browser journey. A mock-only unit result does not certify either boundary.
+   For task start, worker claim or dispatch admission changes, run
+   `tests/conversation/test_worker_attempt_real_start.py`: a spec that replaces
+   `start_conversation_attempt_executor` or `start_task` never reaches task
+   registration or `bind_account`, which is how the 2026-11-06 identity outage
+   shipped unnoticed.
 4. Review the diff and integrate the verified worktree immediately. Run the
    relevant gate against the integrated candidate, recording the revision,
    command, result and remaining coverage gaps. A dirty shared tree result must
@@ -387,12 +604,29 @@ The browser CI lane invokes `make test-e2e`, so local and CI share the journey
 list. `make ci` alone is the backend/architecture subset; frontend, browser,
 native/platform and supply-chain gates still belong to their CI lanes.
 
+**Frequent integration policy (owner decision 2026-11-08).** Ordinary PRs and
+main/master pushes run affected Python tests through the shared verification
+engine. Cold selection follows transitive Python and declared fixture dependencies
+plus static guards;
+matching complete observations can avoid repeat execution. Changes to actual
+pytest execution, configuration or shared fixtures still widen the scope.
+Nightly, manual and `v*` release-tag events run full unit/API/slow/coverage plus
+visual/performance qualification. Missing base history also selects full
+qualification. Existing frontend, browser, lint, architecture, package,
+container and supply-chain checks keep their declared scopes. The workflow
+captures the candidate SHA and uploads its incremental verification receipt.
+Selection is not a proof about every possible dynamic input; full qualification
+remains necessary before release. Local `make test-full` remains explicit.
+
 The primary workflow's terminal `CI required` job depends on every lane and runs
 with `always()`. Only explicit success passes; malformed/empty results,
-cancellation, failure and unexpected skips fail. Nightly lanes may be skipped
-only on non-scheduled events. PR jobs retain the default synthetic merge-candidate
+cancellation, failure and unexpected skips fail. Only jobs inactive in the
+declared incremental/full profile may be skipped; a missing profile fails.
+PR jobs retain the default synthetic merge-candidate
 checkout. `tests/meta/test_ci_results.py` validates dependency coverage and
-executes the workflow gate with injected failure/skip outcomes.
+executes the workflow gate with injected failure/skip outcomes;
+`test_ci_verification_scope.py` covers event/history selection, and
+`tests/project_mod/test_verification_ci.py` covers real candidate execution.
 
 Repository branch protection must require `CI required` for this to block remote
 merges; committing the workflow does not configure or prove that hosted setting.
@@ -713,6 +947,57 @@ Detached lifecycle fixtures declare the pytest worker as their explicit
 Supervisor owner, so an interrupted worker cannot strand a self-healing
 watchdog or test server under PID 1.
 
+### Headless command and Goal fixture ordering
+
+**Problem:** a subprocess sleep did not establish whether completion preceded
+`poll`; searching the entire next request misclassified a retained pre-poll
+original as duplicate delivery. An archive fixture also treated a sealed
+outcome as physical worker exit, stopped storage under terminal delivery, and
+used a 40-second observer window that included cold recovery. Unjoined stage
+work could then resolve the following case's provider script.
+
+**Decision:** the command fixture holds the actual shell on its own FIFO and
+releases it at an explicit inbox-first or poll-first boundary. The spec requires
+zero new completion carriers after poll while preserving earlier originals.
+Goal fixtures borrow the existing explicit-executor port, own all stage Futures
+including appended reviewers, and join before storage stop, assertions, provider
+restoration and executor shutdown. Reconciliation must consume the exact
+original receipt before one ordinary persistence acknowledgement closes its
+intentional delivery debt. Failure cleanup uses owned cancellation and that
+same acknowledgement, never flag deletion or global maintenance. One fresh
+HTTP read follows physical completion; the existing per-test hang guard owns
+liveness, not a shorter observer deadline.
+
+**Alternatives rejected:** longer sleeps or deadlines preserve host races;
+removing background history on poll or weakening originals acceptance changes
+production semantics; resetting the dispatcher cannot join in-flight work.
+Verify `tests/api/test_headless_no_saved_conversation.py` and
+`tests/evolution/test_evolution_headless_runtime.py` in both completion orders
+and together under the normal parallel gate.
+
+### Watchdog backoff clock ownership
+
+**Problem:** counting restart attempts in a real-time observation window lets
+interpreter startup and host scheduling consume the test's clock. A fast-failing
+fixture can then appear healthy or produce too few attempts to distinguish
+escalating backoff from the deliberately fixed-delay neuter.
+
+**Decision:** `tests/server/test_supervisor.py` runs the actual copied watchdog
+with a subprocess-local `date`/`sleep` boundary. Time advances only after an
+observed sleep request is acknowledged. The same logical observation window
+asserts both requested delays and completed child launches; the neuter defeats
+only escalation. Exact process-group retirement joins the owned leader and
+asserts no surviving members or PID file. Production watchdog behavior is
+unchanged. The shared disposable shell fixture also fences `systemctl` locally,
+so status/stop tests cannot consult or mutate the caller's shared user unit.
+A synthetic host executable proves that boundary without a caller-side stub;
+these specifications do not claim real systemd integration.
+
+**Alternatives rejected:** larger wall-clock windows, retries or serial-only
+execution still depend on host speed; lowering launch-count bounds weakens the
+load-bearing assertion; replacing process-wide time would affect unrelated
+threads and the test hang guard.
+
 ### Inherited Git selection environment
 
 **Problem:** every model command the Tofu server runs carries the automatic
@@ -827,7 +1112,13 @@ first, running through `page` or the live-app browser hook, installing a
 synthetic graph, or asserting the graph's presence itself (an explicit
 full-service lane). A read wrapped in its own fallback handler is optional. A
 consumer that only reaches the graph over HTTP, such as `GET /`, still needs
-its explicit call; the scan cannot see it.
+its explicit call; the scan cannot see it. The plugin-page fixture and
+application-shell render/cache probes call the same guard before constructing
+their HTTP application. Their delivery assertions use the production graph
+from `npm run build:frontend`; temporary runtime-section library bundles do
+not provide that prerequisite. Behavioral specs exercise both the ordinary
+missing-build skip and the required-frontend failure, while source-only
+fragment tests remain runnable without a build.
 
 **node_modules census.** Problem: about 250 tests ran repository
 `node_modules` (Vite test bundler, jsdom harnesses, TypeScript, esbuild,
@@ -904,11 +1195,14 @@ entry points opt into xdist with `-n`. Tests must therefore be correct when
 collected in the same order but executed in any order on any worker.
 
 `-n auto` is resource-aware rather than raw host-CPU fan-out. The xdist hook in
-`tests/conftest.py` reuses the runtime affinity/cgroup CPU and live-memory probe,
-caps the zero-configuration result at four workers, and avoids launching more
-workers than explicitly selected test files. This preserves headroom for the
-OS, browser, and a running personal Tofu instance. `JOBS=N` is the explicit
-dedicated-host override; `JOBS=0` is the debugging/serial override.
+`tests/conftest.py` reuses the runtime affinity/cgroup CPU and live-memory probe
+(one effective CPU and 1 GiB of current memory headroom per worker), caps the
+zero-configuration result at four workers, and avoids launching more workers
+than explicitly selected test files. Every test process also runs at the lowest
+CPU and I/O priority ("Test processes yield to the live server" below); the
+ceiling stays because priority cannot order requests to a shared network volume
+("The four-worker default stays"). `JOBS=N` is the explicit dedicated-host
+override; `JOBS=0` is the debugging/serial override.
 
 Every worker owns separate data, storage, log, and temporary roots. Tests may
 not mutate shipped source or use a fixed host-global port as an implicit lock.
@@ -994,6 +1288,96 @@ overlap the parallel unit lane. Each new use carries an inline resource reason.
 `test-unit` runs those cases in a separate no-xdist phase; isolation work
 should remove the marker rather than broaden the exception.
 
+### Test processes yield to the live server
+
+**Problem:** test runs on a host that also serves the live Tofu server competed
+with it, its execution host and its TofuDB at equal CPU and I/O priority. On
+2026-11-07 concurrent suites drove load to 142 on 70 CPUs, the live TofuDB held
+an authority for 121.6 s and workers lost their leases. Raising the server's
+priority needs privileges; lowering test processes does not.
+
+**Decision (owner decision 2026-11-08):** every pytest process yields.
+Importing `tests/conftest.py` first calls
+`tests/support/process_priority.lower_own_priority()`, which moves every thread
+of the calling process to nice 19 and the idle I/O class (Linux keeps both per
+thread; other POSIX systems lower the process nice value only). It runs before
+the conftest imports the application or probes an engine, and before xdist
+starts workers, so the controller, its workers and everything tests start
+(TofuDB, SQL Sidecar and PostgreSQL engines, Node, browsers, Git, cargo)
+inherit it. Direct pytest, the Make targets, `scripts/verify.py` and
+`landing_verification record`/`check` all load this conftest,
+so no launcher wraps it; `bundles/yourprovider/tests/conftest.py`, outside the
+testpaths, calls the same owner for `make test-bundles`. Package suites with
+their own pytest configuration (`packages/*`, `plugins/*`, run by CI) do not
+load either. It addresses only the calling process's own thread IDs
+(`PRIO_PROCESS`, `IOPRIO_WHO_PROCESS`), never a process group, user or parent,
+so a pytest started from the live server (an agent's `run_command`, the linear
+checkpoint gate) leaves the server, its execution host and production TofuDB
+unchanged. The launchers themselves keep their priority: the server calls the
+verification library in-process (`lib/linear_git_checkpoint.py`).
+
+Scope of the guarantee: nice orders CPU time only inside one CPU cgroup, and a
+cgroup's CFS quota still throttles all of its members, niced or not, once the
+quota is used. I/O priority binds only where the block scheduler honors it
+(BFQ, CFQ; mq-deadline from Linux 5.14); it does not order requests to a FUSE
+or network volume, whose daemon serves every client alike.
+
+**Alternatives rejected:** per-launcher `nice`/`ionice` wrappers miss direct
+pytest and every new launcher, and lowering a launcher would lower the server
+when it calls one in-process. A `pytest_configure` hook runs after conftest
+module work, which already starts engine probes at the launcher's priority
+(observed with `TOFU_TEST_TOFUDB_BIN`). `PRIO_PGRP`, `PRIO_USER` or renicing
+the parent reach the server whenever it launched the run. `SCHED_IDLE` ranks
+below nice 19 but can starve test deadlines without bound and hides the nice
+value from `ps`.
+
+`tests/meta/test_harness_priority.py` specifies it: every own thread, including
+one that predates the call, and later children reach nice 19 and the idle
+class; the launching process and a child started before the call keep
+best-effort level 4; CPU calls address only own thread IDs; and a nested `-n 1`
+session started at best-effort level 4 runs its controller and worker idle.
+Verify a real run with `ps -o pid,ni,cmd` and `ionice -p` on the controller,
+its workers and a test-started engine.
+
+### The four-worker default stays
+
+**Problem:** once test processes yield CPU and I/O priority, the owner allowed
+the four-worker `-n auto` default to rise if the live server stays responsive
+while a niced run uses more workers. A whole-suite landing run takes about 12
+hours at four workers on the development host (70 CPUs, 63-CPU cgroup quota).
+
+**Decision:** keep the ceiling and the per-worker CPU and memory-headroom rule;
+the measurement did not show a responsive live server at more workers. On
+2026-11-08 the development host (63-CPU cgroup quota, live server on port
+15000) ran niced `tests/api` sessions, with the source-matched TofuDB engine,
+while `/api/health` was probed every 0.5 s and the live `logs/app.log` was read
+for `storage.v2 slow command` warnings (2 s threshold):
+
+| Window | Health p50 / p99 / max | Storage slow commands | Throttled periods | Container CPUs |
+|---|---|---|---|---|
+| Idle, 11 × 90 s | 3.8–4.1 / 36–580 / 42–1,842 ms | 0–9 per window, longest 21.5 s | 0–1 per window | 5.2–15.6 |
+| 4 workers, 414 s and 542 s | 3.8–3.9 / 41–45 / 522–633 ms | 0 | 1 of 4,141; 0 of 5,416 | 8.0–8.9 |
+| 16 workers, stopped at 37 s | 3.8 ms / one probe 4,809 ms | 2, up to 4.5 s | 0 of 371 | 6.3 |
+
+Within the 16-worker session's first 37 s the live server logged `GET
+/api/health 200 SLOW (4.808s)`, other requests at 2.9–3.2 s and storage
+commands at 3.0–4.5 s in the same five seconds, a request stall longer than
+any idle window showed. The measurement guard (any probe above 2 s) stopped
+it, so 63 workers, the value without a ceiling here, were not run. CPU was not
+contended (no throttled period), so priority could not have prevented the
+stall. The cause was not isolated. The interpreter, `.venv`, shared checkout
+and live TofuDB data share one beegfs FUSE volume whose daemon serves every
+client alike, and more workers raise the rate of imports and subprocess starts
+on it. Four workers stayed within the idle range.
+
+**Alternatives rejected:** removing the ceiling (63 workers here) was not
+shown safe; raising it to a constant such as 8 or 16 would be a host-tuned
+knob without evidence (AGENTS.md principle 5); sizing workers from sampled
+load or FUSE latency adds a sampling window and threshold, and CPU was not the
+contended resource. A new measurement may reopen this once test processes stop
+sharing that volume with the live server, for example with a local interpreter
+and dependency environment.
+
 ### Source-built test engines
 
 **Problem:** the differential and context-read suites cargo-build the tofu-db
@@ -1021,6 +1405,50 @@ Fixed costs multiply by ~50k tests and by every xdist worker, so they are
 budgeted like product latency. Measure with `--durations=40` on the gate and
 `make test-collect` timing before and after a fixture or harness change.
 
+- Runner contract tests use a private placeholder JS fixture, independent of
+  the generated application view. **Problem:** importing `JS_DIR` just to
+  supply an unused argv path made `test_jsdom_runner_structured.py` build the
+  entire runtime during collection, including on each xdist worker.
+  **Decision:** create that placeholder only for the six cases that invoke
+  Node; preserve their real jsdom execution and exact/legacy assertion checks.
+  A fresh-process collection specification refuses application materialization.
+  **Measured (2026-11-07, same lane and probe):** collecting 31 cases took
+  103.99 s through `pytest.main` before and 2.44 s after; test-bundler calls
+  fell from 158 to zero. Pytest's collection-only clocks were 101.68/0.46 s;
+  the 32 guard/regression cases passed in 9.23 s with frontend dependencies
+  required. These are component observations under concurrent host load.
+  **Alternatives rejected:** additional workers multiply this setup, and
+  caching an unrelated application build still performs unnecessary work.
+  Verify `tests/meta/test_verification_collection.py` and
+  `tests/frontend/test_jsdom_runner_structured.py`.
+- Benchmark acceptance scans current sources only for a supported provenance
+  receipt (see `STORAGE_PERFORMANCE_CHARTER.md`, active conversation acceptance).
+  Missing/unsupported receipts still fail qualification. The nine synthetic
+  pipeline tests previously scanned the whole checkout although they supply
+  no such receipt, adding unrelated dependencies to observed test impacts.
+  With unchanged pipeline assertions and fresh serial pytest processes, the
+  file took 19.75 s before and 0.36 s after on 2026-11-07. Source drift within
+  the pipeline's own manifest is still exercised; supported receipts still
+  capture and compare the complete current inventory on every assessment.
+- Turn delta SQL tests own a fresh in-memory SQLite connection per case.
+  **Problem:** `test_turns_delta_sync.py` committed every schema statement to
+  a temporary disk file although its protocol, revision, cache-loss and
+  ownership checks never reopen the database. **Decision:** run the complete
+  current schema and unchanged operations/commit behavior in private memory;
+  close the connection even when setup or a test fails. No mutable database
+  is shared between cases. Reopen, process-recovery and durability tests keep
+  their own disk-backed fixtures. **Measured (2026-11-07, concurrent host
+  load):** three alternating file/memory probes initializing the same 76
+  tables took 69.15-110.45 s on disk versus 0.0090-0.0097 s in memory, with
+  identical seeded delta results. These are fixture timings, not full-suite
+  latency. **Alternatives rejected:** fewer tables/assertions would weaken
+  coverage, a shared mutable database would couple cases, and more workers
+  would retain the redundant disk writes. Verify the entire
+  `tests/storage_authority_sql/test_turns_delta_sync.py` file.
+  Its session double carries the adapter's real `WorkerCommitHints`, and the
+  compaction test checks the affected owner/conversation hint alongside the
+  persisted change event. Omitting this session port raised `AttributeError`
+  before the registered operation's change-event contract could be asserted.
 - The autouse NC-source belt (`restore_drifted_nc_sources`) trusts a clean
   read only while the file's stat signature (inode, size, mtime, ctime) is
   unchanged and the read happened more than 2 s after both its mtime and ctime
@@ -1028,21 +1456,163 @@ budgeted like product latency. Measure with `--durations=40` on the gate and
   `os.utime` rewind). Any write re-arms a full content compare;
   `tests/meta/test_nc_guard_belt.py` pins both paths. Cost fell from ~17 ms to
   ~0.1 ms per test.
-- Legacy jsdom modules compile native TypeScript owners at import time.
+- **Problem:** legacy jsdom modules compile native TypeScript owners at import
+  time; collectors repeated work within and across independent checkouts.
+  **Decision:** retain complete, content-validated build artifacts.
   `tests/_runtime_sections.py::_run_test_bundler` keeps a cross-process cache
   (default `$TMPDIR/tofu-test-bundle-cache-<uid>`, 7-day eviction) keyed by
-  bundler arguments, checkout root, the Python harness adapter, bundler script,
-  dependency lockfile, tsconfigs and the `frontend/src` file list; a hit additionally requires
-  every file Rollup read (`vite_test_bundle.mjs --inputs-manifest`) to hash
-  identically and every directory holding one to list identically (a new
-  sibling can change resolution). A build is recorded only when all its inputs
+  exact bundler arguments (only path arguments are relocated), the Python
+  adapter, bundler script, Node/preload identities, public build environment,
+  shared dependency-installation identity, lockfiles, package metadata,
+  tsconfigs and the `frontend/src`
+  file list. Portable actions share across checkouts; a hit additionally requires
+  every file Rollup read (`vite_test_bundle.mjs --inputs-manifest`, including
+  installed dependency modules) to hash identically and every input directory's
+  membership and symlink targets to
+  match (a new sibling or changed symlink can change resolution).
+  A build is recorded only when all its inputs
   were last modified more than 2 s before it started, and digests are memoized
   by stat signature under the same rule. Outputs naming the per-session view
-  directory are never cached. `TOFU_TEST_BUNDLE_CACHE=off` disables it; a path relocates it.
-  Cold compile ~0.6-2 s per owner, warm hit ~0.05 s. Rejected alternatives:
+  directory are never cached. Generated input bytes are never rewritten for
+  cache matching. Location-sensitive module syntax (`import.meta`, `__dirname`,
+  `__filename`), unrecognized syntax and output naming the source root keep
+  checkout-local reuse. Dotenv expansion binds the root and complete environment;
+  arbitrary Node preloads disable cache admission. Existing
+  `TOFU_TEST_BUNDLE_CACHE=off` disables it; a path relocates it.
+  Native-module and import-port symbols derive from source-relative identity;
+  embedding an absolute checkout path in their name would defeat reuse before
+  validation. Generated entry source containing absolute imports still keeps
+  those exact bytes, so such actions need not share across checkouts.
+  **Complete artifacts:** v1 bundler receipts list all emitted JS, CSS and assets.
+  Every artifact's hash and destination is checked before restoring anything.
+  Public-directory copies outside Rollup's hooks mark the receipt incomplete,
+  so those builds execute normally without entering the cache. This repairs
+  the former JS-only cache, which could omit companion styles on a hit.
+  **Concurrent collection:** collectors of the same action in the same checkout
+  share a kernel-owned compile lease and revalidate output after acquisition.
+  Different actions/checkouts never wait for this lease. Failed or interrupted
+  producers leave no successful receipt; followers release the shared lease
+  and retry independently. No service, polling timer, worker cap or retry knob
+  is added. Lease directories share the existing 7-day eviction; pruning skips
+  active leases and waiters verify inode identity after acquisition.
+  Rejected alternatives:
   hashing the whole frontend tree (any edit invalidates every bundle and it
   still misses inputs outside the tree) and mtime-only validation (unsafe on
-  whole-second mtimes).
+  whole-second mtimes), normalizing arbitrary generated source text (can change
+  program meaning), and serializing independent checkouts behind one build.
+  Verify `tests/meta/test_test_bundle_cache.py` and
+  `tests/meta/test_verification_bundle_artifacts.py`; reproduce with
+  `benchmarks/verification_bundle_reuse.py --implementation-root TREE --collectors N
+  --output REPORT.json`. The probe freezes implementation bytes, checks complete
+  artifact identity and executes the exported function in every collector view.
+  **Measurement (2026-11-07, artifact implementation `ac54fa1d7`):** three
+  alternating before/after pairs against `90e02d1f9`, six identical private
+  checkouts, real Vite with a TS/CSS fixture.
+  With one collector per checkout, builds fell from 6 to 1 and total preparation
+  median from 3.9454 s to 0.9486 s (4.16×; ranges 3.5329–6.5037 s and
+  0.7247–1.3815 s). With four collectors per checkout, builds fell from 24 to 1
+  and median from 7.0426 s to 0.8581 s (8.21×; ranges 5.5132–7.1335 s and
+  0.8154–1.4012 s). All twelve runs emitted identical complete artifact digests.
+  Retained cache payload fell from 5,160 to 1,211 bytes; allocated cache storage
+  fell from 49,152 to 12,288 bytes, including the one lease directory. This is
+  preparation-component evidence, not a whole-suite or conversation speedup.
+  Separate real-owner specifications execute `html-safety.ts` through both
+  adapters in two checkouts and require exactly one build with identical output.
+  **Generated feature entries (2026-11-07):** feature adapters previously wrote
+  absolute checkout paths into their private entry sources; multi-owner graphs
+  also put those paths into their exported bundle identifier. Identical owners
+  therefore missed the complete-artifact cache across lanes. The adapter now
+  authors its own entry imports through `#tofu-test-root/`, resolved by Vite to
+  this invocation's root, and derives graph identifiers from logical owner paths.
+  External paths remain exact. The cache still hashes every authored entry and
+  resolved module; it does not rewrite application source or normalize arbitrary
+  string literals. Unknown or location-sensitive inputs retain the same refusal.
+  Rejected alternatives: replacing absolute strings while checking cache keys
+  changes source meaning; storing a separate bundle per lane repeats compilation.
+  Three alternating frozen-source pairs against `64676724b`, six fresh checkouts
+  per arm, used the real `selection-focus.ts` owner and its orchestration registry.
+  Single-owner builds fell 6→1, with preparation medians 3.567→0.667 s (ranges
+  3.534–5.757 / 0.646–0.682); shared-graph builds also fell 6→1, 5.005→0.697 s
+  (ranges 3.669–5.755 / 0.682–1.505). Every output executed the same focus and
+  registry-identity checks. Single-owner bytes were identical in both arms;
+  graph bytes now share one stable private identifier instead of one per root.
+  Graph cache payload fell 19,866→3,311 bytes and allocated file storage
+  49,152→8,192 bytes; single-owner storage stayed 3,018/8,192 bytes. These clocks
+  cover preparation only. The real-owner specification changes a third checkout's
+  implementation and requires a fresh build and changed behavior, preserving
+  exact invalidation. Verify `test_verification_bundle_artifacts.py`, the cache
+  fault suite and runtime-import-port contracts.
+- **Problem:** `_section_import_ports` repeated the same eager-prelude import
+  resolution for every retained section; a live verification-worker stack
+  landed in `Path.resolve` while collecting the folder-longpress tests.
+  **Decision:** resolve the common prelude once per collection's source snapshot,
+  keyed by exact header text and resolution origin; section-specific lazy
+  imports retain their original order and ownership. This follows the existing
+  per-process manifest/section snapshot lifecycle; a new invocation loads its
+  source tree afresh. Do not add global or persistent resolution caches.
+  The 161 actual retained sections made 27,048 common resolution calls before,
+  versus 168 after. Three alternating runs over the same source snapshot had
+  medians 3.1724 s and 0.1331 s; complete returned binding/module/service tuples
+  had the same digest in all six runs. The clock covers import-port discovery,
+  not bundling or test execution. A tuple is reused rather than reparsed per
+  section; changed header bytes or origin produce a new tuple. The rejected
+  alternative, caching only by section name, still repeats all common work.
+  Verify `tests/meta/test_runtime_import_ports.py`: aliases, type-only exclusion,
+  lazy-before-eager ordering, service factories and changed text/origin.
+  The same profile exposed a separate scope error in
+  `test_frontend_folder_longpress.py`: two source views were obtained by
+  materializing all 161 retained sections. The test now requests just
+  `main/main_folders_mobile.js` and `mobile_panels.js` through the existing
+  single-section adapter, keeping their real import ports, the native folder
+  control owner and both negative controls. A fresh-process collection guard
+  rejects accidental whole-graph requests; no helper API or test case is removed.
+- The Request Inspector round-log and Markdown raw-HTML tests follow the same
+  owner-scoped collection boundary. **Problem:** three cases requested the
+  complete retained runtime merely to read `core/debug_panel.js` and
+  `core/markdown.js`. **Decision:** request those two sections directly through
+  `runtime_section_path`, preserving their real import ports and the separate
+  typed `html-safety.ts` owner. The request-log retention negative control,
+  source-integrity check, Markdown escaping/code/blockquote assertions and
+  option-sensitive cache checks are unchanged. The collection guard rejects
+  whole-graph requests and requires every original case to remain collected.
+  Request-log execution explicitly checks its `jsdom` prerequisite before
+  launching Node; it no longer borrows that guard from unrelated preparation.
+  **Alternatives rejected:** more workers repeat the unrelated preparation;
+  substituting a fake sanitizer or deleting negative controls weakens the
+  executable contract. No public helper, compiler or application source changes.
+  **Measured (2026-11-08):** three alternating pairs used the same checkout,
+  frozen `b038949c7` helper, Vite script and dependency lock, a fresh process
+  and separate empty artifact cache per arm. The after arm used the final
+  `0e9c48374` consumer sources, including the explicit `jsdom` prerequisite.
+  Only those two test modules' frozen source bytes differed; helper and toolchain
+  fingerprints matched before and after all six arms.
+  `pytest.main --collect-only --assert=plain -n 0` collected the same three
+  complete node IDs in every arm; real bundler invocations fell from 159 to 5
+  and unique retained sections from 161 to 2. Collection medians were
+  151.01 / 11.15 s, with ranges 148.16–166.00 / 9.35–14.42 s during concurrent
+  full-suite verification. The unchanged JavaScript harnesses
+  and Python assertion ASTs were compared separately, and normal execution
+  still exercised all original cases and negative control. These are cold
+  collection-component clocks; gains from later shared-helper changes are
+  not included in this comparison.
+- **Problem:** the synthetic motion renderer still fetched GSAP during scene
+  preparation. A cold verification checkout timed out against the CDN while a
+  control checkout with cached assets passed, producing a false merge regression.
+  **Decision:** `_fake_media` stages a scene-local runtime fixture alongside its
+  existing synthetic render/probe/concat/mux ports. The browser never executes
+  these fixture bytes; real composition, quality-axis propagation, film gates
+  and publication assertions remain. `test_motion_video_runtime_assets.py`
+  separately verifies pinned-byte validation, caching and staging. The quality
+  propagation spec now starts with an empty runtime cache and rejects HTTP, so
+  a missing fixture fails immediately instead of waiting on a download.
+  The pinned GSAP bytes now also ship in `lib/motion_video/vendor/` (declared
+  wheel package data) and `ensure_gsap` verifies them before use, so a cold
+  checkout with an empty runtime cache stages the real runtime offline; the
+  motion cache and the CDN remain fallbacks for older installed packages
+  without the vendored file, and any byte substitution fails the pinned
+  digest check rather than serving unverified JavaScript.
+  Rejected alternative: warming a shared CDN cache hides the dependency and
+  couples independent checkouts to network availability.
 - Durable seeding shares the writer's group commit. **Problem:**
   `tests/swarm/test_retained_messages_storage.py` seeds 1,101 retained
   identities through `RetainedAgentRepository.create`, two durable commits

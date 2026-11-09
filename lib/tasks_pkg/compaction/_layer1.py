@@ -185,7 +185,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
                 model=task.get('model', '') if task else '',
             )
         except Exception as _e:
-            logger.debug('[L1] count_text failed for tc_id=%s: %s', tc_id[:8], _e)
+            logger.debug('[L1] count_text failed for tc_id=%s: %s', tc_id, _e)
             tool_tokens = max(1, after_chars // 4)
         event_started_at = time.monotonic()
         try:
@@ -215,7 +215,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             logger.debug(
                 '[L1] tool_compacted emitted: tc_id=%s tool=%s round=%s '
                 '%dch→%dch (-%.0f%%)',
-                tc_id[:12] if tc_id else '?',
+                tc_id if tc_id else '?',
                 round_entry.get('toolName', '?'),
                 round_entry.get('roundNum'),
                 before_chars, after_chars,
@@ -225,7 +225,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             failed_count += 1
             logger.warning('[L1] tool_compacted SSE emit failed: '
                            'tc_id=%s tool=%s round=%s err=%s',
-                           tc_id[:12] if tc_id else '?',
+                           tc_id if tc_id else '?',
                            round_entry.get('toolName', '?'),
                            round_entry.get('roundNum'), _ev_err)
         finally:
@@ -308,7 +308,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             except Exception as exc:
                 logger.debug('[L1] idle cache notification failed: %s', exc)
             logger.info('[L1] conv=%s cloud idle policy saved ~%d tokens',
-                        conv_id[:8], tokens_saved)
+                        conv_id, tokens_saved)
 
     if sent_step is not None and messages[rewrite_from:sent_count] != sent_step:
         # Admitted edit of cached bytes: the next read drop from this index on
@@ -327,7 +327,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     if emitted_count or failed_count:
         logger.info(
             '[L1] evidence task=%s emitted=%d failed=%d event_ms=%.1f total_ms=%.1f',
-            str(task.get('id') or '?')[:8] if task else '?',
+            str(task.get('id') or '?') if task else '?',
             emitted_count, failed_count, event_elapsed * 1000,
             max(0.0, time.monotonic() - started_at) * 1000,
         )

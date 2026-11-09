@@ -11,7 +11,7 @@ paths mint an exact, expiring, single-use gateway receipt before the handler
 can install. Scope, origin verification, bounded attempts, and immediate
 instruction disclosure are owned by [the skills contract](../modules/skills.md).
 
-## Web-source blocklist: `search.skip_domains` (hosts and URL prefixes)
+## Web-source blocklist: `search.skip_domains` (operator bans; hosts and URL prefixes)
 
 **Problem.** The blocklist only matched a substring of ``netloc``. Two
 consequences: ``x.com`` also refused ``dropbox.com``, and a source that must
@@ -49,11 +49,35 @@ name it, while ``*/**/*terminal-bench*`` refuses it everywhere. Alternative
 rejected: turning every ``*`` entry into an unanchored substring search,
 which would silently change what existing ``github.com/*/name`` entries mean.
 
-The rule is enforced at every place the assistant obtains remote content:
+**Bans versus fetch-quality skips (2026-11-08).** *Problem:* the same list
+also carried fetch-quality skips — the nine JS/social hosts whose pages yield
+no extractable text, seeded into every saved list as defaults, and the Daily
+Optimizer's junk-domain blocks. Once the list became a ban on every surface,
+those skips silently refused ordinary `run_command` and browser access to
+YouTube, X, TikTok and similar hosts, with a refusal claiming the operator
+chose it. *Decision:* the two intents are separate lists with separate
+enforcement. `search.skip_domains` holds operator bans only (Settings UI,
+`update_search_settings`, evaluation configs) and is empty by default.
+Fetch-quality skips are tofu-search's built-in `fetch.utils.NO_TEXT_DOMAINS`
+plus `search.fetch_skip_domains`, written only by the optimizer's
+`block_search_domain` action: the fetch gate refuses them (`reason:
+fetch_skip`, after the reader tier and connected auth sources) and one-hop
+deepening skips them, but search listings, the browser tools and
+`run_command` still reach them. A `skip_domains` list saved before the split
+(no `skip_domains_schema`) is read without the nine seeded hosts; the next
+write stores schema 2 (`lib/search/saved_domain_lists.py`), so entries added
+afterwards are honoured as written. *Alternatives rejected:* dropping the nine
+hosts on every read would make a deliberate operator ban of them impossible;
+keeping the optimizer on the ban list would reproduce the same refusal for
+every domain it auto-blocks; telling a transfer from a mere mention in shell
+text cannot be done reliably, so the hook refuses any banned absolute URL and
+stays exact only because the list holds nothing but operator bans.
+
+A ban is enforced at every place the assistant obtains remote content:
 
 | Surface | Enforcement |
 |---|---|
-| `fetch_url`, search page fetches, one-hop deepening | `tofu_search.fetch.utils._should_fetch` (`reason: skip_domain`) |
+| `fetch_url`, search page fetches, one-hop deepening | `tofu_search.fetch.core` before the cache, reader and auth tiers, and `fetch.utils._should_fetch` (`reason: skip_domain`) |
 | `web_search` listings (title/snippet/fetched excerpts) | `CandidateAccumulator.add_batch` refuses the row, so its URL and text never reach the model |
 | `browser_navigate` and browser URL tools | `lib/browser/handlers/_tabs.py` and the pre-tool hook |
 | `run_command` (curl/wget/urlopen/git clone) | pre-tool hook `_blocked_url_hook` in `lib/tasks_pkg/tool_hooks.py`, matching absolute http(s) URLs in the command |
@@ -71,10 +95,14 @@ pages would leak the URL and snippet before filtering and cost a page read.
 
 **Verification.** Package tests `packages/tofu-search/tests/test_url_blocklist.py`
 (grammar, boundary and precedence, run against the generated copy) and
-`test_url_blocklist_surfaces.py`, `tests/tasks_pkg/test_url_blocklist_hook.py`
-(shell and browser refusals), `tests/search/test_search_settings.py` (entry
-normalisation), `tests/evaluations/test_tb_source_guard.py` (the evaluation
-projection refuses exactly the URLs the other arms refuse), and the
+`test_url_blocklist_surfaces.py` and `test_reader_handlers.py` (bans versus
+fetch-quality skips), `tests/tasks_pkg/test_url_blocklist_hook.py` (shell and
+browser refusals), `tests/search/test_saved_domain_lists.py` (schema-1 read,
+import-time lists and the shell hook), `tests/search/test_search_settings.py`
+(entry normalisation), `tests/optimizer/test_optimizer.py` (the optimizer
+writes fetch-quality skips only), `tests/evaluations/test_tb_source_guard.py`
+(the evaluation projection refuses exactly the URLs the other arms refuse),
+and the
 in-container canary in
 `evaluations/terminal_bench/source_guard.py::guard_check_program`.
 
@@ -98,7 +126,7 @@ only where concurrent starts would silently change what sequential calls meant
 and keeping it is cheap (`tool_dispatch/_ordering.py`):
 
 - mutations of the same resolved file (`write_file`, `edit_file`,
-  `apply_diff(s)`, `insert_content(s)`, compared after canonical rebinding and
+  `apply_diff(s)`, compared after canonical rebinding and
   symlink resolution), `desktop_write_file` calls on the same device path,
   memory mutations of the same `memory_id`, and browser page actions on the
   same `tab_id` (an action without one conflicts with every tab) apply in call
@@ -765,7 +793,11 @@ typed V2 code, message, and next action. The wrapper is not rendered twice.
 `project_dispatch.scope.admit_tool` is the single admission of a dispatch task in
 every executor: pipeline batch admission, the serial executor
 (`executor/_execute.py`) and streaming prefetch
-(`StreamingToolAccumulator._execute_one`). Each calls it before the
+(`StreamingToolAccumulator._execute_one`). The batch validates the grant once and
+hands that `DispatchAdmission` to its calls' executors, whose gates decide from
+it; each call's tool intent then validates live before the handler
+([PROJECT_COORDINATION.md](../PROJECT_COORDINATION.md#one-live-validation-per-tool-batch-admission)).
+Each executor calls it before the
 Coordinator/Delegate role policies, approval, custom tool environments,
 speculative effects or handler resolution, and it never reads the catalog, so a
 missing or stale catalog projection cannot admit a tool. It is default deny in
@@ -948,19 +980,15 @@ NODE_OPTIONS flags into old Node runtimes.
 Large or binary outputs follow the producing tool's recovery policy; they are
 never dumped wholesale into the next model request or logs.
 
-`edit_file` inserts resolve one unique anchor. `replace_all` is ignored for a
-unique-anchor insert and never enables multi-site insertion; only `replace`
-grants batch semantics.
-
-`replace` applies the supplied replacement text even when it retains the
-anchor at either boundary, inside the text, or as a deliberate duplicate.
-Redundant argument characters are not a write error: no style-only retry,
-automatic conversion to line insertion, or new line breaks are introduced.
-Prefer insert operations for new lines; their existing boundary-echo repairs
-remain insertion-only and never rewrite replacement content. Root authority,
-read/freshness checks, unique matching and atomic writes remain mandatory.
-Exact replacement matches preserve existing CRLF and missing-final-newline
-bytes; line insertions retain their existing universal-newline behavior.
+`edit_file` only replaces (see "Replace-only `edit_file`" in
+[`../modules/tools_execution.md`](../modules/tools_execution.md)). An anchor must
+match once unless `replace_all` is set; `replace_all` replaces every match.
+The supplied replacement text is applied even when it retains the anchor at
+either boundary, inside the text, or as a deliberate duplicate. Redundant
+argument characters are not a write error: no style-only retry or new line
+breaks are introduced. Root authority, read/freshness checks, unique matching
+and atomic writes remain mandatory. Exact replacement matches preserve existing
+CRLF and missing-final-newline bytes.
 
 Python syntax feedback from a unified edit batch compares each file's original
 text with its final successfully written text, once per file. Intermediate

@@ -30,7 +30,6 @@ keeps working unchanged. New code should import from ``lib.daily_report``.
 
 import asyncio
 import datetime as _dt
-import os
 import random
 import threading
 import time
@@ -73,50 +72,6 @@ def _update_report(*args, **kwargs):
 def _request_owner_user_id() -> int:
     """Resolve the authenticated report owner once at the HTTP boundary."""
     return int(request_user_id())
-
-
-def _scan_report_days(reports_dir, prefix, *, owner_user_id):
-    """Summarize task completion for one month of cached report files.
-
-    Synchronous filesystem walk — async handlers must offload it via
-    ``asyncio.to_thread`` (one thread hop for the whole month, instead of
-    one per report file).
-    """
-    days = {}
-    try:
-        for fname in os.listdir(reports_dir):
-            if not (fname.startswith(prefix) and fname.endswith('.json')):
-                continue
-            try:
-                day_num = int(fname[len(prefix):].replace('.json', ''))
-            except ValueError as e:
-                logger.debug('[DailyReport] Skipping non-day filename %r: %s',
-                             fname, e)
-                continue
-            report = _load_report(
-                fname.replace('.json', ''),
-                owner_user_id=owner_user_id)
-            if not report or not ('streams' in report or 'tasks' in report):
-                continue
-            streams = report.get('streams', [])
-            tasks = report.get('tasks', [])
-            if streams:
-                done = sum(1 for s in streams if s.get('status') == 'done')
-                total = len(streams)
-            elif tasks:
-                done = sum(1 for t in tasks if t.get('status') == 'done')
-                total = len(tasks)
-            else:
-                continue
-            date_key = f'{prefix}{day_num:02d}'
-            days[date_key] = {
-                'total': total,
-                'done': done,
-                'incomplete': total - done,
-            }
-    except Exception as e:
-        logger.warning('[DailyReport] Calendar scan %s: %s', prefix, e)
-    return days
 
 
 # ═════════════════════════════════════════════════════════════
@@ -287,88 +242,12 @@ async def get_calendar_month(year, month):
         return api_bad_request('Invalid month')
     owner_user_id = _request_owner_user_id()
 
-    prefix = f'{year:04d}-{month:02d}-'
-    cache_key = (owner_user_id, year, month)
-    cached = _daily_report._calendar_cache.get(cache_key)
-    cache_fresh = cached is not None
-
-    # ── Per-day report summary: reuse the cached parse when fresh ──
-    # Quick-win: previously we re-listed + re-parsed every YYYY-MM-*.json on
-    # every call.  Now the parsed summary lives on the same cache entry as
-    # conv_days/cost_days and is only rebuilt on TTL miss (or cost-cache
-    # invalidation, which already clears this entry).
-    days = None
-    if cache_fresh and 'days' in cached:
-        days = cached['days']
-        logger.debug('[DailyReport] Calendar %d-%02d: days cache hit', year, month)
-    if days is None:
-        reports_dir = _daily_report._reports_dir_for_owner(
-            owner_user_id=owner_user_id)
-        # Off-loop: a whole month of locked JSON report reads on a network
-        # filesystem stalls the event loop (LoopWatch 2026-09-06).
-        days = await asyncio.to_thread(
-            _scan_report_days, reports_dir, prefix,
-            owner_user_id=owner_user_id)
-
-    # ── TTL cache for expensive DB scans (conv_days + cost_days) ──
-    if cache_fresh:
-        conv_days = cached['conv_days']
-        cost_days = cached['cost_days']
-        logger.debug('[DailyReport] Calendar %d-%02d: cache hit (age %.1fs)',
-                     year, month, time.monotonic() - cached['ts'])
-    else:
-        # ── Compute conv_days from DB (which days have conversations) ──
-        conv_days = {}
-        try:
-            month_start = _dt.date(year, month, 1)
-            if month < 12:
-                month_end = _dt.date(year, month + 1, 1)
-            else:
-                month_end = _dt.date(year + 1, 1, 1)
-            ms_start = int(_dt.datetime.combine(month_start, _dt.time.min).timestamp() * 1000)
-            ms_end = int(_dt.datetime.combine(month_end, _dt.time.min).timestamp() * 1000)
-
-            # Off-loop and authority-backed: Turn-native rows project only one
-            # timestamp scalar; frozen archives decode in bounded Sidecar
-            # batches, and transcript content never crosses this RPC.
-            conv_days = await asyncio.to_thread(
-                _daily_report._activity_counts_for_range, ms_start, ms_end,
-                owner_user_id=owner_user_id,
-                bound_created_end=True)
-        except Exception as e:
-            logger.warning('[DailyReport] Calendar conv-days %d-%02d: %s', year, month, e)
-
-        # ── Server-side per-day cost calculation ──
-        # _daily_report._get_monthly_costs does synchronous DB scans that can take several
-        # seconds on a cache-cold month; run it in a worker thread so it does
-        # NOT block the event loop (and every other in-flight request).
-        cost_days = {}
-        try:
-            raw_costs = await asyncio.to_thread(
-                _daily_report._get_monthly_costs, year, month,
-                owner_user_id=owner_user_id)
-            for day_num, day_data in raw_costs.items():
-                cost_days[day_num] = {
-                    'cost': day_data['cost'],
-                    'conversations': day_data['conversations'],
-                }
-        except Exception as e:
-            logger.warning('[DailyReport] Calendar cost calc %d-%02d: %s', year, month, e)
-
-        # Store in cache (including the parsed per-day report summaries so
-        # subsequent hits skip both the DB scans and the filesystem walk).
-        _daily_report._calendar_cache.set(cache_key, {
-            'days': days,
-            'conv_days': conv_days,
-            'cost_days': cost_days,
-            'ts': time.monotonic(),
-        })
-
-    logger.debug('[DailyReport] Calendar %d-%02d: %d days with reports, %d days with convs, '
-                 '%d days with costs',
-                 year, month, len(days), len(conv_days), len(cost_days))
-    return api_ok({'year': year, 'month': month, 'days': days,
-                    'conv_days': conv_days, 'cost_days': cost_days})
+    # Concurrent GETs of one owner month share a single computation.
+    overview = await _daily_report.calendar_overview.month_overview(
+        year, month, owner_user_id=owner_user_id)
+    return api_ok({'year': year, 'month': month, 'days': overview['days'],
+                   'conv_days': overview['conv_days'],
+                   'cost_days': overview['cost_days']})
 
 
 # Canonical task-status cycle order. The "click to advance" UI used to

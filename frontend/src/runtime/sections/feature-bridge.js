@@ -90,7 +90,7 @@ const _FEATURE_ENTRY_POINTS = [
   'toggleIgModelDropdown', '_igCancelGeneration', '_igRetryGenerationTurn',
   'openProjectBrain', 'toggleProjectBrain',
   '_wireConvSyncPush',
-  'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
+  'openDailyReport', 'closeDailyReport',
   'openKnowledgeBase',
   'openProjectModal', 'closeProjectModal',
   'openLocalControlModal', 'closeLocalControlModal',

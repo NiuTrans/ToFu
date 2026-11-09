@@ -110,6 +110,8 @@ class _Patched:
             is_repair = (last.get('role') == 'user'
                          and 'could not be parsed as JSON' in (last.get('content') or ''))
             if is_repair:
+                assert last.get('_contextInjectionId') == 'paper_output_repair'
+                assert last['_contextInjection']['eventId']
                 body = 'GARBAGE AGAIN' if rec.break_repair else json.dumps(_CARDS)
             else:
                 body = 'not json at all' if rec.break_first else json.dumps(_CARDS)

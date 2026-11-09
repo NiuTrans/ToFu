@@ -13,7 +13,7 @@ import time
 from lib.agent_core.native_process import RoundRequest, RoundPreparation
 from lib.identity import PrincipalContext
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -156,7 +156,7 @@ class NativeContextPolicy:
             from lib.tasks_pkg.orchestrator._root_agent_loop import prepare_round_context, admit_round_context
             self.task.setdefault('_firstDispatchRound', request.round)
             prepare_round_context(self.task, request.messages, round_num=request.round,
-                tid=self.task_id[:8], model=metadata['logical_model'],
+                tid=task_log_tag(self.task_id), model=metadata['logical_model'],
                 project_path=self.project_path, project_enabled=self.project_enabled,
                 round_tools=tools)
             admission_tools = tools
@@ -240,9 +240,9 @@ class NativeContextPolicy:
             def confirm():
                 if (not self.task['abort_event'].is_set()
                         and not (result.cancelled is not None and result.cancelled.is_set())):
-                    confirm_consumed_project_context(self.task, tid=self.task_id[:8])
+                    confirm_consumed_project_context(self.task, tid=task_log_tag(self.task_id))
                     flush_deferred_peer_and_steer(self.task,
-                        round_num=result.request.round, tid=self.task_id[:8])
+                        round_num=result.request.round, tid=task_log_tag(self.task_id))
             work = asyncio.get_running_loop().run_in_executor(self.executor, copy_context().run, confirm)
             try:
                 await asyncio.shield(work)

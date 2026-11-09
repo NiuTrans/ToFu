@@ -26,7 +26,7 @@ from typing import Any
 
 from lib.error_envelope import make_envelope
 from lib.llm.llm_errors import ModelRefusalError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.message_semantics import is_human_message
 from lib.turn_verdict import (
     CONTENT_FILTER_SETTLEMENT_KEY,
@@ -199,7 +199,7 @@ def _settle_model_refusal(
     stamp_content_filter_settlement(task, cause=MODEL_REFUSAL_CAUSE, envelope=envelope)
     logger.warning(
         '[%s] conv=%s 🚫 MODEL REFUSAL settled at round %d: model=%s category=%s — %s',
-        task['id'][:8],
+        task_log_tag(task['id']),
         task.get('convId', ''),
         round_num + 1,
         error.model,

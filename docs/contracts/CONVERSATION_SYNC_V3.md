@@ -264,6 +264,25 @@ executor. Request replay cannot replace identity, configuration or the original
 Stop watermark. Worker execution uses its own monotonic clock; an ingress clock
 is not serialized as evidence from another process.
 
+Replaying a settled command after a newer attempt has become current returns
+the original attempt receipt and the current Turn. It never rebinds a project
+assignment to the obsolete attempt. Problem: a late background-result replay
+tried to advance the grant backward and repeatedly failed its predecessor fence.
+Decision: both pair creation and attempt creation bind only a current replay;
+fresh acceptance still binds before dispatch. Relaxing the repository evidence
+fence would allow stale commands to replace live execution. Spec:
+`tests/project_mod/test_project_dispatch_runtime.py`.
+
+An owner-originated successor of a dispatched Worker Turn resolves and validates
+the existing assignment through `admission.turn_dispatch` before acceptance,
+then captures its scoped principal. A revoked grant returns the lifecycle
+conflict `worker_binding_refused`; it cannot silently become an ordinary owner
+task. This also repairs association after an older unbound browser attempt.
+Synthetic callers retain their identity and must match the explicit grant.
+Request-only config and guidance-response validation precedes binding lookup,
+preserving authored 400 errors even when the requested Turn does not exist.
+Spec: `tests/conversation/test_worker_attempt_real_start.py`.
+
 Stop commits cancellation before acknowledging it. Unentered work settles
 without constructing an executor or requiring an execution grant that may
 already be revoked. Configuration/authorization failure before entry has a
@@ -1711,7 +1730,10 @@ Heartbeats and snapshots also carry `pushWithheld` (always explicit, both
 ways). It is the READ-side probe of a WRITE-side delivery wedge: while the
 conversation's live task has authoritative frames withheld on storage retries
 (durable-before-visible, `TaskRuntime.append_event` stamps
-`_pushWithheldAt`), the withheld frames themselves can never report it, so
+`_pushWithheldAt`; event delivery also stamps it while a persist waits on a
+live authority inside the storage client, per the
+[client retry contract](../STORAGE.md#client-retry-contract)), the withheld
+frames themselves can never report it, so
 `routes/conversation_sync_v3.py` polls
 `lib.tasks_pkg.manager.runtime.push_withheld_for_conv` and marks heartbeats
 `degraded` with reason `storage-write-wedged` (distinct from the read-side
@@ -1732,7 +1754,12 @@ Before this rule (2026-09-18 incident) a wedged authority killed the ASGI
 response with a 503, and every EventSource reconnect added a pre-body probe
 plus a possible full snapshot refetch on top of the wedge. Genuinely
 permanent failures (protocol, auth, not-found) still close the stream.
-Pin: `test_sync_events_stream_degrades_on_wedge_read_failures`.
+Because the stream owns this loop, its steady-state page read declines the
+storage client's in-call wait for a live authority
+(`storage_wait_owner(decline_storage_wait)`) and returns its transient failure
+to the heartbeat path; the pre-body ownership probe keeps the ordinary wait.
+Pin: `test_sync_events_stream_degrades_on_wedge_read_failures` and
+`test_stream_change_read_declines_in_call_storage_waits`.
 
 ## Extending the protocol
 

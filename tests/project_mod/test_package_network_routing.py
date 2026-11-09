@@ -9,7 +9,7 @@ import os
 import pytest
 
 from lib.project_mod import network_command as network
-from lib.subscription_routes import Route
+from lib.network_routes import Route
 
 pytestmark = pytest.mark.unit
 

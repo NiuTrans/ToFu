@@ -1637,6 +1637,7 @@ def local_wire_tools(
     priority_names: set[str] | frozenset[str] = frozenset(),
     required_names: set[str] | frozenset[str] = frozenset(),
     apply_schema_budget: bool = True,
+    keep_discovery: bool = False,
     on_tool_isolated: ToolIsolationReporter | None = None,
 ) -> list[dict[str, Any]]:
     """Build a deterministic local surface from a stable schema projection.
@@ -1645,6 +1646,9 @@ def local_wire_tools(
     projection.  The two optional counts describe the larger server-owned
     discovery catalog, allowing a small routed/MCP projection to retain
     ``search_tools`` without copying hidden schemas into the cached prefix.
+    ``keep_discovery`` keeps the gateway on a small or all-eager surface whose
+    caller will hide some of its schemas behind it (the route's tool-name
+    budget in ``lib.llm.tool_wire``).
     """
     tools = [tool for tool in (catalog or []) if isinstance(tool, dict)]
     policy = (discovery_policy_by_name
@@ -1679,11 +1683,12 @@ def local_wire_tools(
             on_tool_isolated=on_tool_isolated)
 
     # Small catalogs cost less than a discovery round. A large all-eager
-    # catalog also has nothing to defer. If an explicit budget would omit any
-    # schema, however, the gateway must remain present so every hidden member
-    # of the executable catalog still has a live discovery path.
+    # catalog also has nothing to defer. If an explicit budget or the route's
+    # tool-name budget would omit any schema, however, the gateway must remain
+    # present so every hidden member of the executable catalog still has a
+    # live discovery path.
     if total < LOCAL_TOOL_SEARCH_MIN_FUNCTIONS or searchable <= 0:
-        budget_pressure = bool(
+        budget_pressure = keep_discovery or bool(
             schema_budget_tokens
             and tool_schema_tokens(tools, model=model) > schema_budget_tokens)
         surface = tools

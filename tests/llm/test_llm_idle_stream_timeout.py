@@ -352,6 +352,8 @@ class _FakeSession:
         self._resp = resp
 
     def post(self, *a, **k):
+        self._resp.tofu_network_route = {
+            'routeId': 'direct', 'routeMode': 'direct', 'decisionReason': 'fixture'}
         return self._resp
 
 
@@ -364,6 +366,8 @@ class _SlowHeadersSession:
 
     def post(self, *a, **k):
         time.sleep(self.delay)
+        self._resp.tofu_network_route = {
+            'routeId': 'direct', 'routeMode': 'direct', 'decisionReason': 'fixture'}
         return self._resp
 
 
@@ -1106,6 +1110,8 @@ class _DelayedHeadersSession:
     def post(self, *a, **k):
         time.sleep(self.delay)
         self.returned_at = time.monotonic()
+        self._resp.tofu_network_route = {
+            'routeId': 'direct', 'routeMode': 'direct', 'decisionReason': 'fixture'}
         return self._resp
 
 

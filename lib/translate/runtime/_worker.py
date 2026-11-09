@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from ..commit import commit_translation_to_turn, _is_retryable_storage_error
 from ..engine import _translate_freetext, translation_total_deadline_seconds
@@ -80,8 +80,8 @@ def _enrich_committed_turn_segments(
         logger.info(
             '[Translate] optional segment enrichment complete task=%s '
             'conv=%s turn=%s segments=%d',
-            task_id[:8],
-            conversation_id[:8],
+            task_log_tag(task_id),
+            conversation_id,
             turn_id[:8],
             len(segment_translations),
         )
@@ -89,8 +89,8 @@ def _enrich_committed_turn_segments(
         logger.warning(
             '[Translate] optional segment enrichment failed after whole-turn '
             'terminal settlement task=%s conv=%s turn=%s: %s',
-            task_id[:8],
-            conversation_id[:8],
+            task_log_tag(task_id),
+            conversation_id,
             turn_id[:8],
             segment_error,
         )
@@ -127,8 +127,8 @@ def _schedule_segment_enrichment(
         logger.warning(
             '[Translate] optional segment enrichment not admitted task=%s '
             'conv=%s turn=%s: %s',
-            task_id[:8],
-            conversation_id[:8],
+            task_log_tag(task_id),
+            conversation_id,
             turn_id[:8],
             admission_error,
         )
@@ -175,10 +175,10 @@ def _finish_done(
     )
     logger.info(
         "[Translate] task=%s complete %d→%d chars conv=%s turn=%s model=%s",
-        task_id[:8],
+        task_log_tag(task_id),
         input_length,
         len(translated),
-        conversation_id[:8] if conversation_id else "-",
+        conversation_id if conversation_id else "-",
         turn_id[:8] if turn_id else "-",
         model,
     )
@@ -264,7 +264,7 @@ def _schedule_commit_retry(
             logger.warning(
                 '[Translate] commit retry %d not admitted task=%s conv=%s '
                 'turn=%s: %s',
-                attempt, task_id[:8], conversation_id[:8], turn_id[:8],
+                attempt, task_log_tag(task_id), conversation_id, turn_id[:8],
                 admission_error,
             )
             _settle_error(
@@ -283,8 +283,8 @@ def _schedule_commit_retry(
         attempt,
         len(_COMMIT_RETRY_DELAYS_S),
         delay,
-        task_id[:8],
-        conversation_id[:8],
+        task_log_tag(task_id),
+        conversation_id,
         turn_id[:8],
     )
     return True
@@ -311,7 +311,7 @@ def _run_commit_retry(
         return
     if task['abort_event'].is_set():
         _finish_aborted(task_id, conversation_id, turn_id, message_id, field)
-        logger.info('[Translate] task=%s aborted before commit retry', task_id[:8])
+        logger.info('[Translate] task=%s aborted before commit retry', task_log_tag(task_id))
         return
     try:
         commit_translation_to_turn(
@@ -325,7 +325,7 @@ def _run_commit_retry(
     except Exception as exc:
         if task['abort_event'].is_set():
             _finish_aborted(task_id, conversation_id, turn_id, message_id, field)
-            logger.info('[Translate] task=%s aborted', task_id[:8])
+            logger.info('[Translate] task=%s aborted', task_log_tag(task_id))
             return
         if (_is_retryable_storage_error(exc)
                 and _schedule_commit_retry(
@@ -535,7 +535,7 @@ def _do_translate(
     except Exception as exc:
         if task['abort_event'].is_set():
             _finish_aborted(task_id, conversation_id, turn_id, message_id, field)
-            logger.info('[Translate] task=%s aborted', task_id[:8])
+            logger.info('[Translate] task=%s aborted', task_log_tag(task_id))
             return
         if (translated and bound_to_turn
                 and _is_retryable_storage_error(exc)
@@ -619,7 +619,7 @@ def _settle_error(
         source="lib.translate.runtime",
         kind=kind,
     )
-    logger.error("[Translate] task=%s failed: %s", task_id[:8], exc, exc_info=True)
+    logger.error("[Translate] task=%s failed: %s", task_log_tag(task_id), exc, exc_info=True)
     # Persist the durable failure verdict for conversation-bound whole-turn
     # translations so a terminal auto-translate that dies here (provider
     # stream premature close, engine exhausted) leaves inspectable,

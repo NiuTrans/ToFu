@@ -157,7 +157,8 @@ GET /api/v1/tasks/by-conv/<conv_id>      (scope: tasks; discovery)
     "roundSettleMs": 200,      //   末个逻辑请求 → 下一 round_start / 末轮 round_end
     "finalizeMs": 100,         //   末轮 round_end → 终态；四者之和 === orchestrationMs
     "unattributedMs": 500,     // 恒等于 gaps 之和 —— 严格账
-    "ttftMs": 21300,           // 信息项：⊂ llmMs，不参与加总
+    "ttftMs": 21300,           // 信息项：⊂ llmMs，不参与加总；只计已出首 token（或运行中仍在等）的窗口
+    "failedAttemptMs": 2000,   // 信息项（additive）：失败/被重试/被停止的尝试在首 token 前的等待，同不参与加总
     "overBudget": [{ "spanId": "r2.tool.c2", "kind": "tool",
                      "name": "write_file", "elapsedMs": 30000, "budgetMs": 15000 }]
   },
@@ -208,14 +209,14 @@ GET /api/v1/tasks/by-conv/<conv_id>      (scope: tasks; discovery)
 |---|---|---|
 | `turn` | 首行 → `done`/`error` | 任务全程 |
 | `round` | `round_start` → `round_end`；**工具子段会把足迹延长到工具落槌** | 工具在轮次间隙执行，归属作者轮 |
-| `llm` | `round_start` → `round_end` | 轮次级包络段；有逻辑请求证据时其中的准备/结算窗口由 `round_prep`/`round_settle` 认领。`attrs.attempts` 挂本轮 `round_usage` join（`streamElapsedMs` 权威值） |
+| `llm` | `round_start` → `round_end` | 轮次级包络段；有逻辑请求证据时其中的准备/结算窗口由 `round_prep`/`round_settle` 认领。`attrs.attempts` 挂本轮 `round_usage` join（`streamElapsedMs` 权威值；`responseHeadersMs`：该结算尝试从请求发出到响应头到达，不含路由准入，来自 usage 私有键 `_response_headers_ms`，旧数据缺省） |
 | `llm`（逻辑请求） | `model_request_start` → `model_request_complete` | `requestLevel:logical`；未标 level 的旧数据同样只证明逻辑请求；归属**开始时打开的轮次** |
 | `startup` | 执行时钟起点 → 首个执行边界（`round_start`/`step_start`/`model_request_start`/`tool_start`/终态） | 父段 + 已命名阶段子段：`dispatch`（首条事件前）、`executor_queue`、`worker_start`、`workspace`、`translation`、`config`、`tools`、`memory_load`、`memory_select`、`context`、`handoff` |
 | `round_prep` | `round_start` → 本轮首个逻辑请求开始（无请求则到 `round_end`/当前） | 仅在轨迹含逻辑请求证据时派生；与 `[RoundPrepTiming]` 同一窗口 |
 | `round_settle` | 本轮末个逻辑请求结束（无请求证据则 `round_end`）→ 下一 `round_start`（末轮到其 `round_end`） | 工具派发、结果落盘与循环簿记；内部工具/等待保留自己的种类 |
 | `finalize` | 末轮 `round_end`（或末个 `step_complete`）→ 终态事件 | 仅已结算任务；收尾结算 |
 | `llm`（dispatcher 子段） | 同上 | `requestLevel:provider_attempt`、`attemptLevel:true`、`attemptScope:dispatcher`；按 `parentSpanId` 挂在逻辑请求下，每次调用独立 ordinal，失败先关闭再等待重试；不宣称覆盖 transport 内部每次 HTTP/路由尝试 |
-| `llm_ttft` | `waiting_model` → 首个 `delta`/`tool_start` | 首 token 窗口 |
+| `llm_ttft` | `waiting_model`（失败尝试之后：结束其重试等待的 `model_request_start`）→ 首个 `delta`/`tool_start` | 一次尝试的首 token 窗口；尝试在首 token 前失败则以 `status:error\|aborted` + `attrs.failedAttempt` 关闭，首 token 证据丢失则标 `truncated` + `attrs.firstTokenUnobserved`（见“首 token 窗口与失败尝试”） |
 | `tool` | `tool_start.tStart` → `tool_result.tEnd`（缺时钟回退 `ts_ms`） | verdict 来自 `status`/`isError` |
 | `retry_wait` | 真实 `retrying` phase → 下一实质事件；**同一重试合并为一段**（保留真实 attempt） | 429/退避；`waiting_model` / `stream_stalled` 心跳不入账 |
 | `compaction` | `compacting` phase 或 `compaction` 事件 → `compaction_done` | 两条发射路径都折叠 |
@@ -266,7 +267,8 @@ Flow step span 以 `node_id` 配对；引擎 walk 是顺序的，新 `step_start
 
 模型逻辑/dispatcher `durationMs` 用单调时钟，墙钟只定位时间线；顺序以 event sequence
 为准。回拨时间被夹紧并标 `clock-regression`，不能把修正后的区间当精确时钟。
-等待/停滞心跳不拆分真实退避，也不重开已存在的 TTFT；后续 TTFT 用独立 span ID。
+等待/停滞心跳不拆分真实退避，也不重开已存在的 TTFT；只有尝试边界（失败、重试、下一次尝试开始）切分它，
+后续 TTFT 用独立 span ID。
 缺失的 route 信息保持缺失，不推断秘密 URL、凭据或底层请求次数。
 
 ### 编排窗口与锚点身份
@@ -302,6 +304,46 @@ fold 中位数：1,466 行 21.7 ms → 21.8 ms，1,242 行 4.2 ms → 4.5 ms。�
 边界之前的行，轮次窗口为 O(轮次 + 请求)，无逐 token 工作。Spec：
 `tests/turn_lifecycle/test_turn_trace_orchestration.py`。
 
+### 首 token 窗口与失败尝试
+
+问题：`llm_ttft` 从 `waiting_model` 一直开到首个 `delta`，心跳和重试都不结束它。一次在首字节前失败的
+provider 尝试（网关挂起 2,000 s 后回 HTTP 504）、随后的退避和成功重试自己的首 token 等待被折叠成一个
+窗口：任务 `55f61236` 的 R4 窗口 2,011.7 s，`ttftMs` 2,190 s，而 24 轮中 23 轮只有 2.7–24.7 s。事件投递
+失败（存储故障）时窗口一直开到任务终态，`a88de93e` 把 27,318 s 的故障时间记成首 token 等待。
+
+决定：一个窗口只量一次尝试从开始到首 token。
+
+- **以失败结束**：窗口所属逻辑请求的 dispatcher 子尝试 `model_request_complete` 为 failed/aborted、
+  逻辑请求失败/被停止、或在没有子尝试进行中时出现指名重试序号（`attempt >= 1`）的 `retrying`，
+  窗口在该边界关闭：`status:error|aborted`、`attrs.failedAttempt:true`，带 `statusCode`/`errorKind`，
+  紧随其后的重试心跳补全 `detailKey`。不指名重试序号的心跳（存储等待、attempt 0 的网络恢复）和子尝试
+  进行中的重试心跳是尝试内部的等待，窗口保持打开。
+- **下一次尝试**：结束其重试等待的 `model_request_start`（dispatcher 级重试是下一子尝试，任务级重试是下一
+  逻辑请求）在同一轮打开新窗口（子尝试带 `attrs.attempt`）。只由 `delta` 结束等待、没有观测到
+  尝试开始时不补造窗口。
+- **首 token 证据丢失**：逻辑请求完成（成功）、`round_end`、下一逻辑请求或轮次开始、终态都会关闭仍开着的
+  窗口，标 `truncated` + `attrs.firstTokenUnobserved:true`、`status:unknown`；运行中快照里仍在等的窗口为
+  `running`。
+- **dispatcher 证据优先**：`round_usage.usage._dispatch.ttft_ms`（`ttft_measurement:measured`）是从结算尝试
+  开始到首个输出的权威偏移。该逻辑请求恰好一次 dispatch 且 observer 证据完整（
+  `observerIsolation.providerDispatches == 1`，无丢弃/投递失败/flush 未完成/诊断失败）时，最后一个子尝试就是
+  结算尝试，窗口终点取「子尝试开始 + `ttft_ms`」，夹在子尝试结束与原终点之内（只会提前、从不推迟
+  已观测到的首 token），标 `attrs.firstTokenSource:dispatch`。
+- **summary**：`ttftMs` = 未失败且首 token 已观测（含 dispatcher 补正、运行中）的窗口并集；
+  `failedAttemptMs` = `failedAttempt` 窗口并集。两者都在 `llmMs` 内、只作信息项，首 token 未观测的窗口
+  两者都不计。窗口仍是 `llm_ttft` 种类，桶、优先级和不相交账本完全不变。
+
+否决的备选：失败尝试改成新的 span 种类或新桶（破坏现有桶/优先级与已持久化文档的可比性）；从
+`ttftMs` 扣掉重试等待（504 挂起期间没有 `retry_wait` 段，扣不掉）；只按 `retrying` 关窗（采样掉的
+重试帧会漏、存储等待和网络恢复帧会误判，子尝试自己的失败事件更精确）；未观测窗口仍计入 `ttftMs`
+（正是把故障时长记成首 token 的原问题）；用 `_dispatch` 的墙钟纳秒时间戳定位（与执行时钟不同域）。
+
+重放证据（`debug/turn_trace_audit.py --events`，同一导出事件分别用修改前/后的 fold）：`55f61236`
+（25 轮）桶与账本逐项不变，`ttftMs` 2,190,312 → 189,622 ms，`failedAttemptMs` 2,000,341 ms；R4 变为失败尝试
+2,000.341 s（504、`RateLimitError`、`stream.phase.retryGateway`）+ 退避 0.344 s + 重试首 token 11.056 s（与
+`_dispatch.ttft_ms` 11,056.322 一致）。`a88de93e`（补上同一终态边界）`ttftMs` 29,650,712 → 2,332,653 ms，末轮
+27,318 s 窗口标 `firstTokenUnobserved`。Spec：`tests/turn_lifecycle/test_turn_trace.py`。
+
 ### 严格账（契约不变量，CI 断言）
 
 1. summary 桶是 turn 区间的**不相交划分**：按优先级
@@ -325,7 +367,7 @@ fold 中位数：1,466 行 21.7 ms → 21.8 ms，1,242 行 4.2 ms → 4.5 ms。�
    结算时事件读取失败标 `event-read-failed`，且不产出 summary/spans/gaps（见下文）。
 4. 不相交 summary 是**按优先级分配的墙钟账**，不是所有并行阶段累计用时，也不是
    完整关键路径证明。LLM 父窗口不证明其中每毫秒都在上游计算；内层准备/调度仍可能
-   未细分。`ttftMs` 是信息项，与等待可能重叠，不能再加到总耗时。
+   未细分。`ttftMs` 与 `failedAttemptMs` 是信息项，与等待可能重叠，不能再加到总耗时。
 
 ### 持久化与资源上限
 
@@ -391,7 +433,7 @@ fold 中位数：1,466 行 21.7 ms → 21.8 ms，1,242 行 4.2 ms → 4.5 ms。�
 `[TurnTraceSummary] task=<完整 id> conv=… status=… totalMs=… llmMs=… toolMs=… waitMs=…
 admissionWaitMs=… retryWaitMs=… compactionMs=… approvalWaitMs=… unattributedMs=… ttftMs=…
 rounds=… spawnWaitMs=… flowStepMs=… orchestrationMs=… startupMs=… roundPrepMs=…
-roundSettleMs=… finalizeMs=… coverage=…`。所有数字来自被冻结的同一次 fold：
+roundSettleMs=… finalizeMs=… failedAttemptMs=… coverage=…`。所有数字来自被冻结的同一次 fold：
 桶与 `waitMs`/`orchestrationMs` 的拆分都取自文档 summary（同一次不相交分账），只有
 `rounds` 取自 `ledger_out`，故 `admissionWaitMs + retryWaitMs + spawnWaitMs == waitMs`、
 `startupMs + roundPrepMs + roundSettleMs + finalizeMs == orchestrationMs`。同一任务的终态

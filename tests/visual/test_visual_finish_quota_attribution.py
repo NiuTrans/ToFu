@@ -55,7 +55,7 @@ def test_attributed_quota_facts_stay_inside_footer(frontend_visual_page, theme, 
                    has_previous_snapshot:true, observed_delta_percent:0}});
       const metered = round => ({round, model:'claude-opus-5.5',
         usage:{prompt_tokens:166000, completion_tokens:2300,
-               _dispatch:{model:'kunlunbedrock.claude-opus-5.5-m17', provider_id:'sankuai'}}});
+               _dispatch:{model:'kunlunbedrock.claude-opus-5.5-m17', provider_id:'example-corp'}}});
       const subscription = (round, model, kind) => ({round, kind, model,
         provider_id:'oauth_codex',
         usage:{prompt_tokens:16018, completion_tokens:1151,
@@ -65,7 +65,7 @@ def test_attributed_quota_facts_stay_inside_footer(frontend_visual_page, theme, 
         thinkingDepth:'max', toolRounds:[], apiRounds,
         usage:{prompt_tokens:6316908, completion_tokens:89470},
         lastRoundUsage:{resolvedModel:'kunlunbedrock.claude-opus-5.5-m17',
-          providerId:'sankuai', keyTail:'4861'}});
+          providerId:'example-corp', keyTail:'4861'}});
       const turns = [
         message([metered(1), metered(2), subscription('compaction-1', 'gpt-6-luna', 'compaction')]),
         message([subscription(1, 'gpt-6.1-sol-extended-context-preview'),

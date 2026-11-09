@@ -654,13 +654,17 @@ requesting the application preserves the waterfall. Tests: `main.test.ts`,
   permits one active upload, and installs one fixed page-lifetime set of four
   drag listeners per surface; scope, copy, diagnostics, and post-install
   refresh remain injected feature policy.
-- My Day TODO and stream writes live in the lazy typed
-  `frontend/src/features/myday/task-actions.ts` controller. The retained panel
-  injects only its selected report, cache, render, calendar, and input ports;
-  optimistic mutations roll back on rejection, while stream cycle status and
-  created reports are adopted from the server response. The sibling
-  `quick-action-launcher.ts` owns suggestion-to-composer intent and makes the
-  project-preserving prefill-before-conversation order executable and tested.
+- My Day's main column is the lazy typed goal board
+  `frontend/src/features/myday/goal-board.ts` (projections in
+  `goal-model.ts`; rules in `docs/modules/scheduling_ops.md`, "My Day goals").
+  It renders goals → items → progress as the server computed them, with
+  suggestions and linked Worker evidence apart, and a past day as that day's
+  goal progress plus the archived report, read-only. It builds DOM text nodes
+  only. Each page keeps one in-flight goal load; a load that started before a
+  local change never overwrites that goal; commands of one goal run in click
+  order; check-offs are optimistic and adopt the returned goal view, and a
+  failure re-reads the server. A decomposition the server is running is
+  joined, never restarted.
 - My Day's reconstructible report cache lives in the typed
   `frontend/src/features/myday/report-cache.ts` repository. Keys include the
   resolved owner; 96 reports at 512 KiB and 24 month overviews at 128 KiB cap
@@ -668,19 +672,21 @@ requesting the application preserves the waterfall. Tests: `main.test.ts`,
   owns one cache-first digest probe and one afternoon reminder timer, a
   16-owner reminder ledger, and explicit teardown. The retained panel neither
   opens IndexedDB nor registers page-lifetime background work.
-- My Day calendar, report, progress, and polling presentation is demand-loaded
-  as the manifest-owned `myday-presenters` runtime by
-  `frontend/src/features/myday.ts`. Its three shell entries and the retained
-  Escape path resolve through late feature ports; its private panel state is
-  never captured by the startup runtime. The typed task/quick-action owners
-  compose in the same feature chunk, but `frontend/src/features/background.ts`
-  has no presenter import: cache-first digest refresh and reminders can preload
-  without parsing the report UI. Lazy presenter dependencies are explicit
-  runtime services, and repository availability remains a demand-time registry
-  read because the background owner is its lifecycle authority. Static empty,
-  TODO, launch, delete, and unfinished SVG markup has one immutable typed owner
-  in `frontend/src/features/myday/presentation-assets.ts`; retained renderers
-  interpolate that trusted asset table instead of carrying duplicate literals.
+- My Day's shell, date navigation and calendar are demand-loaded as the
+  manifest-owned `myday-presenters` runtime by `frontend/src/features/myday.ts`.
+  Its two shell entries and the retained Escape path resolve through late
+  feature ports; its private panel state is never captured by the startup
+  runtime. The panel reaches the board through the `MyDayGoalBoard` registry
+  port, and the board reads the panel back through `MyDayPanelPresentation`.
+  Rendering the calendar never fetches: one month load per month and page is
+  in flight at a time. A render that also fetched turned the IndexedDB month
+  paint into one more calendar request per cache read, the 2026-11-08 request
+  storm (`tests/myday/test_myday_calendar_single_flight.py`).
+  `frontend/src/features/background.ts` has no presenter import: cache-first
+  digest refresh and reminders can preload without parsing the panel. The
+  board's styles are the deferred `16-my-day-goals.css` of the same chunk.
+  Static empty, check and delete SVG markup has one immutable typed owner in
+  `frontend/src/features/myday/presentation-assets.ts`.
 - Conversation catalog instant-paint metadata lives in the typed
   `frontend/src/core/conversation-metadata-cache.ts` owner. Every operation
   resolves a positive authenticated owner; v6 drops the former ownerless v1–v4
@@ -1289,11 +1295,10 @@ sufficient.
 | Local catalog ordering, activity timestamp, invalidation and bounded sidebar scheduling | `frontend/src/conversation/application/conversation-catalog-reconciliation.ts` |
 | Revision-gated full conversation-catalog refresh debounce | `frontend/src/conversation/application/conversation-catalog-revision-gate.ts` |
 | Bounded lazy ZIP package upload shared by Memory and Skills | `frontend/src/features/skills/package-installer.ts` |
-| Lazy My Day TODO/stream mutation and rollback policy | `frontend/src/features/myday/task-actions.ts` |
-| Lazy My Day suggestion-to-composer intent ordering | `frontend/src/features/myday/quick-action-launcher.ts` |
+| Lazy My Day goal board, goal commands and read-only day recap | `frontend/src/features/myday/goal-board.ts`, `goal-model.ts` |
 | Owner-scoped, byte/entry-bounded My Day read cache and digest projection | `frontend/src/features/myday/report-cache.ts` |
 | Disposable My Day digest/reminder lifecycle | `frontend/src/features/myday/background-controller.ts` |
-| Demand-loaded My Day calendar/report/polling presentation and static assets | manifest bundle `myday-presenters` + `frontend/src/features/myday.ts` + `presentation-assets.ts` |
+| Demand-loaded My Day shell/calendar presentation and static assets | manifest bundle `myday-presenters` + `frontend/src/features/myday.ts` + `presentation-assets.ts` |
 | Always-together Paper/Research lazy owner composition | `frontend/src/features/paper/panel-owners.ts` |
 | Demand-loaded Paper report/reader retained presentation | manifest bundle `paper-reader-presenters` + `frontend/src/features/paper.ts` |
 | Demand-loaded Paper podcast/video retained presentation | manifest bundle `paper-media-presenters` + `frontend/src/features/paper.ts` |
@@ -1596,6 +1601,25 @@ stop the queueing but leave every scan as slow.
 Raw archives are lazy blocks on the selected diagnostic Turn. Each block retains one
 256 KiB window, replaced on paging; metadata names partial/quota/scrubbed evidence.
 
+Context source maps reuse this same projector and immutable prefix replay chain.
+`messages_snapshot` and `tool_wire_projection` store their source sequence as
+`sourceDeltaVersion:1`, prefix length/hash and changed tail inside
+`contextLineage`. The baseline is scoped by task, turn, event type and
+projection stage. Complete exports reconstruct `sources`; missing or corrupt
+dependencies mark lineage degraded without certifying any source attribution.
+Readers retain unselected earlier wire baselines across continuation pages.
+Task settlement/retention releases the existing projector and replay state.
+Problem: a growing full source array on every round would add quadratic
+diagnostic storage. Decision: extend the existing prefix encoding, with no new
+store or retention knob. Alternatives rejected: silently truncating source
+history (breaks attribution) and a separate lineage database (duplicates owners).
+Measured with the real builders, sealed Chat requests and storage/replay owners
+on an append-only synthetic history (stable occurrence IDs, one added event per
+round, both canonical and wire maps): 100 rounds used 144,578 source-map bytes
+instead of 3,927,998; 200 used 288,878 instead of 15,287,198. Every reconstructed
+map equaled its full input. These are compact JSON map bytes, excluding existing
+message/event-envelope storage, not a production workload estimate.
+
 The level-1 task list is server-authoritative (`Api.tasks.byConv`,
 cursor-paginated with `before`) and has two refresh drives: a TurnStore
 subscription (status dispatches trigger a throttled silent refresh) plus a
@@ -1820,6 +1844,23 @@ python3 scripts/frontend_budget.py
 ```
 
 `check:frontend` verifies generated runtime, styles, conversation and i18n contracts, all literal i18n calls/attributes, actions, TypeScript, and the production build. Retained runtime composition also rejects import-time use of a later top-level lexical declaration; infrastructure registries such as `runtimeScope` are declared before eager composition and cannot depend on manifest concatenation order. Before any new asset enters the live directory, the unpublished minified graph is loaded in one bounded, headless Chromium canary with in-memory API fixtures. Publication requires `tofu:app-ready`, the conversation and folder bootstrap requests, and no unhandled page or fatal boot error. A failed canary leaves the existing manifest and all served assets untouched. The canary defaults `PLAYWRIGHT_NODEJS_PATH` to the build process's `process.execPath`, while preserving an explicit operator value. Problem: Playwright's bundled Node can require a newer glibc than the host even when Vite builds successfully. Decision: reuse the Node already executing the build. Alternative rejected: skipping the browser canary would publish an unverified graph. The Vite manifest carries the locale-source digest; the deployment controller and packaging gates refuse a graph whose language chunks predate the locale source. The ASGI lifespan validates only the complete published graph, which is also the atomic request-serving commit: authoring source edits cannot withdraw the last validated graph during process recovery, and requests adopt new bytes only after a complete manifest publish. Composition tests prove the manifests recreate the checked-in delivery bytes; size budgets apply to authoring sections as well as shipped resources.
+
+The canary's boot wait is a no-progress window, not a fixed deadline. On
+2026-11-06 the shared tree's own build needed about 124 s on a loaded host,
+while the canary waited only 20 s for readiness and 2 s for the sidebar, so a
+busy machine would refuse every restart that builds the frontend (the old
+server keeps serving, but the restart never happens). Decision: navigation
+waits for `commit`, and the wait renews on every routed request, console line or
+document mutation. The page reports readiness through the exposed
+`__tofuCanaryReady` binding and activity through `__tofuCanaryProgress`, so the
+driver never has to evaluate into a busy page (`wait_for_function` and
+`evaluate` do not return while it holds its event loop). A page that stops
+progressing for a whole window fails with that reason; a page error or fatal
+boot console error is reported instead. Alternatives rejected: a larger fixed
+deadline still refuses a slower healthy boot; evaluating readiness in a poll
+loop hangs exactly when the page is too busy. Specification:
+`tests/frontend/test_frontend_bundle_canary.py` (slow, hung and broken boots in
+a real Chromium page).
 
 ## Extension checklist
 

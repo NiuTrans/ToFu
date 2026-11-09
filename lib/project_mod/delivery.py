@@ -3,6 +3,8 @@
 The existing workspace row/origin is the only durable owner. Explicit candidate
 validation/adoption and automatic task-delta publication use the same intent
 and recovery receiver; no detached job ledger or second publication authority. Failed/cancelled tasks preserve, never auto-publish.
+The receiver loop hands each page's rows to per-project lanes and never waits
+on row work; each lane runs its project's rows one at a time, in arrival order.
 External processes not using workspace_write_lease remain an explicit limit.
 """
 from __future__ import annotations
@@ -10,10 +12,10 @@ from __future__ import annotations
 from contextlib import nullcontext
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from lib import integration_state_repository as state
-from lib.git_runtime import GIT_STALL_SECONDS
 
 from lib.log import get_logger
 
@@ -30,6 +32,13 @@ _ACTION_OUTSTANDING = False
 _SCAN_LOCK = threading.Lock()
 _SCAN_REQUESTED = False
 _RECOVERY_REQUESTED = False
+# Receiver lanes by canonical project root. An entry lives while its lane has
+# queued rows or a running thread, so the registry is bounded by the projects
+# that currently have delivery work.
+_LANES_LOCK = threading.Lock()
+_LANES: dict[str, '_ProjectLane'] = {}
+# Marks lane threads: their work is the receiver's own, like the loop's.
+_LANE_THREAD = threading.local()
 
 # Commands whose effects the resume pass reads: receipts and acknowledgements
 # (set_meta), registration, and the row states pending deliveries wait on.
@@ -51,7 +60,9 @@ def _control():
     return integration_control
 
 
-def _canonical(path: str) -> tuple[Path, Path]:
+def _canonical(path: str, *, cancel=None) -> tuple[Path, Path]:
+    # Identity reads that task admission depends on wait as long as the volume
+    # does (GIT_STALL_SECONDS window, no total deadline; project_integration.md).
     ic = _control()
     raw = str(path or '').strip()
     if not raw:
@@ -63,13 +74,14 @@ def _canonical(path: str) -> tuple[Path, Path]:
     # reuse this identity across calls or publication admission boundaries.
     # Identity reads wait on the volume, not on the work: no wall-clock deadline.
     values = ic._git(candidate, ['rev-parse', '--show-toplevel', '--git-common-dir'],
-                     check=True, stall_seconds=GIT_STALL_SECONDS).stdout.strip().splitlines()
+                     check=True, stall_seconds=ic.GIT_STALL_SECONDS,
+                     cancel=cancel).stdout.strip().splitlines()
     if len(values) != 2 or not all(values):
         raise ic.IntegrationError('Incomplete workspace repository identity')
     workspace = Path(values[0]).resolve()
     common = (candidate / values[1]).resolve()
     listing = ic._git(workspace, ['worktree', 'list', '--porcelain'], check=True,
-                      stall_seconds=GIT_STALL_SECONDS).stdout
+                      stall_seconds=ic.GIT_STALL_SECONDS, cancel=cancel).stdout
     first = next((line[9:] for line in listing.splitlines()
                   if line.startswith('worktree ')), '')
     if not first:
@@ -84,6 +96,56 @@ def _canonical(path: str) -> tuple[Path, Path]:
 
 def _receipt(row: dict) -> dict:
     return dict((row.get('origin') or {}).get(_DELIVERY_KEY) or {})
+
+
+def _generation(receipt: dict) -> str:
+    """The physical attempt whose outcome ``receipt`` records (its generation).
+
+    Every attempt of a project Worker's assignment works under one work id, so
+    one receipt outlives its attempts. Both storage authorities drop a write
+    naming another generation unless it is the fresh ``working`` receipt that
+    opens the next one. Receipts recorded before generations name none.
+    """
+    value = receipt.get('executorTaskId')
+    return value if isinstance(value, str) else ''
+
+
+def _opens_generation(receipt: dict, executor_task_id: str) -> bool:
+    """No receipt yet, or another attempt's receipt that never delivered."""
+    if not receipt:
+        return True
+    return (bool(executor_task_id) and _generation(receipt) != executor_task_id
+            and receipt.get('state') != 'delivered')
+
+
+def _superseded(receipt: dict, executor_task_id: str) -> bool:
+    """A settlement of an attempt whose receipt a later attempt has opened."""
+    generation = _generation(receipt)
+    return bool(executor_task_id and generation and generation != executor_task_id)
+
+
+def canonical_delivery(origin: dict) -> bool:
+    """The receipt proves its delta is committed on the branch.
+
+    A commit-mode delivery says ``delivered`` only once its commit is verified
+    reachable from the branch, and a no-change delivery names HEAD. A
+    working-tree publication becomes canonical only through its commit
+    acknowledgement (``deliveryCheckpoint``): the delta committed or already
+    present, or a repository that takes no automatic commits, whose working
+    tree is then the publication. A whole-workspace (linear) checkpoint never
+    proves one delta, and an entangled or skipped commit leaves it uncommitted.
+    """
+    receipt = origin.get(_DELIVERY_KEY) or {}
+    if receipt.get('state') != 'delivered':
+        return False
+    if receipt.get('publicationMode') != 'working_tree' or receipt.get('phase') == 'no_changes':
+        return True
+    acknowledgement = origin.get('deliveryCheckpoint') or {}
+    if 'schema' in acknowledgement:
+        return False
+    status = acknowledgement.get('status')
+    return status in ('no_changes', 'disabled') or (
+        status == 'committed' and bool(acknowledgement.get('commitSha')))
 
 
 def _save(row: dict, delivery: dict, **updates: Any) -> dict:
@@ -206,15 +268,23 @@ def _wake_workspace_dependents(project_path: str, task_id: str, user_id: int,
 
 
 def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                        conversation_id: str = '', title: str = '') -> dict | None:
+                        conversation_id: str = '', title: str = '',
+                        cancel=None, executor_task_id: str = '') -> dict | None:
     """Register only the linked checkout actually selected by this task.
 
     Never silently move a task away from dirty canonical context. Existing
     registration wins; a canonical checkout without registration is unchanged.
+    ``cancel`` is the starting task's Stop: binding reads observe it.
+
+    ``executor_task_id`` names the physical attempt that starts in the checkout
+    (only a start binding passes it). A receipt another attempt left there,
+    preserved, held, failed or restart-paused but never delivered, predates
+    this attempt's work: it reopens as this attempt's generation, ``working``
+    with nothing captured, so this attempt's own settlement decides delivery.
     """
     ic = _control()
     user_id = ic._require_user_id(user_id)
-    root, workspace = _canonical(project_path)
+    root, workspace = _canonical(project_path, cancel=cancel)
     row = state.find_workspace(str(root), str(task_id), user_id=user_id)
     if row is None:
         if root == workspace:
@@ -224,7 +294,7 @@ def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
         target_head = ic._rev(root, 'HEAD')
         workspace_head = ic._rev(workspace, 'HEAD')
         base = ic._git(root, ['merge-base', target_head, workspace_head], check=True,
-                       stall_seconds=GIT_STALL_SECONDS).stdout.strip()
+                       stall_seconds=ic.GIT_STALL_SECONDS, cancel=cancel).stdout.strip()
         state.register_workspace(
             project_root=str(root), task_id=str(task_id), title=title or str(task_id),
             workspace_path=str(workspace), base_sha=base,
@@ -234,41 +304,60 @@ def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
     if not actual.is_dir() or ic._common_dir(actual) != ic._common_dir(root):
         raise ic.IntegrationError('Registered workspace is unavailable; refusing wrong-root fallback')
     delivery = _receipt(row)
-    if not delivery:
-        origin = row.get('origin') or {}
-        branch = (origin.get('sourceRef') if origin.get('executionMode') == 'isolated-task'
-                  else ic._git(root, ['symbolic-ref', '-q', 'HEAD'],
-                               stall_seconds=GIT_STALL_SECONDS).stdout.strip())
-        delivery = _save(row, {}, state='working', targetRef=branch,
-                         baseHead=ic._rev(root, 'HEAD'), conversationId=conversation_id,
-                         reason='', taskOutcome='')
+    if _opens_generation(delivery, executor_task_id):
+        # Settlement and the receiver decide under this lock; a reopen never
+        # interleaves with a capture or publication decision of the old receipt.
+        with ic._repo_lock(str(root), cancel=cancel):
+            row = state.get_workspace(str(root), str(task_id), user_id=user_id)
+            delivery = _receipt(row)
+            if _opens_generation(delivery, executor_task_id):
+                if delivery:
+                    logger.info('[WorkspaceDelivery] attempt %s reopens work=%s from %s (%s) of %s',
+                                executor_task_id, task_id, delivery.get('state'),
+                                delivery.get('reason') or delivery.get('taskOutcome') or '-',
+                                _generation(delivery) or 'an earlier attempt')
+                origin = row.get('origin') or {}
+                branch = (origin.get('sourceRef') if origin.get('executionMode') == 'isolated-task'
+                          else ic._git(root, ['symbolic-ref', '-q', 'HEAD'],
+                                       stall_seconds=ic.GIT_STALL_SECONDS, cancel=cancel).stdout.strip())
+                generation = {'executorTaskId': executor_task_id} if executor_task_id else {}
+                delivery = _save(row, {}, state='working', targetRef=branch,
+                                 baseHead=ic._rev(root, 'HEAD'), conversationId=conversation_id,
+                                 reason='', taskOutcome='', **generation)
     return {'canonicalRoot': str(root), 'workspacePath': str(actual),
             'workId': str(task_id), 'delivery': delivery}
 
 
 def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                          outcome: str) -> dict | None:
+                          outcome: str, executor_task_id: str = '') -> dict | None:
     """Persist intent and immediately deliver automatic tasks before returning."""
-    result = _settle_task_workspace(project_path, task_id, user_id=user_id, outcome=outcome)
+    result = _settle_task_workspace(project_path, task_id, user_id=user_id, outcome=outcome,
+                                    executor_task_id=executor_task_id)
     _wake_workspace_dependents(project_path, task_id, user_id, result)
     return result
 
 
 def record_task_workspace_intent(project_path: str, task_id: str, *, user_id: int,
-                                  outcome: str) -> dict | None:
+                                  outcome: str, executor_task_id: str = '') -> dict | None:
     """Acknowledge restart debt; the lifecycle worker owns capture and delivery."""
     return _settle_task_workspace(
-        project_path, task_id, user_id=user_id, outcome=outcome, record_only=True)
+        project_path, task_id, user_id=user_id, outcome=outcome, record_only=True,
+        executor_task_id=executor_task_id)
 
 
 def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
-                           outcome: str, record_only: bool = False) -> dict | None:
+                           outcome: str, record_only: bool = False,
+                           executor_task_id: str = '') -> dict | None:
     """Persist intention BEFORE checkpoint/submit, so restart can finish it.
 
     A restart pause (``interrupted``) owes nothing yet: the receipt stays
     ``working`` and nothing is captured, preserved or published until a later
-    attempt of the same task settles it. Failed/cancelled/stopped remain sticky;
-    both storage authorities refuse to change a recorded denial.
+    attempt of the same task settles it. A local checkout still saves its work
+    in progress at its WIP ref (never publication authority), because its
+    volume may not outlive the restart. Failed/cancelled/stopped remain sticky
+    within the receipt's generation; both storage authorities refuse to change a
+    recorded denial. ``executor_task_id`` names the settling attempt: once a
+    later attempt opened the receipt, an earlier attempt's settlement is stale.
     """
     ic = _control()
     from lib.tasks_pkg.workspace_delivery import RESTART_INTERRUPTED
@@ -279,6 +368,11 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
     # that removed checkout again.
     canonical, _selected = _canonical(project_path)
     existing = state.find_workspace(str(canonical), str(task_id), user_id=user_id)
+    if existing and _superseded(_receipt(existing), executor_task_id):
+        logger.info('[WorkspaceDelivery] settlement of attempt %s ignored for work=%s: '
+                    'attempt %s owns the receipt', executor_task_id, task_id,
+                    _generation(_receipt(existing)))
+        return _receipt(existing)
     if existing and _receipt(existing).get('state') in {'delivered', 'preserved'}:
         if _receipt(existing).get('state') == 'delivered':
             held = _publication_hold(existing, _receipt(existing))
@@ -290,10 +384,13 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
     bound = bind_task_workspace(project_path, task_id, user_id=user_id)
     if bound is None:
         return None
+    paused = False
     # Serializes revocation with candidate/adoption ref linearization.
     with ic._repo_lock(bound['canonicalRoot']):
         row = state.get_workspace(bound['canonicalRoot'], str(task_id), user_id=user_id)
         receipt = _receipt(row)
+        if _superseded(receipt, executor_task_id):
+            return receipt
         if receipt.get('state') in {'delivered', 'preserved'}:
             if receipt.get('state') == 'delivered':
                 held = _publication_hold(row, receipt)
@@ -307,10 +404,15 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
                 # A capture taken before the pause predates the resumed work.
                 receipt = _save(row, receipt, state='working', taskOutcome=RESTART_INTERRUPTED,
                                 checkpointSha='', reason='')
-            return receipt
-        if receipt.get('taskOutcome') != original_outcome or receipt.get('state') == 'working':
+            paused = True
+        elif receipt.get('taskOutcome') != original_outcome or receipt.get('state') == 'working':
             receipt = _save(row, receipt, state='pending', phase='checkpoint',
                             taskOutcome=original_outcome, reason='')
+    if paused:
+        if not record_only:
+            # Outside repository admission: the save walks the whole checkout.
+            _save_paused_checkout(bound['canonicalRoot'], str(task_id), user_id)
+        return receipt
     if not record_only and (row.get('origin') or {}).get('executionMode') == 'isolated-task':
         result = _settle_registered(row, receipt)
         if result.get('state') not in {'delivered', 'preserved'}:
@@ -318,6 +420,17 @@ def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
         return result
     ic._start_or_wake_worker()
     return receipt
+
+
+def _save_paused_checkout(canonical_root: str, task_id: str, user_id: int) -> None:
+    """Save a paused task's local checkout; a failed save leaves the pause receipt standing."""
+    try:
+        saved = _control().save_workspace_wip(canonical_root, task_id, user_id=user_id)
+    except Exception as error:
+        logger.warning('Paused checkout work not saved task=%s: %s', task_id, error)
+        return
+    if saved:
+        logger.info('[WorkspaceDelivery] paused checkout work saved task=%s wip=%s', task_id, saved)
 
 
 def retry_task_delivery(project_path: str, task_id: str, *, user_id: int) -> dict:
@@ -367,8 +480,19 @@ def _settle_registered(row: dict, receipt: dict) -> dict:
     result = _settle_registered_delivery(row, receipt)
     if result.get('state') == 'delivered':
         _reclaim_completed_source(row)
+    elif result.get('state') == 'preserved':
+        _retire_discarded_checkout(row)
     _wake_delivered_dependents(row, result)
     return result
+
+
+def _retire_discarded_checkout(row: dict) -> None:
+    """A discard kept a local checkout an attempt was working in; that attempt has now settled."""
+    try:
+        _control().retire_discarded_checkout(row['project_root'], row['task_id'],
+                                             user_id=int(row['user_id']))
+    except Exception as error:
+        logger.warning('Discarded checkout retained task=%s: %s', row.get('task_id', '?'), error)
 
 
 def _reclaim_completed_source(row: dict) -> None:
@@ -422,6 +546,10 @@ def _checkpoint_delivered_workspace(row: dict) -> None:
     and verification gates. A terminal receipt proves task outcome, never the
     opt-in. One acknowledgement on the existing origin avoids rescanning cold
     history; a transient refusal records none, so the next pass retries.
+
+    Recording it wakes the delivery's dependents again: readiness counts a
+    working-tree publication only from this acknowledgement on
+    (``canonical_delivery``), so the wake at its delivered ACK found them waiting.
     """
     origin = row.get('origin') or {}
     receipt = _receipt(row)
@@ -442,18 +570,23 @@ def _checkpoint_delivered_workspace(row: dict) -> None:
                 return
         else:
             from lib.linear_git_checkpoint import settle_task_checkpoint
+            from lib.project_mod.task_delta_delivery import delivered_paths
             task = {'id': row['task_id'], 'convId': origin.get('conversationId', ''),
                     'status': 'done', 'finishReason': 'stop'}
             result = settle_task_checkpoint(task, user_id=int(row['user_id']),
-                                            project_path=row['project_root'])
+                                            project_path=row['project_root'],
+                                            own_paths=delivered_paths(row))
             if result and result.get('status') == 'deferred':
                 return
+        acknowledgement = result or {'status': 'disabled'}
         state.set_workspace_meta(
             project_root=row['project_root'], task_id=row['task_id'],
             user_id=int(row['user_id']), now=_control()._now(),
-            patch={'deliveryCheckpoint': result or {'status': 'disabled'}})
+            patch={'deliveryCheckpoint': acknowledgement})
     except Exception as error:
         logger.warning('Delivered workspace checkpoint retained for retry: %s', error)
+        return
+    _wake_delivered_dependents(row, receipt)
 
 
 def _commit_reviewed_delivery(row: dict) -> dict | None:
@@ -481,9 +614,12 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
                           # Older publication holds used the capture phase even
                           # though the immutable checkpoint was already ready.
                           and not str(receipt.get('reason') or '').startswith('project_publication_')
+                          # Admission holds refused the capture before it ran;
+                          # each clears by itself and is retried on the next pass.
                           and receipt.get('reason') not in {
                               'task_background_commands_running',
-                              'task_child_agents_running'})
+                              'task_child_agents_running',
+                              'workspace_busy'})
         retry_legacy_capture = _legacy_transient_capture_receipt(receipt)
         recapture_transient = (receipt.get('state') == 'pending'
                                and receipt.get('phase') == _RETRYABLE_CAPTURE_PHASE
@@ -506,6 +642,10 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
             receipt = _receipt(row)
             if frozen and _checkpoint_identity(row) != captured_identity:
                 raise ic.IntegrationError('checkpoint_changed_during_recovery')
+            if receipt.get('state') == 'working':
+                # A later attempt reopened the receipt and is executing in the
+                # checkout; its own settlement captures and delivers it.
+                return receipt
             if receipt.get('state') in {'delivered', 'preserved'}:
                 held = _publication_hold(row, receipt) if receipt.get('state') == 'delivered' else None
                 return held if held is not None else receipt
@@ -541,6 +681,8 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
                     with ic._repo_lock(root):
                         row = state.get_workspace(root, task_id, user_id=user_id)
                         receipt = _receipt(row)
+                        if receipt.get('state') == 'working':
+                            return receipt
                         receipt = _save(row, receipt, checkpointSha=row['checkpoint_sha'])
             if receipt.get('taskOutcome') != 'completed':
                 return _save(row, receipt, state='preserved', phase='checkpoint',
@@ -578,7 +720,7 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
             held = _publication_hold(row, receipt)
             if held is not None:
                 return held
-        if receipt.get('state') in {'delivered', 'preserved'}:
+        if receipt.get('state') in {'delivered', 'preserved', 'working'}:
             return receipt
         if _transient_git_spawn_error(exc):
             return _save(row, receipt, state='pending', phase=_RETRYABLE_CAPTURE_PHASE,
@@ -781,9 +923,11 @@ def _recover_working_registration(row: dict) -> dict:
     if _receipt(row).get('taskOutcome') == RESTART_INTERRUPTED:
         # Restart-paused: the resumed attempt of this task settles it.
         return _receipt(row)
-    # A project Worker's checkout is keyed by its assignment's work id; the
-    # physical attempt executing in it records itself as executorTaskId.
-    executor_id = str((row.get('origin') or {}).get('executorTaskId') or task_id)
+    # A project Worker's checkout is keyed by its assignment's work id. The
+    # receipt names the attempt it awaits; a receipt from before generations
+    # falls back to the attempt that last recorded itself in the checkout.
+    executor_id = str(_generation(_receipt(row))
+                      or (row.get('origin') or {}).get('executorTaskId') or task_id)
     live = chat_task_runtime.get(executor_id)
     # Even a terminal live carrier may still be persisting its verdict. Its
     # normal settlement owns retries; do not race an absent durable row into
@@ -802,7 +946,7 @@ def _recover_working_registration(row: dict) -> dict:
                 task[key] = metadata[key]
     return settle_task_workspace(
         row['workspace_path'], task_id, user_id=int(row['user_id']),
-        outcome=workspace_outcome(task)) or _receipt(row)
+        outcome=workspace_outcome(task), executor_task_id=executor_id) or _receipt(row)
 
 
 def request_workspace_delivery_scan(*, recovery: bool = False) -> None:
@@ -816,31 +960,36 @@ def request_workspace_delivery_scan(*, recovery: bool = False) -> None:
         _RECOVERY_REQUESTED = _RECOVERY_REQUESTED or recovery
 
 
-def resume_due_workspace_deliveries() -> bool:
+def resume_due_workspace_deliveries(*, lanes: bool = False) -> bool:
     """Worker tick: continue an open pass, or start one only when it is due.
 
     A pass is due on request (startup or worker-error recovery, a committed
     delivery-state command) and while the last pass returned rows: a held
     receipt whose cause clears without a commit keeps its per-tick retry.
-    Otherwise nothing is read, however long the delivery history.
+    Otherwise nothing is read, however long the delivery history. ``lanes``
+    is the receiver loop's mode (see ``resume_pending_workspace_deliveries``).
     """
     global _SCAN_REQUESTED, _RECOVERY_REQUESTED
     if _RECOVERY_CURSOR:
-        return resume_pending_workspace_deliveries()
+        return resume_pending_workspace_deliveries(lanes=lanes)
     with _SCAN_LOCK:
         requested, recovery = _SCAN_REQUESTED, _RECOVERY_REQUESTED
         _SCAN_REQUESTED = _RECOVERY_REQUESTED = False
     if not (requested or _ACTION_OUTSTANDING):
         return False
-    return resume_pending_workspace_deliveries(retained=recovery)
+    return resume_pending_workspace_deliveries(retained=recovery, lanes=lanes)
 
 
-def resume_pending_workspace_deliveries(*, retained: bool = False) -> bool:
+def resume_pending_workspace_deliveries(*, retained: bool = False, lanes: bool = False) -> bool:
     """Act on one page of rows whose receipt asks the worker to act.
 
     Page rows are complete workspace rows, so acknowledged history costs no
     client read or filesystem probe. ``retained`` applies to a pass starting
-    here: a retained checkout can vanish without any commit.
+    here: a retained checkout can vanish without any commit. By default the
+    caller processes the page and learns whether a receipt changed. With
+    ``lanes`` (the receiver loop) the rows go to their projects' lanes and the
+    call returns at once: a lane's receipt writes are delivery-state commits,
+    which make the next pass due and wake the loop.
     """
     global _RECOVERY_CURSOR, _RECOVERY_RETAINED, _ACTION_OUTSTANDING
     if not _RECOVERY_CURSOR:
@@ -848,34 +997,127 @@ def resume_pending_workspace_deliveries(*, retained: bool = False) -> bool:
     page = state.delivery_action_page(_RECOVERY_CURSOR, 64, retained=_RECOVERY_RETAINED)
     _RECOVERY_CURSOR = int(page.get('nextAfterId') or 0)
     _ACTION_OUTSTANDING = _ACTION_OUTSTANDING or bool(page['rows'])
+    if lanes:
+        _queue_on_project_lanes(page['rows'])
+        return bool(page.get('hasMore'))
     changed = False
     for row in page['rows']:
-        try:
-            before = _receipt(row)
-            if before.get('state') == 'delivered':
-                _checkpoint_delivered_workspace(row)
-                _reclaim_completed_source(row)
-                continue
-            if before.get('state') == 'working':
-                after = _recover_working_registration(row)
-                changed = changed or before != after
-                continue
-            if before.get('state') not in {'pending', 'blocked'}:
-                retry = before.get('retry') or {}
-                if (before.get('state') != 'failed'
-                        or retry.get('condition') != 'validation_inputs_changed'):
-                    continue
-            if before.get('phase') == 'checkpoint' or row['state'] in {'running', 'checkpointed'}:
-                after = _settle_registered(row, before)
-            else:
-                after = deliver_registered_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
-            if after.get('state') == 'delivered':
-                latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
-                _checkpoint_delivered_workspace(latest)
-            changed = changed or before != after
-        except Exception as exc:
-            # A page contains independent owners. Keep this row's durable debt
-            # and let the same paged worker retry it without starving siblings.
-            logger.warning('Workspace recovery pending task=%s: %s',
-                           row.get('task_id', '?'), exc)
+        changed = _resume_row(row) or changed
     return changed or bool(page.get('hasMore'))
+
+
+def _resume_row(row: dict) -> bool:
+    """Act on one row whose receipt asks the worker to act; True if it changed."""
+    try:
+        before = _receipt(row)
+        if before.get('state') == 'delivered':
+            _checkpoint_delivered_workspace(row)
+            _reclaim_completed_source(row)
+            return False
+        if before.get('state') == 'working':
+            return before != _recover_working_registration(row)
+        if before.get('state') not in {'pending', 'blocked'}:
+            retry = before.get('retry') or {}
+            if (before.get('state') != 'failed'
+                    or retry.get('condition') != 'validation_inputs_changed'):
+                return False
+        if before.get('phase') == 'checkpoint' or row['state'] in {'running', 'checkpointed'}:
+            after = _settle_registered(row, before)
+        else:
+            after = deliver_registered_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+        if after.get('state') == 'delivered':
+            latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+            _checkpoint_delivered_workspace(latest)
+        return before != after
+    except Exception as exc:
+        # A page contains independent owners. Keep this row's durable debt
+        # and let the same paged worker retry it without starving siblings.
+        logger.warning('Workspace recovery pending task=%s: %s',
+                       row.get('task_id', '?'), exc)
+        return False
+
+
+class _ProjectLane:
+    """One project's receiver lane: queued rows and the thread draining them."""
+
+    __slots__ = ('pending', 'current', 'thread')
+
+    def __init__(self) -> None:
+        # Row ID -> newest page snapshot; insertion order is the lane's order.
+        self.pending: dict[int, dict] = {}
+        self.current: int | None = None
+        self.thread: threading.Thread | None = None
+
+
+def _queue_on_project_lanes(rows: list[dict]) -> None:
+    """Queue rows on their project's lane and start each idle lane's thread.
+
+    Lanes are keyed by canonical project root, the domain of the repository
+    lock that already orders a project's Git work, so one project's capture
+    or publication never waits for another project's. A queued row keeps its
+    place and takes the newer snapshot. A row in flight is not queued again:
+    its own receipt write makes the next pass due, which reads it afresh.
+    Lane threads are daemons, like the loop: a capture never holds up exit.
+    """
+    with _LANES_LOCK:
+        for row in rows:
+            root = str(row['project_root'])
+            lane = _LANES.get(root)
+            if lane is None:
+                lane = _LANES[root] = _ProjectLane()
+            if row['id'] != lane.current:
+                lane.pending[row['id']] = row
+            if lane.thread is None and lane.pending:
+                thread = threading.Thread(
+                    target=_drain_project_lane, args=(root, lane),
+                    name=f'tofu-delivery-lane:{Path(root).name}', daemon=True)
+                thread.start()
+                lane.thread = thread
+
+
+def is_delivery_lane_thread() -> bool:
+    """Whether the calling thread is one of this receiver's project lanes."""
+    return getattr(_LANE_THREAD, 'active', False)
+
+
+def _drain_project_lane(root: str, lane: _ProjectLane) -> None:
+    _LANE_THREAD.active = True
+    try:
+        while True:
+            with _LANES_LOCK:
+                if not lane.pending:
+                    lane.current = lane.thread = None
+                    if _LANES.get(root) is lane:
+                        del _LANES[root]
+                    return
+                row_id = next(iter(lane.pending))
+                row = lane.pending.pop(row_id)
+                lane.current = row_id
+            _resume_row(row)
+    except BaseException:
+        # _resume_row keeps each row's debt; only interpreter-level exits reach
+        # here. A later dispatch restarts the lane for any rows still queued.
+        with _LANES_LOCK:
+            lane.current = lane.thread = None
+            if not lane.pending and _LANES.get(root) is lane:
+                del _LANES[root]
+        raise
+
+
+def stop_project_lanes(timeout: float) -> bool:
+    """Drop queued lane rows and join the running ones within ``timeout``.
+
+    Dropped rows keep their durable receipts; the next receiver's recovery
+    pass reads them again. True when no lane thread is still running.
+    """
+    with _LANES_LOCK:
+        threads = [lane.thread for lane in _LANES.values() if lane.thread is not None]
+        for root, lane in list(_LANES.items()):
+            lane.pending.clear()
+            if lane.thread is None:
+                del _LANES[root]
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    for thread in threads:
+        if thread is not threading.current_thread():
+            thread.join(max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in threads)

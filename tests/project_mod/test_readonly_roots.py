@@ -16,7 +16,7 @@ import unittest
 from lib.project_mod import config as cfg
 from lib.project_mod.scanner import clear_project, set_project_paths
 from lib.project_mod.write_tools import (
-    tool_apply_diff, tool_insert_content, tool_write_file,
+    tool_apply_diff, tool_edit_file, tool_write_file,
 )
 
 
@@ -96,11 +96,13 @@ class WriteEnforcementTest(_TmpWorkspace):
         with open(os.path.join(self.ro, 'a.txt')) as f:
             self.assertEqual(f.read(), 'hello ro\n')  # untouched
 
-    def test_insert_content_blocked_in_ro(self):
-        res = tool_insert_content(self.rw, os.path.join(self.ro, 'a.txt'),
-                                  'hello ro', '\nINJECTED')
-        self.assertFalse(res['ok'])
-        self.assertIn('READ-ONLY', res['error'])
+    def test_edit_file_blocked_in_ro(self):
+        res = tool_edit_file(self.rw, [{'path': os.path.join(self.ro, 'a.txt'),
+                                        'anchor': 'hello ro', 'content': 'hello ro\nINJECTED'}])
+        self.assertIn('[1] FAIL', res)
+        self.assertIn('READ-ONLY', res)
+        with open(os.path.join(self.ro, 'a.txt')) as f:
+            self.assertEqual(f.read(), 'hello ro\n')
 
 class AllWritableRegressionTest(_TmpWorkspace):
 

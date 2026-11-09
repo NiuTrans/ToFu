@@ -38,7 +38,10 @@ class _SqliteSession:
     backend = 'sqlite'
 
     def __init__(self, conn):
+        from lib.storage_authority_sql.worker_control import WorkerCommitHints
+
         self.connection = conn
+        self.worker_hints = WorkerCommitHints()
 
     def lock_key(self, namespace, key):
         return None
@@ -424,7 +427,7 @@ def test_turn_event_record_reuses_revision_cache_and_incoming_replay_patch(
         target_revision=before_row['projection_revision'] + 2,
     )
 
-    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    cache = TurnProjectionCache(1024 * 1024)
     session.turn_projection_cache = cache
     projection_selects = []
     real_fetch_one = session.fetch_one
@@ -570,7 +573,7 @@ def test_activity_and_trash_resolve_durable_projection_head(session):
     from lib.turn_projection_patch import build_projection_patch
     from lib.turn_projection_segments import projection_with_stable_segments
 
-    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    cache = TurnProjectionCache(1024 * 1024)
     authority = SQLiteSession(session.connection, turn_projection_cache=cache)
     created = _turn_create_pair(authority, {
         'conversation_id': 'conv-d',
@@ -735,7 +738,7 @@ def test_turn_event_record_does_not_trust_unattested_segment_stability(session):
         base_revision=before_row['projection_revision'],
         target_revision=before_row['projection_revision'] + 1,
     )
-    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    cache = TurnProjectionCache(1024 * 1024)
     session.turn_projection_cache = cache
 
     result = _turn_event_record(session, {
@@ -802,7 +805,7 @@ def test_turn_recover_materializes_durable_projection_head_after_cache_loss(
         actor='assistant',
         status='running',
     )
-    cache = TurnProjectionCache(1024 * 1024, max_entries=4)
+    cache = TurnProjectionCache(1024 * 1024)
     session.turn_projection_cache = cache
     for index, (source, target) in enumerate(
         ((before, first), (first, second)), start=0,
@@ -984,16 +987,19 @@ def test_first_event_projection_fence_failure_raises_for_transaction_rollback(
 
 
 @pytest.fixture()
-def session(tmp_path):
+def session():
+    """Fresh real SQL state for protocol tests that never reopen a database."""
     from lib.storage_authority_sql.schema import initialize_schema
 
-    conn = sqlite3.connect(str(tmp_path / 'sidecar.db'))
+    conn = sqlite3.connect(':memory:')
     conn.row_factory = sqlite3.Row
-    sess = _SqliteSession(conn)
-    initialize_schema(sess)
-    _seed_conv(sess)
-    yield sess
-    conn.close()
+    try:
+        sess = _SqliteSession(conn)
+        initialize_schema(sess)
+        _seed_conv(sess)
+        yield sess
+    finally:
+        conn.close()
 
 
 def _delta(session, since_ms, conv_id='conv-d', known_revisions=None):
@@ -1142,6 +1148,7 @@ def test_turn_compact_is_one_atomic_authority_rewrite(session):
         'requiresSnapshot': True,
         'conversationRevision': 4,
     }
+    assert session.worker_hints.conversation_changes == {(1, 'conv-d')}
 
     rows = session.fetch_all(
         "SELECT * FROM storage_conversation_turns "

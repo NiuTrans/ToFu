@@ -1,6 +1,6 @@
 """Live file-grant admission and descriptor confinement for project dispatch.
 
-Exports: profile_for, validate_profile, granted_tools, admit_tool and tool_scope. Admission owns
+Exports: profile_for, validate_profile, granted_tools, admit_tool, admit_call and tool_scope. Admission owns
 identity/workspace lookup; this module owns relative-prefix policy and anchored
 regular-file I/O. Ordinary tasks have no scope. No shell, ref, remote, plugin or
 workspace-registration authority can be borrowed from a file grant.
@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import os
 import stat
 
@@ -31,6 +32,11 @@ _METADATA_PARTS = frozenset({'.git', '.worktrees', 'write-intents-v1', 'modifica
                              'modifications.journal', 'modifications.journal.fold', 'project.json',
                              '.env', '.venv', 'node_modules', '__pycache__', '.native'})
 _METADATA_PREFIXES = ('.tofu', '.env.')
+# Digests of exact profile contents already proven valid. The whole validation
+# is a pure function of the JSON value, so equal content never walks the schema
+# twice (every tool admission and dispatch ledger write re-derives the profile).
+# One entry per distinct profile content in this process.
+_VALID_PROFILE_DIGESTS: set[bytes] = set()
 
 
 def _relative(path, *, project_grant=False):
@@ -63,7 +69,18 @@ def relative_path_allowed(path, prefixes, *, project_grant=False):
 
 def validate_profile(request):
     from .repository import _validate_schema
+    from lib.utils import sha256_holding_gil
     profile = request.get('profile', _CONSULT)
+    try:
+        canonical = json.dumps(profile, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+        copy = json.loads(canonical)
+        # Tuples and non-string keys encode like lists and string keys but
+        # validate differently; only a value equal to its decoded JSON is keyed.
+        digest = sha256_holding_gil(canonical.encode('utf-8')).digest() if copy == profile else None
+    except (TypeError, ValueError, RecursionError):
+        digest = None
+    if digest is not None and digest in _VALID_PROFILE_DIGESTS:
+        return copy
     _validate_schema(profile, 'profile')
     for path in profile['readPaths'] + profile['writePaths']:
         if path != '.':
@@ -76,7 +93,10 @@ def validate_profile(request):
         if any(not ('.' in profile['readPaths'] if path == '.'
                     else relative_path_allowed(path, profile['readPaths'])) for path in profile['writePaths']):
             raise ValueError('Write prefixes must also permit their pre-image reads')
-    return deepcopy(profile)
+    if digest is None:
+        return deepcopy(profile)
+    _VALID_PROFILE_DIGESTS.add(digest)
+    return copy
 
 
 def profile_for(assignment):
@@ -158,12 +178,11 @@ def _paths(name, args):
         raise ValueError('Scoped edits require a nonempty explicit edit list')
     targets = []
     for edit in edits:
-        _exact_fields(edit, {'path', 'operation', 'anchor', 'content', 'replace_all', 'description'})
-        if (edit.get('operation') not in {'replace', 'insert_before', 'insert_after'}
-                or not isinstance(edit.get('anchor'), str) or not edit['anchor']
+        _exact_fields(edit, {'path', 'anchor', 'content', 'replace_all', 'description'})
+        if (not isinstance(edit.get('anchor'), str) or not edit['anchor']
                 or not isinstance(edit.get('content'), str)
                 or 'replace_all' in edit and type(edit['replace_all']) is not bool):
-            raise ValueError('Scoped edits require an explicit text operation')
+            raise ValueError('Scoped edits require a literal anchor and content')
         # An edit takes the batch path unless it overrides it; every edit must
         # still resolve to an explicit file so the fence sees each target.
         target = edit.get('path') or batch_path
@@ -333,22 +352,34 @@ class FileScope:
                     os.unlink(stage, dir_fd=parent)
 
 
-def admit_tool(task, name, args, project_path=None):
-    """Fresh durable authority before refs, remote routing, preimages or I/O.
+def admit_tool(task, name, args, project_path=None, *, admission=None):
+    """Fresh durable authority before refs, remote routing, preimages or I/O; see ``admit_call``."""
+    return admit_call(task, name, args, project_path, admission=admission)[0]
+
+
+def admit_call(task, name, args, project_path=None, *, admission=None):
+    """Decide one call; return ``(file scope or None, the admission that decided it)``.
 
     The single dispatch admission of every executor, ahead of soft role
-    policies, custom handlers and catalogs. Default deny: authority that cannot
-    be re-established is a typed refusal like any other and stops the task with
-    its dispatch cause; only a cooperative Stop keeps its cancellation.
+    policies, custom handlers and catalogs. ``admission`` is the
+    ``DispatchAdmission`` this same admission already made (the call's tool
+    batch, or an enclosing gate of this call); the decision then rechecks only
+    the live task. Without one the grant is validated live. Default deny:
+    authority that cannot be re-established is a typed refusal like any other
+    and stops the task with its dispatch cause; only a cooperative Stop keeps
+    its cancellation.
     """
-    from .admission import validated_dispatch, owned_workspace, stop_on_authority_failure
+    from .admission import admit_dispatch, stop_on_authority_failure, validated_dispatch
     task = task or {}
     try:
-        validated = validated_dispatch(task)
-        if validated is None:
-            return None
-        # The one live validation of this admission also fixes its profile.
-        binding, assignment = validated
+        if admission is not None and admission.covers(task):
+            validated_dispatch(task, admission=admission)
+        else:
+            admission = admit_dispatch(task)
+        if admission is None:
+            return None, None
+        # The one validation of this admission also fixes its profile.
+        binding, assignment = admission.binding, admission.assignment
         profile = profile_for(assignment)
     except Exception as error:
         from lib.turn_verdict import DISPATCH_AUTHORITY_ABORT_REASONS
@@ -369,18 +400,18 @@ def admit_tool(task, name, args, project_path=None):
         if (name not in granted_tools(profile)
                 or project_path is not None and project_path != binding['projectPath']):
             raise ToolAdmissionRefused('Coordinator call exceeds its original continuation policy', tool_name=name)
-        return None
+        return None, admission
     if profile['mode'] == 'project':
         if name not in granted_tools(profile):
             raise ToolAdmissionRefused('Worker tool is outside its original Coordinator capability ceiling', tool_name=name)
-        row = owned_workspace(task, binding)
+        row = admission.registered_workspace(task)
         if project_path is not None and project_path != row['workspace_path']:
             raise ToolAdmissionRefused(
                 f'Worker call root {project_path!r} differs from its registered isolated '
                 f'workspace {row["workspace_path"]!r}', tool_name=name)
         # Ordinary project, command, browser and MCP owners keep their own
         # admission/approval/teardown. This profile is not a file sandbox claim.
-        return None
+        return None, admission
     if profile['mode'] != 'files' or name not in granted_tools(profile) or name not in FILE_TOOLS:
         raise ToolAdmissionRefused('Project dispatch has no authority for this exact tool', tool_name=name)
     cfg = task.get('config') or {}
@@ -399,7 +430,7 @@ def admit_tool(task, name, args, project_path=None):
         if (not relative_path_allowed(path, profile['readPaths'])
                 or name != 'read_files' and not relative_path_allowed(path, profile['writePaths'])):
             raise ToolAdmissionRefused('File target is outside its accepted read/write prefixes', tool_name=name)
-    row = owned_workspace(task, binding)
+    row = admission.registered_workspace(task)
     root = row['workspace_path']
     if project_path is not None and project_path != root:
         raise ToolAdmissionRefused(
@@ -415,7 +446,8 @@ def admit_tool(task, name, args, project_path=None):
         identity = (metadata.st_dev, metadata.st_ino)
     finally:
         os.close(descriptor)
-    return FileScope(task, root, identity, name, paths, tuple(profile['readPaths']), tuple(profile['writePaths']))
+    return (FileScope(task, root, identity, name, paths, tuple(profile['readPaths']),
+                      tuple(profile['writePaths'])), admission)
 
 
 def current_scope():
@@ -433,7 +465,9 @@ def tool_scope(task, name, args, project_path=None):
             raise AbortedError('File scope cannot be replaced by another task/child context')
     control = cancellation()
     runtime = control.runtime_context if control is not None else None
-    scope = admit_tool(task, name, args, project_path)
+    from .admission import call_admission
+    # Within an executing call, its own admission decides every nested scope.
+    scope = admit_tool(task, name, args, project_path, admission=call_admission(task))
     token = _current.set(scope)
     try:
         with tool_admission_scope(task, runtime, tool_name=name):

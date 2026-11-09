@@ -23,6 +23,12 @@ class SearchConfig:
     Users can override via configure() or per-call kwargs.
     """
 
+    # Host-owned HTTP routing; None retains the standalone transport policy.
+    # These are provider ports, not retry/performance tuning settings.
+    requests_transport: Optional[Callable] = None
+    httpx_client_factory: Optional[Callable] = None
+    browser_proxy_resolver: Optional[Callable] = None
+
     # ── Fetch settings ──
     fetch_top_n: int = 6
     fetch_timeout: int = 15
@@ -115,13 +121,17 @@ class SearchConfig:
     # naming a host here. Empty (default) = every private target stays blocked.
     allow_private_hosts: set = field(default_factory=set)
 
-    # ── URL blocklist: hosts, or host+path prefixes (* = one path segment) ──
-    # Matching: tofu_search.generated_url_blocklist (authority lib/url_blocklist.py).
-    skip_domains: set = field(default_factory=lambda: {
-        'youtube.com', 'youtu.be', 'twitter.com', 'x.com',
-        'facebook.com', 'instagram.com', 'tiktok.com',
-        'linkedin.com', 'discord.com',
-    })
+    # ── Source bans: hosts, or host+path prefixes (* = one path segment) ──
+    # Matching: tofu_search.generated_url_blocklist (authority
+    # lib/search/url_blocklist.py). A banned URL is never fetched, listed or
+    # deepened into; the ban refuses before the cache, the reader tier and
+    # every identity path.
+    skip_domains: set = field(default_factory=set)
+    # ── Fetch-quality skips (same grammar; not a ban) ──
+    # Pages not worth an anonymous fetch, in addition to the built-in
+    # fetch.utils.NO_TEXT_DOMAINS. Search listings keep their rows, and the
+    # reader tier and connected auth sources still read them.
+    fetch_skip_domains: set = field(default_factory=set)
 
     # ── SearXNG public instances (rotated to spread load / survive blocks) ──
     # A self-hosted instance is tried FIRST and is never shuffled away. It can

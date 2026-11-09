@@ -23,11 +23,11 @@ APP_RUNTIME = ROOT / 'frontend/src/runtime/app-runtime.js'
 EPILOGUE = ROOT / 'frontend/src/runtime/sections/_epilogue.js'
 ENTRY = 'myday.js'
 ENTRY_TASKS = 'myday_tasks.js'
-TASK_OWNER = ROOT / 'frontend/src/features/myday/task-actions.ts'
+GOAL_BOARD_OWNER = ROOT / 'frontend/src/features/myday/goal-board.ts'
 REPORT_CACHE_OWNER = ROOT / 'frontend/src/features/myday/report-cache.ts'
 BACKGROUND_OWNER = ROOT / 'frontend/src/features/myday/background-controller.ts'
 PRESENTATION_ASSETS = ROOT / 'frontend/src/features/myday/presentation-assets.ts'
-STUBS = ('openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate')
+STUBS = ('openDailyReport', 'closeDailyReport')
 
 
 def _manifest():
@@ -69,39 +69,36 @@ def test_myday_not_in_core_bundle_files():
 
 def test_presenter_dependencies_are_explicit_retained_services():
     services = {row['name'] for row in _presenter_bundle()['runtimeServices']}
-    expected = {
-        'Api', '_applyBrowserUI', '_applyCodeExecUI', '_applyFetchEnabledUI',
-        '_applySearchModeUI', 'newChat', 'updateSendButton',
-    }
-    assert services == expected
-    epilogue = EPILOGUE.read_text(encoding='utf-8')
-    for name in expected - {'Api'}:
-        assert re.search(rf'^  {re.escape(name)},$', epilogue, re.M)
+    assert services == {'Api'}
 
 
-def test_static_empty_asset_has_one_typed_lazy_owner():
+def test_static_assets_have_one_typed_lazy_owner():
     imports = {
         row['source']: set(row['bindings'])
         for row in _presenter_bundle()['moduleImports']
     }
-    assert imports['frontend/src/features/myday/presentation-assets.ts'] == {
-        'MYDAY_PRESENTATION_ASSETS',
-    }
+    assert 'frontend/src/features/myday/presentation-assets.ts' not in imports
     presenter = runtime_section(ENTRY)
-    assert '_STATUS_ICONS' not in presenter
     assert 'class="myday-empty-tofu"' not in presenter
-    assert presenter.count('${MYDAY_PRESENTATION_ASSETS.emptyIllustration}') == 3
-    for local_name in ('checkSvg', 'delSvg', 'launchSvg', 'dashCircle'):
-        assert f'const {local_name}' not in presenter
+    assert 'MYDAY_PRESENTATION_ASSETS' not in presenter
+    board = GOAL_BOARD_OWNER.read_text(encoding='utf-8')
+    assert "from './presentation-assets'" in board
     assets = PRESENTATION_ASSETS.read_text(encoding='utf-8')
     assert assets.count('class="myday-empty-tofu"') == 1
 
 
-def test_myday_task_mutations_have_a_typed_lazy_owner():
+def test_myday_main_column_has_a_typed_lazy_owner():
     names = runtime_section_names()
     assert ENTRY_TASKS not in names
-    assert TASK_OWNER.is_file()
-    assert "from './myday/task-actions'" in MYDAY_ENTRY.read_text()
+    assert GOAL_BOARD_OWNER.is_file()
+    entry = MYDAY_ENTRY.read_text()
+    assert "from './myday/goal-board'" in entry
+    assert 'MyDayGoalBoard' in entry
+    presenter = runtime_section(ENTRY)
+    assert 'runtimeScope.MyDayGoalBoard' in presenter
+    for retired in ('_mydayTriggerGenerate', '_mydayStartPolling', '_mydayRenderTasks',
+                    'MyDayTaskPresentation'):
+        assert retired not in presenter
 
 
 def test_entry_points_in_py_table():

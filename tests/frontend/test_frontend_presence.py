@@ -46,6 +46,7 @@ const emptyEntry = () => ({
 });
 global.createGlobalRouterEntry = emptyEntry;
 global.createRouterWatchdogEntry = emptyEntry;
+global.createRouterOwnerDelegation = emptyEntry;
 global.createCoordinatorConversationGroups = () => ({refresh() {}, destroy() {}});
 eval(fs.readFileSync(process.argv[1], 'utf8'));
 const out = [];

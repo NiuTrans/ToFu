@@ -9,14 +9,26 @@ it via ``from lib.tasks_pkg.executor import ToolRegistry, tool_registry``.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from contextlib import contextmanager
 from threading import RLock
 from typing import Any
 
 from lib.log import get_logger
+from lib.logging_pkg.log_record_values import text_value
 from lib.protocols import ToolHandler
 
 logger = get_logger(__name__)
+
+
+def _content_summary(value: Any) -> dict[str, Any]:
+    """A content value as a log line may show it: its UTF-8 size and sha256 (and item count), never itself."""
+    data = (value if isinstance(value, str) else text_value(value)).encode('utf-8', 'surrogatepass')
+    summary: dict[str, Any] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+    if isinstance(value, (list, tuple)):
+        summary['items'] = len(value)
+    return summary
 
 
 class RegistryFrozenError(RuntimeError):
@@ -69,7 +81,7 @@ class ToolRegistry:
         self._lock = RLock()
         self._exact: dict[str, ToolHandler] = {}          # name → handler
         self._sets: list[tuple[frozenset, ToolHandler]] = []  # (name_set, handler)
-        self._metadata: dict[str, dict[str, str]] = {}    # name → {category, description}
+        self._metadata: dict[str, dict[str, Any]] = {}    # name → {category, description, contentArgs}
         self._special: dict[str, ToolHandler] = {}        # key → handler (e.g. __code_exec__)
         # name → (source, plugin_name) — who owns this tool name. Drives the
         # built-in hijack protection in :meth:`_claim_name`.
@@ -286,7 +298,7 @@ class ToolRegistry:
     # ── Registration ──────────────────────────────────────
 
     def register(self, names, handler: ToolHandler, *, category: str = '', description: str = '',
-                 source: str = 'builtin', plugin_name: str = '') -> int:
+                 content_args: Iterable[str] = (), source: str = 'builtin', plugin_name: str = '') -> int:
         """Register *handler* for one or more exact tool names.
 
         Parameters
@@ -299,6 +311,10 @@ class ToolRegistry:
             Logical grouping (e.g. ``'search'``, ``'browser'``).
         description : str
             Human-readable description of what the handler does.
+        content_args : iterable of str
+            Argument names whose values are content (message text, attached
+            files): tool-call logs show them only by size and digest
+            (:meth:`log_arguments`).
         source : str
             ``'builtin'`` (core) or ``'plugin'`` (third-party ``tofu.tools``
             entry point). A plugin may not take over a built-in tool name —
@@ -318,16 +334,18 @@ class ToolRegistry:
                 self._evict_binding(name)
                 self._exact[name] = handler
                 self._metadata[name] = {
-                    'category': category, 'description': description}
+                    'category': category, 'description': description,
+                    'contentArgs': frozenset(content_args)}
                 bound += 1
         return bound
 
     def register_set(self, name_set, handler: ToolHandler, *, category: str = '', description: str = '',
-                     source: str = 'builtin', plugin_name: str = '') -> int:
+                     content_args: Iterable[str] = (), source: str = 'builtin', plugin_name: str = '') -> int:
         """Register *handler* for a set of tool names (checked in order).
 
         Unlike ``register()``, set-based entries are checked sequentially
-        after exact matches, preserving priority ordering.
+        after exact matches, preserving priority ordering. ``content_args``
+        is as for :meth:`register`.
         """
         for name in name_set:
             self._require_window(str(name))
@@ -340,7 +358,8 @@ class ToolRegistry:
             for name in allowed:
                 self._evict_binding(name)
             self._sets.append((allowed, handler))
-            meta = {'category': category, 'description': description}
+            meta = {'category': category, 'description': description,
+                    'contentArgs': frozenset(content_args)}
             for name in allowed:
                 self._metadata[name] = meta
             return len(allowed)
@@ -418,7 +437,7 @@ class ToolRegistry:
             self._drop_metadata_if_unbound(key)
             return True
 
-    def handler(self, names, *, category='', description=''):
+    def handler(self, names, *, category='', description='', content_args=()):
         """Decorator form of :meth:`register`.
 
         Example::
@@ -429,11 +448,11 @@ class ToolRegistry:
                 ...
         """
         def decorator(fn):
-            self.register(names, fn, category=category, description=description)
+            self.register(names, fn, category=category, description=description, content_args=content_args)
             return fn
         return decorator
 
-    def tool(self, name: str, *, category: str = '', description: str = ''):
+    def tool(self, name: str, *, category: str = '', description: str = '', content_args=()):
         """Decorator form of :meth:`register` for a single tool name.
 
         Example::
@@ -447,7 +466,7 @@ class ToolRegistry:
         after the function definition.
         """
         def decorator(fn):
-            self.register(name, fn, category=category, description=description)
+            self.register(name, fn, category=category, description=description, content_args=content_args)
             return fn
         return decorator
 
@@ -469,7 +488,7 @@ class ToolRegistry:
             return fn
         return decorator
 
-    def tool_set(self, name_set, *, category: str = '', description: str = ''):
+    def tool_set(self, name_set, *, category: str = '', description: str = '', content_args=()):
         """Decorator form of :meth:`register_set`.
 
         Co-locates the registration with the handler definition, eliminating
@@ -486,7 +505,8 @@ class ToolRegistry:
         after the function definition.
         """
         def decorator(fn):
-            self.register_set(name_set, fn, category=category, description=description)
+            self.register_set(name_set, fn, category=category, description=description,
+                              content_args=content_args)
             return fn
         return decorator
 
@@ -521,6 +541,16 @@ class ToolRegistry:
         return None
 
     # ── Introspection ─────────────────────────────────────
+
+    def log_arguments(self, fn_name: str, fn_args: Any) -> Any:
+        """*fn_args* as a tool-call log line may show them (docs/LOGGING.md: sizes and hashes, never
+        payloads): each content argument the tool's handler declared at registration by its size and
+        sha256, every other argument as it is. Undeclared tools get *fn_args* back unchanged."""
+        with self._lock:
+            content = (self._metadata.get(fn_name) or {}).get('contentArgs') or frozenset()
+        if not content or not isinstance(fn_args, dict):
+            return fn_args
+        return {key: _content_summary(value) if key in content else value for key, value in fn_args.items()}
 
     def list_tools(self):
         """Return a list of ``(name, category, description)`` for all registered tools."""

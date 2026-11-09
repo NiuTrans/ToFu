@@ -22,7 +22,7 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
     deinit { session.invalidateAndCancel() }
 
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        guard let server = ServerUrl.parse(request.url), let url = server.components.url else { throw URLError(.badURL) }
+        guard let server = ServerUrl.parseNavigation(request.url), let url = server.components.url else { throw URLError(.badURL) }
         var wire = URLRequest(url: url)
         wire.httpMethod = request.method
         for (name, value) in request.headers { wire.setValue(value, forHTTPHeaderField: name) }

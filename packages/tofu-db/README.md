@@ -480,6 +480,13 @@ rounds, mark builds, completion, and exhausted budgets. Completion requires an
 unchanged full catalog-window pass; manifest changes reset coverage, and plans
 do not advance it. Budget exhaustion returns explicit incomplete metrics.
 
+`rewrite-history-routing` is the offline downgrade converter. Without
+`--execute` it reports the published history routing root (version, entries,
+pages, retained sources). With `--execute` a version-2 root, which engines
+before 2026-11-08 refuse at open, is republished as version 1 holding only the
+retained sources' locations; no history is retired and a version-1 root is left
+as is. Operator procedure: `docs/STORAGE_OPERATIONS.md` (engine rollback).
+
 Before reachability marking, it stream-matches every loose-block directory
 entry while retaining at most two paths, then removes at most one strictly
 named, size-bounded `.new-*` block temporary and syncs its shard. This
@@ -746,6 +753,7 @@ cargo run --manifest-path packages/tofu-db/Cargo.toml -- certify-filesystem --da
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- certify-resource-gate --data-dir /absolute/persistent/empty/path
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- collect-garbage --data-dir /absolute/existing/authority
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- collect-garbage --data-dir /absolute/existing/authority --execute
+cargo run --manifest-path packages/tofu-db/Cargo.toml -- rewrite-history-routing --data-dir /absolute/existing/authority --execute
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- backfill-activity-index --data-dir /absolute/existing/authority --tenant-id 7 --owner-id 11 --maximum-rows 256 --execute
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- backup --data-dir /absolute/source --backup-dir /absolute/backup
 cargo run --manifest-path packages/tofu-db/Cargo.toml -- restore --backup-dir /absolute/backup --data-dir /absolute/empty-target

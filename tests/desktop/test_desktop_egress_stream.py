@@ -136,7 +136,7 @@ class TestAgentStreamExecutor(unittest.TestCase):
         from lib.desktop_agent import _egress as ag
         resp = _FakeStreamResp([b'data: one\n\n', b'data: two\n\n'])
         frames, exits = [], []
-        with mock.patch('lib.desktop_agent._egress.requests.request',
+        with mock.patch('lib.desktop_agent._egress.http_request',
                         return_value=resp):
             ag.start_egress_stream(
                 {'url': 'https://api.anthropic.com/v1/messages',
@@ -176,7 +176,7 @@ class TestAgentStreamExecutor(unittest.TestCase):
 
         resp = _CancellingResp([])
         frames, exits = [], []
-        with mock.patch('lib.desktop_agent._egress.requests.request',
+        with mock.patch('lib.desktop_agent._egress.http_request',
                         return_value=resp):
             ag.start_egress_stream(
                 {'url': 'https://api.anthropic.com/x', 'method': 'POST',

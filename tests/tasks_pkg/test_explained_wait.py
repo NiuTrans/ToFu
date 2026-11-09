@@ -137,3 +137,46 @@ def test_invocation_monitor_does_not_judge_silence_itself():
     assert invocation_abort_requested(task) is False
     assert task['aborted'] is False and not task['abort_event'].is_set()
     assert '_invocationStopReason' not in task
+
+
+# ── A queued desktop command owned by a connected device ──────────────────
+def test_device_wait_is_explained_only_while_the_claimed_device_is_connected():
+    from lib.desktop import bridge
+    from lib.tasks_pkg.explained_wait import DEVICE_WAIT_KEY, device_wait, explained_wait
+
+    task = {'id': 'conv-device'}
+    cmd = {'id': 'cmd-1', 'user_id': '1', 'claimed_agent_id': 'dev-1'}
+    now = time.time()
+    with device_wait(task, cmd):
+        assert task[DEVICE_WAIT_KEY] == {'cmd-1': cmd}
+        assert explained_wait(task, now) == '', 'an unclaimed command has no live owner'
+        bridge.command_queue['cmd-1'] = cmd
+        try:
+            assert explained_wait(task, now) == '', 'a device that never polled owns nothing'
+            bridge._agents['dev-1'] = {'agent_id': 'dev-1', 'user_id': '1', 'last_seen': now,
+                                       'active_command_ids': {'cmd-1'}}
+            assert explained_wait(task, now) == 'device'
+            assert explained_wait(task, now + bridge._CONNECTED_WINDOW_S + 1) == '', \
+                'a disconnected device stops explaining the silence'
+        finally:
+            bridge.command_queue.pop('cmd-1', None)
+            bridge._agents.pop('dev-1', None)
+    assert task[DEVICE_WAIT_KEY] == {}
+    assert explained_wait(task, now) == ''
+
+
+def test_device_wait_publisher_binds_the_task_and_the_bridge_rule():
+    """The bridge publishes its wait for the tool's own task, and only in a task."""
+    from lib.desktop import bridge
+    from lib.project_mod.tool_admission import tool_admission_scope
+    from lib.tasks_pkg.explained_wait import DEVICE_WAIT_KEY
+
+    task = {'id': 'conv-device-tool', 'status': 'running'}
+    with tool_admission_scope(task=task):
+        cmd = {'id': 'cmd-2', 'user_id': '1', 'claimed_agent_id': None}
+        with bridge._device_wait_scope(cmd):
+            assert task[DEVICE_WAIT_KEY] == {'cmd-2': cmd}
+        assert task[DEVICE_WAIT_KEY] == {}
+    # No owning task: the bridge wait publishes nothing.
+    with bridge._device_wait_scope({'id': 'cmd-3'}):
+        assert task[DEVICE_WAIT_KEY] == {}

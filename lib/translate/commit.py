@@ -245,14 +245,14 @@ def commit_translation_to_turn(
             except Exception as exc:  # persistence succeeded; notification is repairable
                 logger.debug(
                     "[Translate] invalidation publish failed conv=%s turn=%s: %s",
-                    conversation_id[:8],
+                    conversation_id,
                     turn_id[:8],
                     exc,
                 )
             logger.info(
                 "[Translate] committed field=%s conv=%s turn=%s revision=%s",
                 field or "segments",
-                conversation_id[:8],
+                conversation_id,
                 turn_id[:8],
                 revision,
             )
@@ -330,11 +330,11 @@ def mark_turn_translation_failed(
             except Exception as exc:
                 logger.debug(
                     "[Translate] failure-mark invalidation failed conv=%s turn=%s: %s",
-                    conversation_id[:8], turn_id[:8], exc,
+                    conversation_id, turn_id[:8], exc,
                 )
             logger.warning(
                 "[Translate] recorded failure verdict conv=%s turn=%s reason=%s",
-                conversation_id[:8], turn_id[:8], reason,
+                conversation_id, turn_id[:8], reason,
             )
             return result
         assert latest_conflict is not None
@@ -389,7 +389,7 @@ def mark_turn_translation_complete(
             except Exception as exc:
                 logger.debug(
                     "[Translate] no-op invalidation failed conv=%s turn=%s: %s",
-                    conversation_id[:8], turn_id[:8], exc,
+                    conversation_id, turn_id[:8], exc,
                 )
             return result
         assert latest_conflict is not None
@@ -446,7 +446,7 @@ def record_input_translation_verdict(
                     or projection.get("content") != authored_text):
                 logger.info(
                     "[Translate] input verdict already settled conv=%s turn=%s",
-                    conversation_id[:8], turn_id[:8],
+                    conversation_id, turn_id[:8],
                 )
                 return turn
             if translated_text is not None:
@@ -485,17 +485,17 @@ def record_input_translation_verdict(
             except Exception as exc:  # persistence succeeded; notification is repairable
                 logger.debug(
                     "[Translate] input verdict invalidation failed conv=%s turn=%s: %s",
-                    conversation_id[:8], turn_id[:8], exc,
+                    conversation_id, turn_id[:8], exc,
                 )
             if translated_text is not None:
                 logger.info(
                     "[Translate] committed field=content conv=%s turn=%s revision=%s",
-                    conversation_id[:8], turn_id[:8], revision,
+                    conversation_id, turn_id[:8], revision,
                 )
             else:
                 logger.warning(
                     "[Translate] recorded failure verdict conv=%s turn=%s reason=%s",
-                    conversation_id[:8], turn_id[:8], failure_reason,
+                    conversation_id, turn_id[:8], failure_reason,
                 )
             return result["turn"]
         assert latest_conflict is not None

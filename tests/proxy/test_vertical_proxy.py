@@ -5,13 +5,12 @@ proxy applied. After the search/fetch extraction — and the later split of the
 flat ``vertical.py`` into a ``vertical/`` sub-package — every vertical lookup
 goes through ``tofu_search.http_client.http_get`` (via the shared
 ``vertical.base`` seam: ``base.http_get`` / ``base._fetch_json``). ``http_get``
-is a thin proxy-aware wrapper that merges a default User-Agent and delegates to
-``requests.get`` (which honours ``HTTP(S)_PROXY`` env vars), so proxied
-deployments work and the caller's User-Agent still wins.
+merges a default User-Agent and delegates to the package's network transport
+port, which retains environment proxy policy and accepts host routing.
 
 These tests pin that behaviour against the CURRENT package layout:
   1. A PyPI lookup (``vertical.pypi.search``) routes through ``http_get``
-     (i.e. through ``http_client.requests.get``), not a bare ``requests.get``,
+     (i.e. through ``http_client.request``), not a bare ``requests.get``,
      and the result still parses.
   2. The stock lookup (``vertical.stock.search``) lets the caller's custom
      User-Agent override http_get's default UA.
@@ -33,9 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 @pytest.mark.unit
 class TestVerticalUsesProxyClient:
     def test_pypi_lookup_routes_through_http_get(self, monkeypatch):
-        """A PyPI vertical lookup must hit requests.get via http_client's
-        http_get (the proxy-aware path), not a raw requests call — proving the
-        lookup honours env proxies and the shared client."""
+        """A PyPI lookup reaches the shared transport with its headers intact."""
         import tofu_search.http_client as hc
         from tofu_search.search.vertical import pypi
 
@@ -51,15 +48,14 @@ class TestVerticalUsesProxyClient:
                                  'home_page': 'https://requests.readthedocs.io',
                                  'author': 'Kenneth Reitz', 'license': 'Apache 2.0'}}
 
-        def _fake_get(url, **kwargs):
+        def _fake_request(method, url, **kwargs):
+            assert method == 'GET'
             captured['url'] = url
             captured['headers'] = kwargs.get('headers', {})
             captured['timeout'] = kwargs.get('timeout')
             return _FakeResp()
 
-        # Patch the requests.get that http_get delegates to. If the handler
-        # issued a bare requests.get bypassing http_client, this never fires.
-        monkeypatch.setattr(hc.requests, 'get', _fake_get)
+        monkeypatch.setattr(hc, 'request', _fake_request)
 
         result = pypi.search('requests', {})
 
@@ -87,11 +83,12 @@ class TestVerticalUsesProxyClient:
             def json(self):
                 return {}
 
-        def _fake_get(url, **kwargs):
+        def _fake_request(method, url, **kwargs):
+            assert method == 'GET'
             captured['headers'] = kwargs.get('headers', {})
             return _FakeResp()
 
-        monkeypatch.setattr(hc.requests, 'get', _fake_get)
+        monkeypatch.setattr(hc, 'request', _fake_request)
         # 404 → falls back; suppress the fallback so we only inspect the first
         # (Yahoo) call, which sends an explicit Mozilla UA.
         monkeypatch.setattr(stock, '_search_fallback', lambda ident: None)

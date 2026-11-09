@@ -20,7 +20,7 @@ from quart import Blueprint
 from lib.api_response import (
     api_internal_error, api_not_found, api_ok, api_payload_too_large,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body, require_dict
 
@@ -43,7 +43,7 @@ def task_proof_export(task_id):
         bundle = assemble_task_proof(task_id, owner_user_id=owner_user_id)
     except Exception as exc:
         logger.error('[api_v1.proof] export failed task=%s: %s',
-                     task_id[:8], exc, exc_info=True)
+                     task_log_tag(task_id), exc, exc_info=True)
         return api_internal_error('internal_error')
     if bundle is None:
         return api_not_found('Task not found')

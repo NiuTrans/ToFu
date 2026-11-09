@@ -251,12 +251,12 @@ async def scan_conv_v1():
             raise
         except Exception as e:
             logger.warning('[Artifacts.v1:scan] failed for conv=%s msg=%s: %s',
-                           conv_id[:8], msg_id[:8], e, exc_info=True)
+                           conv_id, msg_id[:8], e, exc_info=True)
             continue
         created_meta.extend(created)
 
     logger.info('[Artifacts.v1:scan] backfill conv=%s scanned=%d created=%d',
-                conv_id[:8], scanned, len(created_meta))
+                conv_id, scanned, len(created_meta))
     return api_ok({
         'conv_id': conv_id,
         'scanned': scanned,

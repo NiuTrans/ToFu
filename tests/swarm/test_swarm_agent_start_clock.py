@@ -147,7 +147,7 @@ def _snapshot_with_running_agent():
 
     class _FakeSched:
         _running = {'a1': None}
-        _pending = []
+        _pending = {}
 
         def started_at_map(self):
             return {'a1': started}

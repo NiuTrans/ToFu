@@ -264,6 +264,53 @@ The compaction resume witness (`compaction_resume_witness`) applies the same
 consumed/unverified rule. Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`,
 `tests/compaction/test_continue_working_context.py`.
 
+**Interrupted Turns resume their exact working view — Problem:** Continue after a
+Stop or process restart rebuilt the model view from Turn transcripts. Cold
+transcripts carry no context carriers, so the composer found none and
+re-committed every block: the user saw a full context record (session context,
+memories, date, skills, rules, vault, environment) at the resume point, folder
+rules the model had already read were dropped, the history differed from the
+interrupted request from its second message (forcing a full prompt-cache
+rewrite), and turn-scoped evidence such as memories was re-selected. Measured on
+conversation `mw57xah3ycbxt1` (2026-11-08) by diffing the two archived provider
+requests: identical system prompt and replayed rounds; the interrupted history
+held 19 context sections, the rebuilt one none; 7 of the 10 recorded blocks were
+byte-identical re-sends. Only an accepted compaction ever checkpointed a
+suspended view, and model replay refused every config carrying resume data.
+**Decision:** every root Turn whose verdict is not `completed` checkpoints its
+working view through the existing archive owner
+(`preserve_suspended_working_view`), rewound to its last protocol-valid
+boundary: an unfinished trailing tool batch and its partial results are dropped,
+and the witness counts only rounds settled before it, so unfinished calls
+return solely as the receipts Continue replays after the view. The checkpoint
+stores the view once (no source transcript), stays `pending` until written, and
+retires (empties) every checkpoint it supersedes, plus the one a completed
+resumed Turn restored, so a conversation keeps at most one live view; retired
+rows follow the existing archive retention. Continue restores it
+(`restore_resume_view`) before memory prefetch and composition, so the composer
+reuses every unchanged carrier and appends real changes at the resume point.
+Standing-alone checkpoints need no compaction summary or handoff; compaction
+receipts still require their accepted summary. The policy, history, background,
+execution and tool-prefix witnesses and media checks are unchanged. When no
+checkpoint validates (hard kill, unconsumed inbox carrier, view over the 8 MiB
+continuation bound), model replay now restores the same storage-validated
+completed prefix a new Turn would (`restore_prefix`; never a checkpoint whose
+terminal is the resumed Turn) before the canonical round replay. Growth,
+measured from 2026-11-07 20:57 to 2026-11-08 10:30 on the production host: 67
+non-completed root settlements (60 Turns in about 45 conversations); first-round
+prompts p50 430k, p90 645k, max 844k tokens, about 3–5 MB of view each. Without
+retirement that would add roughly 250 MB a day; with it the live bytes are at
+most one view per conversation. **Rejected:** a new Turn-private carrier store
+(a second model-view authority beside the archive owner, and a projection field
+the browser would download); reconstructing carriers from display notes (notes
+are display-only and clipped); re-running all turn-start providers and hiding
+the notes (the wire would still drift and memories would be re-selected);
+updating one checkpoint in place (it falls out of the newest-candidate window
+that restore scans); a retention knob or TTL (design principle 5). Specs:
+`tests/compaction/test_suspended_working_view.py` (including SQLite and native
+restart), `tests/tasks_pkg/test_resume_view_context.py`,
+`tests/model_routing/test_model_continuation_policy.py`.
+
 **Policy drift — Problem:** any witnessed policy drift discarded the checkpoint and
 rebuilt every Turn, and even a route switch rebuilt whenever the checkpoint held
 reasoning or native Responses/Anthropic items, which every reasoning model
@@ -318,10 +365,23 @@ them, and the browser itself sends both block spellings); re-normalizing grants
 at admission (the dispatch fence compares grant tools exactly); removing these
 fields from the witness (a custom prompt, `replace` mode, a disabled block, a chat
 expansion that changes a flag or another tool preference must still refuse).
-Real differences keep refusing: scheduler-built turns run with
-`schedulerEnabled: true`, which the owner's turns in a Coordinator do not. Specs:
+Real differences keep refusing. A role-inert flag is the exception:
+`pin_coordinator_request_policy` pins `schedulerEnabled` to `False` before the
+witness is pinned, beside the role's tool settings, because no scheduler tool
+name is in `COORDINATOR_TOOLS`, `ROUTER_TOOLS` or `WATCHDOG_TOOLS` and
+`prepare_coordinator_tool_surface` plus `coordinator_call_rejection` admit only
+the role ceiling — the flag cannot change what a Coordinator, Router or Watchdog
+turn does, although `build_task_config` stamps it on every scheduler-built turn.
+Without that pin, alternating scheduled and owner turns logged
+`restore=policy_changed drift=schedulerEnabled fallback=full_history` and
+rebuilt 1,505–3,784 messages per alternation (measured on the Global Router,
+2026-11-08). Dispatch continuations already carry the shared worker policy's
+`False`; an ordinary conversation keeps the flag verbatim, and it is not in
+`PORTABLE_DRIFT_FIELDS`, because an ordinary conversation can enable scheduler
+tools and must still refuse a drifted checkpoint. Specs:
 `test_model_continuation_policy.py` (equivalent spellings / distinguished
-values) and `test_coordinator_replay_policy.py::test_forwarded_request_continuations_keep_the_prefix_beside_direct_owner_turns`.
+values) and `test_coordinator_replay_policy.py::test_forwarded_request_continuations_keep_the_prefix_beside_direct_owner_turns`,
+`test_scheduler_built_coordinator_turn_shares_the_prefix_of_its_owner_turns`.
 
 **Settled reasoning on restore — Problem:** a checkpoint keeps its publishing
 Turn's rounds exactly as sent live, without the settled-Turn mark that a cold
@@ -333,7 +393,8 @@ publishes, so every later Turn restored the same checkpoint and failed too.
 **Decision:** `restore_prefix` marks each restored assistant row that carries
 signed reasoning as a completed Turn (`_reasoning_continuity: completed_turn`),
 the same authority as the cold rebuild: restore covers only settled Turns, since
-resume data and resume targets refuse first. Another protocol then omits that
+a resume restores only a storage-validated prefix ending before its target and
+never its own Turn's publication. Another protocol then omits that
 historical thinking as a counted loss, while Anthropic replays every block
 unchanged. The stored checkpoint is not modified. **Rejected:** stamping the mark
 at publication (existing checkpoints would stay broken, and a failing
@@ -595,7 +656,7 @@ pass or chunk count is a tuning knob; a map-reduce of independent chunk
 summaries loses the ordering a rolling receipt keeps. Spec:
 `tests/compaction/test_summary_input_window.py`.
 
-**Problem:** a long archive exceeded native ordinary literal limits; adopting a summary after failed archival left Continue rebuilding cold history and hid the compaction marker. Startup compaction also lacked a zero-tool-prefix witness. **Decision:** native archive bodies use their declared 64 MiB blob budget and a compact, digest-bound outbox; ordinary literals keep the 8 MiB budget. For a Turn-bound task, the accepted post view and receipt commit before model-view adoption. Create/update failure retains the original input, emits an explicit failed compaction fact without an archive link, and stops provider dispatch. The pending compacting phase stays visible before an archive exists. An empty tool prefix is a valid startup witness. A closed suspended task saves its bounded working view through the same owner-scoped archive repository, including delivered background context and exact tool receipts. This checkpoint retains the original audit snapshot, makes no model call, emits no fictitious compaction, and follows the existing archive retention limit. Owner, Turn, history, policy, media and complete tool-prefix checks still fence restoration; changed or unproved input rebuilds rather than weakening those fences. Current logical-Turn loaded Skill batches remain verbatim through L1/L2; older Turns remain eligible for normal compaction. **Alternatives rejected:** raising all native literal limits broadens unrelated operations; adopting unsaved summaries breaks recovery; hiding pending or failed work makes repeated summarization invisible; relying on a tool-count watermark alone loses late background evidence. Specs: `test_continue_working_context.py`, the cross-backend large archive/restart producer test, and `test_visual_continue_compaction.py`.
+**Problem:** a long archive exceeded native ordinary literal limits; adopting a summary after failed archival left Continue rebuilding cold history and hid the compaction marker. Startup compaction also lacked a zero-tool-prefix witness. **Decision:** native archive bodies use their declared 64 MiB blob budget and a compact, digest-bound outbox; ordinary literals keep the 8 MiB budget. For a Turn-bound task, the accepted post view and receipt commit before model-view adoption. Create/update failure retains the original input, emits an explicit failed compaction fact without an archive link, and stops provider dispatch. The pending compacting phase stays visible before an archive exists. An empty tool prefix is a valid startup witness. A suspended task saves its bounded working view through the same owner-scoped archive repository, including delivered background context and exact tool receipts (see "Interrupted Turns resume their exact working view"). This checkpoint retains the original audit snapshot, makes no model call, emits no fictitious compaction, and follows the existing archive retention limit. Owner, Turn, history, policy, media and complete tool-prefix checks still fence restoration; changed or unproved input rebuilds rather than weakening those fences. Current logical-Turn loaded Skill batches remain verbatim through L1/L2; older Turns remain eligible for normal compaction. **Alternatives rejected:** raising all native literal limits broadens unrelated operations; adopting unsaved summaries breaks recovery; hiding pending or failed work makes repeated summarization invisible; relying on a tool-count watermark alone loses late background evidence. Specs: `test_continue_working_context.py`, the cross-backend large archive/restart producer test, and `test_visual_continue_compaction.py`.
 
 **Archive summary representation.** Problem: the source-derived continuity packet belongs in the accepted handoff, but appending it to the archive's 200,000-character `summary` field can reject an otherwise small post view. Decision: automatic and manual accepted archives persist only the narrative in `summary`; the exact complete handoff, including its digest-verified continuity packet, stays in `postMessages`. The receipt's `summary.chars` describes that complete handoff. No continuity observation is clipped and no storage limit changes. Create/update failures retain the original source and preserve an underlying `StorageError`'s code, message, retry class and operation identity instead of converting every rejection into retryable `database_unavailable`. Alternatives rejected: truncating continuity loses required execution evidence; widening the summary limit duplicates the complete handoff in two archive documents; an archive-only fallback without the packet makes Continue lossy. Specifications: `test_unified_continuity.py` and the real SQLite/native archive/restart case in `test_continue_working_context.py`.
 
@@ -903,11 +964,34 @@ owners.
 The complete packet is reserved before the paid summary call and counted again
 with the final candidate. No entry-count cutoff, model-specific mode, retry loop,
 new worker or durable store is added. Unchanged state is stable across repeated
-folds. Distinct unresolved observations can still grow: finite context cannot
-hold an unbounded irreducible state. If it cannot fit, admission preserves the
-source and reports the floor; it does not certify semantic completeness, silently
-clip critical state, or promise every model will make a correct next decision.
-Original Turns/archives remain the exact recall authority.
+folds. It does not certify semantic completeness, silently clip critical state,
+or promise every model will make a correct next decision. Original Turns/archives
+remain the exact recall authority.
+
+**Folding a packet that cannot fit — Problem:** distinct observations, successes
+included, only accumulate, and finite context cannot hold an unbounded state.
+The earlier rule preserved the source and reported the floor, so once the packet
+alone outgrew the admission target every later Turn of that conversation failed
+before any provider request, for good (muu1klptjtwd3t, 2026-11-07: 1,302
+observations rendered to 328k tokens against a 327.6k target refused as
+`irreducible_prompt_floor`). **Decision:** only when the plan has reached the
+smallest execution tail and the complete packet still cannot fit does
+`_layer2/_source_plan.py` fold the packet's oldest observations
+(`_continuity.observations_to_fold`; observations are ordered by latest outcome).
+The newest that fit the plan's preservation allowance — the token allowance the
+verbatim tail already uses — stay verbatim, and the tail is planned again under
+that allowance. The summarizer receives the folded observations in a separate
+section that tells it to carry their consequences in prose, the quote prices
+that same request, and the accepted packet omits exactly those keys and counts
+them cumulatively in `foldedIntoNarrative`. A packet that fits is never folded;
+a floor that persists after folding (for example one oversized human message)
+still refuses as `irreducible_prompt_floor`. A deterministic recovery receipt
+(utility callers only) cannot absorb folded observations; they then survive in
+the archived transcript alone. **Alternatives rejected:** refusing at the floor
+(a permanently dead conversation); folding to the whole remaining target (the
+next round re-enters forced compaction at once, one summary call per round);
+folding at every compaction (discards evidence while the request still has room,
+the loss the newest-16 prefilter caused); a fixed observation cap (a tuned knob).
 
 **Cross-layer evidence:** L1 captures a source observation before replacing a
 cold execution result. Its bounded excerpt remains visible; the occurrence-local
@@ -940,8 +1024,9 @@ metadata too (duplicate growth); blindly retaining a prior negative conclusion
 hide growth (silently loses unclosed evidence).
 
 **Verification:** `test_unified_continuity.py` exercises unreliable prose, 100
-folds, outcome supersession, malformed/tampered/cross-owner state, exact budgeting
-and manual rebuild. Provider, cancellation, archive/resume and manual CAS suites
+folds, outcome supersession, malformed/tampered/cross-owner state, exact budgeting,
+manual rebuild, and the floor fold (planner, summary input, contract and carried
+count). Provider, cancellation, archive/resume and manual CAS suites
 cover the production boundaries. `benchmarks/compaction_continuity.py` replays
 frozen real archive inputs and captured summaries; it measures evidence retention
 and packet size, not live model behavior or avoided task rounds.

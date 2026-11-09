@@ -12,22 +12,58 @@ import Security
 public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
 
     private let service: String
+    private let lock = NSLock()
 
     public init(service: String = "com.tofu.client.secrets") {
         self.service = service
     }
 
     public func secretFor(_ alias: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return readSecret(alias).secret
+    }
+
+    public func putSecret(_ secret: String, for alias: String) {
+        lock.lock(); defer { lock.unlock() }
+        _ = writeSecret(secret, for: alias)
+    }
+
+    public func removeSecret(_ alias: String) {
+        lock.lock(); defer { lock.unlock() }
+        _ = deleteSecret(alias)
+    }
+
+    public func applyProfileEdit(
+        from oldAlias: String, to newAlias: String,
+        expectedOldSecret: String?, expectedNewSecret: String?, secret: String?
+    ) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let source = readSecret(oldAlias), destination = readSecret(newAlias)
+        guard source.succeeded, destination.succeeded,
+              source.secret == expectedOldSecret, destination.secret == expectedNewSecret else { return false }
+        if let secret, secret != expectedNewSecret, !writeSecret(secret, for: newAlias) { return false }
+        if oldAlias != newAlias, expectedOldSecret != nil {
+            // A failed destination write must never destroy the only copy.
+            let written = readSecret(newAlias)
+            guard let secret, written.succeeded, written.secret == secret else { return false }
+            return deleteSecret(oldAlias)
+        }
+        return true
+    }
+
+    private func readSecret(_ alias: String) -> (succeeded: Bool, secret: String?) {
         var query = baseQuery(alias)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return (true, nil) }
+        guard status == errSecSuccess, let data = item as? Data,
+              let secret = String(data: data, encoding: .utf8) else { return (false, nil) }
+        return (true, secret)
     }
 
-    public func putSecret(_ secret: String, for alias: String) {
+    private func writeSecret(_ secret: String, for alias: String) -> Bool {
         let data = Data(secret.utf8)
         let status = SecItemUpdate(
             baseQuery(alias) as CFDictionary,
@@ -38,12 +74,14 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
             attributes[kSecValueData as String] = data
             attributes[kSecAttrAccessible as String] =
                 kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(attributes as CFDictionary, nil)
+            return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
         }
+        return status == errSecSuccess
     }
 
-    public func removeSecret(_ alias: String) {
-        SecItemDelete(baseQuery(alias) as CFDictionary)
+    private func deleteSecret(_ alias: String) -> Bool {
+        let status = SecItemDelete(baseQuery(alias) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 
     private func baseQuery(_ alias: String) -> [String: Any] {

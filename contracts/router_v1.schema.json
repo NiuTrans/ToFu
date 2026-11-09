@@ -319,7 +319,7 @@
     },
     "watchdogUnhealthyChannelState": {
       "description": "Channel account states (channels_v1 AccountState) that open a Watchdog channel signal.",
-      "enum": ["disconnected", "needs_login", "kicked", "error"]
+      "enum": ["disconnected", "needs_login", "runtime_unavailable", "kicked", "error"]
     },
     "watchdogSignal": {
       "type": "object",
@@ -395,7 +395,7 @@
         "instruction_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/instruction_id"},
         "event_id": {"$ref": "#/$defs/ownerDelegationAuthority/properties/event_id"},
         "interrupt_running_conversations": {"type": "boolean", "default": false,
-          "description": "The Settings restart's force: true interrupts other running conversations (they resume with Continue afterwards). Set it only when the owner asked to restart even though work is running. Protected steps (a git_land landing or an export) refuse the restart either way."},
+          "description": "The Settings restart's force: true interrupts other running conversations (they resume from their checkpoint by themselves afterwards). Set it only when the owner asked to restart even though work is running. Protected steps (a git_land landing or an export) refuse the restart either way."},
         "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S",
           "description": "One restart per key: a retry with the same key returns the recorded restart and never restarts again. A new owner request needs a new key."}
       }

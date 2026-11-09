@@ -120,7 +120,7 @@ def test_queue_reap_confirmed_expiry_still_runs_atomic_repair(monkeypatch):
 
 
 def test_subscription_probe_failure_is_debug_but_request_failure_warns(caplog):
-    from lib.subscription_routes import ProbeResult, Route, RouteManager
+    from lib.network_routes import ProbeResult, Route, RouteManager
 
     route = Route('direct', 'direct', 'direct')
     manager = RouteManager(probe=lambda _url, _route: ProbeResult('network_fail'),

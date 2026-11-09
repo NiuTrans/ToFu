@@ -11,6 +11,8 @@ from lib.router.relay import question_relay_command_id, relay_command_id, relay_
 from lib.router.watchdog.binding import watchdog_location
 from lib.scheduler.conversation_dispatch import ScheduledTurnDispatch
 
+
+
 pytestmark = pytest.mark.unit
 QUESTION = {'projectPath': '/work/project', 'coordinatorId': 'coordinator-project', 'turnId': 'question-turn',
             'toolCallId': 'call-ask', 'guidanceId': 'hg_question01', 'blocking': True,
@@ -18,6 +20,11 @@ QUESTION = {'projectPath': '/work/project', 'coordinatorId': 'coordinator-projec
             'options': [{'label': 'Tonight'}, {'label': 'Weekend', 'description': 'Saturday 02:00, lowest traffic'}],
             'questions': []}
 ENABLED = {'channel': 'dx', 'enabled': True, 'identity': {'uid': '1001'}, 'commandChat': 'dx:gid:900'}
+
+
+@pytest.fixture(autouse=True)
+def _daytime(monkeypatch):
+    monkeypatch.setattr('lib.router.proactive.held.quiet_hours_active', lambda *args, **kw: False)
 
 
 @pytest.fixture

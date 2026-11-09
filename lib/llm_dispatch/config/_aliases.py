@@ -16,11 +16,11 @@ logger = get_logger(__name__)
 #  This benefits anyone routing Claude through multiple gateway prefixes.
 # ══════════════════════════════════════════════════════════════
 MODEL_ALIAS_GROUPS = [
-    # Anthropic Fable 5 — aws gateway + direct API + Bedrock-native + Meituan-gateway IDs are interchangeable
+    # Anthropic Fable 5 — aws gateway + direct API + Bedrock-native + YourProvider-gateway IDs are interchangeable
     {'aws.fable-5', 'fable-5', 'us.anthropic.fable-5-v1:0', 'claude-fable-5'},
     # Anthropic Fable 5.1 — aws gateway + direct API + Bedrock-native IDs are interchangeable
     {'aws.fable-5.1', 'fable-5.1', 'us.anthropic.fable-5-1-v1:0', 'claude-fable-5-1'},
-    # Claude Opus 5 — logical id + the Meituan evaDaily gateway spelling
+    # Claude Opus 5 — logical id + the YourProvider evaDaily gateway spelling
     {'claude-opus-5', 'yuju-claude-opus-5-evaDaily'},
     # Claude Opus 4.8 — logical id + aws gateway + direct API + Bedrock-native IDs are interchangeable
     {'claude-opus-4.8', 'aws.claude-opus-4.8', 'claude-opus-4-8',
@@ -36,16 +36,16 @@ MODEL_ALIAS_GROUPS = [
     {'claude-sonnet-4.6', 'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514',
      'claude-sonnet-4-6-20250514', 'claude-sonnet-4-6',
      'us.anthropic.claude-sonnet-4-6-v1:0'},
-    # Meituan's V4 cloud cards name V4 Flash, not the 1017 checkpoint.
+    # YourProvider's V4 cloud cards name V4 Flash, not the 1017 checkpoint.
     {'deepseek-v4-flash', 'deepseek-v4-flash-huawei',
      'deepseek-v4-flash-tencent', 'deepseek-v4-flash-baidu',
      'deepseek-v4-flash-azure'},
-    # V4.1 Flash 1017 — rolling API id plus its explicit Meituan deployment.
+    # V4.1 Flash 1017 — rolling API id plus its explicit YourProvider deployment.
     {'deepseek-flash', 'deepseek-v4.1-flash',
-     'deepseek-v4.1-flash-1017', 'deepseek-v4-flash-meituan'},
-    # DeepSeek V4 Pro — direct DeepSeek API + Meituan gateway Tencent-cloud mirror
+     'deepseek-v4.1-flash-1017', 'deepseek-v4-flash-yourprovider'},
+    # DeepSeek V4 Pro — direct DeepSeek API + YourProvider gateway Tencent-cloud mirror
     {'deepseek-v4-pro', 'deepseek-v4-pro-tencent', 'deepseek-v4-pro-0813'},
-    # GLM-5.1 — Meituan gateway default + Huawei-cloud mirror
+    # GLM-5.1 — YourProvider gateway default + Huawei-cloud mirror
     {'glm-5.1', 'glm-5.1-huawei'},
 ]
 

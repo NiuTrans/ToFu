@@ -35,7 +35,7 @@ SETTINGS = {
     'imageGenEnabled': False, 'imageGenMode': False, 'mcpToolExposure': 'auto',
     'memoryEnabled': True, 'model': MODEL, 'modelRef': MODEL_REF, 'planMode': False,
     'preferredProviderId': '', 'preset': MODEL, 'projectPath': '/project',
-    'projectPaths': ['/project'], 'provider_id': 'sankuai', 'readOnlyPaths': [],
+    'projectPaths': ['/project'], 'provider_id': 'example-corp', 'readOnlyPaths': [],
     'schedulerEnabled': False, 'searchMode': 'multi', 'thinkingDepth': None, 'uiLang': 'zh',
 }
 # The composer snapshot every browser send submits (_buildToolbarOverrides).
@@ -230,9 +230,47 @@ def test_forwarded_request_continuations_keep_the_prefix_beside_direct_owner_tur
     assert replay.request(direct)[0] == 'checkpoint_missing'
     for config in (resumed, direct, resumed):
         assert replay.request(config) == expected
-    # The forwarded turn itself had the scheduler's tools, which no owner turn has.
-    status, drift = replay.request(forwarded)
-    assert status == 'policy_changed' and 'schedulerEnabled' in drift, (status, drift)
+    # The forwarded turn itself keeps the request's own prefix too: scheduler
+    # tools are outside every coordinator-role ceiling (COORDINATOR_TOOLS,
+    # ROUTER_TOOLS, WATCHDOG_TOOLS), so this flag changes nothing the role can do.
+    assert replay.request(forwarded) == ('restored', [])
+
+
+def test_scheduler_built_coordinator_turn_shares_the_prefix_of_its_owner_turns(
+        run, monkeypatch, tmp_path):
+    """Incident 2026-11-08, conv coordinator-989073860b05cc4dbf1a1bad74cc24a9 (Global Router).
+
+    ``build_task_config`` stamps every scheduler-built turn with
+    ``schedulerEnabled=True`` while the conversation setting is False. The Router
+    alternates scheduled replies with owner turns, and the checkpoint restore
+    treats that flag as authority-bearing, so each alternation logged
+    ``restore=policy_changed drift=schedulerEnabled
+    fallback=full_history messages=1505..3784`` and sent 840K-token first
+    requests or a 1.97M-token pre-turn compaction instead of a warm prefix.
+    """
+    r = run
+    forwarded = request_turn(r, monkeypatch, forwarded_request_config(r, monkeypatch, SETTINGS))
+    assert forwarded['schedulerEnabled'] is False
+    resumed = continuation(r, monkeypatch)
+    direct = human_turn(r, monkeypatch)
+    replay = Replay(tmp_path, monkeypatch)
+    assert replay.request(direct)[0] == 'checkpoint_missing'
+    for config in (forwarded, resumed, direct):
+        # Only effort drift remains (the scheduler's thinking-on default beside
+        # the owner's unset depth): the text and cache prefix are reused.
+        assert replay.request(config)[0] in ('restored', 'restored_portable')
+
+
+def test_ordinary_project_conversation_keeps_scheduler_turn_flag(run, monkeypatch):
+    from lib.conversation_sync.execution_identity import capture_execution_identity
+    from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
+    r = run
+    r.c.binding.value['conversationId'] = 'another-coordinator'
+    accepted = capture_execution_identity(normalize_interaction_mode_runtime_config(
+        forwarded_request_config(r, monkeypatch, SETTINGS)), 7, r.c.principal)
+    pinned = ingress(monkeypatch, accepted, turn_id='coordinator-turn',
+                     attempt_id='coordinator-attempt')
+    assert pinned['schedulerEnabled'] is True
 
 
 def test_continuation_runs_under_the_request_selection_and_its_grant(run, monkeypatch):

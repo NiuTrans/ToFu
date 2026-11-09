@@ -142,11 +142,20 @@ def _dispatch_notice(owner: int, router_id: str, coordinator_id: str, content: s
 
 
 def relay_project_report(owner: int, report: dict, *, client=None, dispatch=None) -> str | None:
-    """Relay one published report; returns the delivery disposition or None."""
+    """Relay one published report; returns the delivery disposition or None.
+
+    During quiet hours the relay is held instead of waking the Router
+    (docs/ROUTER.md R10 quiet hours); it is released at quiet end.
+    """
     owner = require_user_id(owner, context='report relay')
     router_id = _router_conversation(owner, report['projectPath'], report['coordinatorId'], client)
     if router_id is None:
         return None
+    from lib.router.proactive.held import quiet_hours_active, hold_relay
+    if quiet_hours_active():
+        identity = relay_command_id(owner, report['coordinatorId'], report['turnId'])
+        hold_relay(owner, 'report', identity, report, client=client)
+        return 'held'
     return _dispatch_notice(owner, router_id, report['coordinatorId'], render_notice(report),
                             relay_command_id(owner, report['coordinatorId'], report['turnId']), dispatch)
 
@@ -163,11 +172,18 @@ def relay_project_question(owner: int, question: dict, *, client=None, dispatch=
 
     ``question``: projectPath, coordinatorId, turnId, toolCallId, guidanceId,
     blocking, question, options and (batch form) questions.
+    During quiet hours the relay is held (docs/ROUTER.md R10 quiet hours).
     """
     owner = require_user_id(owner, context='question relay')
     router_id = _router_conversation(owner, question['projectPath'], question['coordinatorId'], client)
     if router_id is None:
         return None
+    from lib.router.proactive.held import quiet_hours_active, hold_relay
+    if quiet_hours_active():
+        identity = question_relay_command_id(owner, question['coordinatorId'],
+                                             question['turnId'], question['toolCallId'])
+        hold_relay(owner, 'question', identity, question, client=client)
+        return 'held'
     content = render_question_notice(question, _command_chat(owner, client))
     return _dispatch_notice(owner, router_id, question['coordinatorId'], content,
                             question_relay_command_id(owner, question['coordinatorId'], question['turnId'],

@@ -43,7 +43,7 @@ def _fat_meta():
 
 
 def test_trim_metadata_reuses_live_sanitizer_and_preserves_visible_fields():
-    from lib.storage.storage_projection import (
+    from lib.task_replay.persistence_projection import (
         project_task_result_metadata_for_storage,
     )
 

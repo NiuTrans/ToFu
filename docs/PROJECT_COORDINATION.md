@@ -99,16 +99,20 @@ Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose
 `_projectDispatchAdmission` carrier was removed received a refusal and kept
 running instead of failing its authority check. Decision: a dispatch task (a
-Worker or an automatic Coordinator continuation) takes any role from its grant,
-so `coordinator_scope` validates the grant (`admission.validate_task`) before it
-reads the continuation. A removed carrier, a revoked grant or a changed task
-identity raises the dispatch `AbortedError` from every role check and aborts the
-task, as batch admission and tool assembly already do. Only a failed ordinary
+Worker or an automatic Coordinator continuation) takes any role from its grant.
+`bind_account` pins that role from the grant it validated: request and grant
+fields no mutation can change. `coordinator_scope` answers a bound task from it
+without reading storage; a removed or replaced carrier raises the dispatch
+`AbortedError` and aborts the task, and an unbound dispatch task validates its
+grant first. A revoked grant or changed task identity is the verdict of the live
+admissions that precede every effect: the model request's dispatch intent and
+tool admission, which every executor runs before the role policy (see [One live
+validation per tool-batch admission](#one-live-validation-per-tool-batch-admission)).
+A request built for a dead grant is never sent. Only a failed ordinary
 Coordinator binding lookup refuses the single call while the human turn
-continues. Alternatives rejected: running `admit_tool` ahead of the role policy
-in each execution entry (several orderings to keep aligned, while the role
-resolver would still misreport a dead grant to catalog and request-metadata
-callers), and refusing per call (a fenced task would outlive its authority).
+continues. Alternatives rejected: refusing per call (a fenced task would outlive
+its authority) and revalidating the grant in every role check (it re-read a
+fixed role on every round and call).
 Specification: `test_project_dispatch_runtime.py` (removed carrier, revoked
 grant) and `test_coordinator_policy.py` (unknown binding fails closed).
 
@@ -135,11 +139,13 @@ A known Coordinator mounts its group even when the initial catalog contains no l
 
 Server-issued `_coordinatorSource` at creation is the only direct origin evidence. The project-inventory projection additively backfills older conversations from the same paged durable assignment records used by Manage work; it never infers origin from titles or ID prefixes and does not rewrite stored settings. The global catalog projects only stored metadata: reconstructing every project's complete assignment history there made each sidebar refresh contend with active dispatch writes and could fail the whole list. A shown Coordinator group reads that project's paged roster even when no child carries provenance locally, adopts the returned rows, and retries a failed discovery on the next catalog/push refresh. Ordinary catalog reads therefore never depend on dispatch-history availability. Ordinary owner chats, swarms and sub-agents are unchanged. Search still opens workers and marks their Coordinator provenance. Grouping never deletes, archives or changes direct links, and Manage work retains the complete project inventory. A replaced Coordinator keeps a separate historical group beneath its own clickable row; its workers never rejoin the owner’s date groups. When that Coordinator is not present in the current catalog, the sidebar does not fabricate an empty historical row; the Worker remains available through search, direct navigation and Manage work.
 
-Each sidebar view decides which entry anchors a group. Pinned entries anchor their own groups: the shown project’s bound Coordinator, and the main coordinator’s card (the Global Router) in a view with no project. The Global Router and the Watchdog stay reserved in every view, so neither is ever listed as a row or classified as a replaced Coordinator; the Watchdog never delegates and has no group. Any other conversation of the view, under the list’s own folder filter, that started conversations is a replaced Coordinator: it gets one clickable row directly above the list, and the list omits it. While the shown project’s binding is loading nothing is classified as replaced, because its current Coordinator cannot be told apart yet; a pre-painted cached binding still anchors its group at once. Every group owns the nodes it inserted (row, host, body), is rebuilt when its anchor changes and is removed when it leaves the view, so a late binding or a folder switch never leaves a second Coordinator row behind. A view whose conversations all sit in Coordinator groups is not empty, so the list shows no folder-empty notice beneath them.
+Each sidebar view decides which entry anchors a group. Pinned entries anchor their own groups: the shown project’s bound Coordinator, and the main coordinator’s card (the Global Router) in a view with no folder and no project. The Global Router and the Watchdog stay reserved in every view, so neither is ever listed as a row or classified as a replaced Coordinator; the Watchdog never delegates and has no group. Any other conversation of the view, under the list’s own folder filter, that started conversations is a replaced Coordinator: it gets one clickable row directly above the list, and the list omits it. While the shown project’s binding is loading nothing is classified as replaced, because its current Coordinator cannot be told apart yet; a pre-painted cached binding still anchors its group at once. Every group owns the nodes it inserted (row, host, body), is rebuilt when its anchor changes and is removed when it leaves the view, so a late binding or a folder switch never leaves a second Coordinator row behind. A view whose conversations all sit in Coordinator groups is not empty, so the list shows no folder-empty notice beneath them.
 
 Alternatives rejected: global rather than per-Coordinator folds lose ownership; title/prefix heuristics misclassify owner chats; hiding or archiving Workers destroys evidence; rendering one long expanded group buries the owner’s own conversations; classifying replaced Coordinators before the binding settles, or across folders, painted the current Coordinator and other projects’ Coordinators as extra rows. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `frontend/src/features/coordinator-conversation-group.test.ts` and the real Coordinator Chromium journeys in `tests/frontend/test_project_coordinator_browser.py`.
 
 Problem: a row's status derives from client-side Turn state, which the page holds only for hydrated conversations, so every running Worker that had not been opened read “Done” until clicked. Decision: the inventory page stamps `busy: true` from the same owner-scoped live-task projection as sidebar catalog rows (`list_running_tasks`), and every catalog merge path (full list, folder, older page, inventory page) wakes exactly the busy shells the client does not already know are running, deduplicated per conversation. A shell with no hydrated Turns shows no status rather than “Done”. Alternatives rejected: hydrating every grouped Worker on paint loads transcripts the owner never opens; a group-only status read would add a second liveness authority beside the catalog projection. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `tests/api/test_api_v1_project_coordination.py` and `tests/frontend/test_frontend_folder_members_load.py`.
+
+Problem: a sidebar folder that names no directory has no project path, so its leader slot fell back to the main coordinator’s card and offered no way to create a project Coordinator; the folder read as a project whose Coordinator had disappeared. Decision: a selected folder always owns the leader slot. When it names no directory, its project Coordinator row says so and opens that folder’s Project settings; once a directory is added the row reads that exact path’s binding and offers Create. The main coordinator’s card stands in only where no folder is selected and for router-managed homes. Folder names never take part in project identity, which stays the exact path with trailing separators stripped: POSIX compares names as bytes, so NFC and NFD spellings are distinct directories and never share a binding. Alternatives rejected: deriving a directory from the folder name invents filesystem locations; binding by folder would add a second identity beside the path that diverges when folders share a root; Unicode-normalizing paths would merge distinct directories. Specifications: the directoryless-folder and non-ASCII grouping cases in `frontend/src/features/project-coordination-entry.test.ts`, and the non-ASCII, proxy-re-encoded identity case in `tests/api/test_api_v1_project_coordination.py`.
 
 Problem: every provenance backfill re-read the project's complete assignment history, so each project-roster read grew with lifetime delegation (106 storage RPCs, about 70 ms per project at 94 admissions on native TofuDB) and a concurrent admission could make the snapshot page retry. Decision: `RecipientOrigins` in `lib/project_dispatch/history.py` reads each admission once per process. Requests are immutable after admission and their order index commits with them, so the mapping per owner/project and storage client stays exact; the project head’s assignment count is the freshness witness. An equal count costs one head query, a larger one reads only the newer admissions, and a smaller count or another client starts over. Retention is one mapping per owned project read, holding each delegated recipient once (about 10 KB at 94 Workers). Alternatives rejected: a time-based cache adds a staleness knob; copying origins into conversation settings migrates non-authoritative data; a durable provenance index would duplicate the assignment authority. Specifications: `tests/project_mod/test_coordinator_conversations.py`, `tests/storage/test_project_dispatch_repository_segments.py` and `benchmarks/catalog_origin_reads.py`.
 
@@ -222,9 +228,50 @@ names the still-pending Worker IDs to wait on next; Workers keep running and the
 input arrives at the round boundary right after the tool result. When every
 selected Worker settled meanwhile the call returns `wait=settled` with their
 evidence instead, and the input still follows.
+Problem: N11 — six Turns were force-failed as `worker_lost` while a Coordinator
+waited (11-04 22:32, 23:40; 11-05 01:23; 11-06 11:40, 11:53, 12:34). The first
+three were inside `await_project_workers` on a boot predating the per-poll
+heartbeat above (live since 11-05 09:59); that heartbeat is the fix, so a
+responsive wait is never reaped. The last three were inside
+`delegate_project_work`, undeclared synchronous dispatch under host overload —
+not a wait at all, and not made safe by any wait marker. Decision: keep the
+heartbeat as the await's only liveness evidence; a `_delegationWaits` marker
+whose freshness equals the stall threshold would be redundant while polls
+complete and would double a genuinely blocked status read's reap, because the
+reaper restarts silence from the last explained verdict.
+Problem (2026-11-09): `delegate_project_work` prepared the 1.4M-file plain
+folder of the autoharness project inside the call (`require_isolated_worker_root`
+runs `prepare_managed_repository`: whole-tree `ls-files`, a per-path content walk
+and `add -A`) for 6,931 s; the reaper force-failed the Coordinator at 1,836 s as
+`worker_lost` and the delegation's late result was lost. Decision: preparation
+reports every observed advance (a Git tree the kernel shows executing, a completed
+command, a walked path) to its caller, and delegation refreshes the Coordinator's
+existing dispatch heartbeat with it, exactly as a completed status poll does;
+Worker binding does the same for the Worker before its first round. A step that
+stops advancing supplies nothing, so a stuck delegation is still reaped one
+threshold after its last advance, and the Coordinator's Stop ends the preparation.
+Alternatives rejected: a `_delegationWaits` marker or an unconditional exemption
+hides a blocked handler (as for the await); raising the stall threshold is a knob
+that only moves the false reap; preparing after delegation would create Workers
+and grants for roots no Worker can use. Verification:
+`test_a_long_root_preparation_keeps_its_delegating_coordinator_live` and
+`test_a_root_preparation_that_stops_advancing_leaves_its_coordinator_reapable`
+(`test_coordinator_workers.py`),
+`test_a_workers_root_preparation_is_its_liveness_before_its_first_round`
+(`test_project_dispatch_file_lifecycle.py`). A device command
+claimed by a connected device publishes `_deviceWaits` and is `device` under
+the bridge's own presence rule (`_command_active_locked`), which has no
+observation clock of its own; an unclaimed command or a disconnected device
+explains nothing. Verification: `test_explained_wait.py`,
+`test_stuck_task_reaper.py`, `test_coordinator_workers.py`.
 `review_project_work` pins the exact completed result; its `actor=coordinator`
 never means human acceptance. An optional exact registered checkpoint requests
-publication through existing integration gates.
+publication through existing integration gates. An accept whose delivery cannot
+publish that checkpoint (the receipt records another attempt, an attempt that did
+not complete, or a state the receiver never acts on) is
+refused before the review is recorded, naming the receipt's state and reason
+("Delivery follows the attempt that completes" in
+[Project integration](modules/project_integration.md#task-owned-canonical-delivery)).
 `await_project_workers(wait_for=delivery)` observes the real delivery receipt.
 
 Problem: in a production Coordinator conversation these waits were 68% of wall
@@ -337,37 +384,94 @@ when the folder has no root guide (`CLAUDE.md`, `.cursorrules`, `AGENTS.md`,
 `COPILOT.md`). User files are never modified, moved or deleted. The repository
 is assembled in a `.tofu_git_init_*` directory and appears as `.git` only when
 complete; a crashed attempt is discarded by the next one; preparation holds the
-per-root `integration_control._repo_lock`. The content policy lives in
-`.git/tofu-managed.json` and a managed section of `.git/info/exclude`, which
-linked worktrees share:
+per-root `integration_control._repo_lock`. Its whole-tree Git (`ls-files`,
+`add -A`, `read-tree`, `write-tree`, `check-ignore`) has no total deadline: like
+the integration snapshot it runs under the shared `GIT_STALL_SECONDS` window
+([project integration](modules/project_integration.md)), so a large folder takes
+as long as its volume needs and only a Git tree that stopped executing for a whole
+window fails the preparation as a typed `volume_stalled` refusal. The caller
+observes each advance as its liveness (above) and its Stop ends the preparation; a
+failed or stopped preparation leaves the folder as it was. The content policy
+lives in `.git/tofu-managed.json` and a managed section of `.git/info/exclude`,
+which linked worktrees share:
 
 - never versioned: runtime, dependency and cache trees (`FORBIDDEN_CHECKPOINT_*`),
   `.tofu*` artifacts and the root `.venv` (bridged per checkout by `workspace_runtime`);
 - shared: files of at least 10 MiB, untracked directories of at least 2,000 files
   that are mostly not source text, virtual environments, nested repositories,
   paths the folder's own ignore files hide (`git check-ignore` decides, so the
-  parent of a shared path is never mistaken for one) and root runtime directories.
+  parent of a shared path is never mistaken for one), root runtime directories
+  and, once the owner chose so, nested projects (see the next paragraph).
   Worker binding (`workspace_delivery._binding`) links them into every checkout
   (`link_shared_paths`); workers read them in place, file tools refuse writes
   through them because the target resolves to the canonical checkout, project
   search skips links, and reclamation treats exact links as reconstructible;
 - everything else is versioned: isolated, reviewed and published as before.
 
+**Large folders and nested projects (2026-11-09).** A project manifest at the
+folder root (`managed_repository_discovery.PROJECT_MANIFESTS`: each ecosystem's
+build/package manifest, not dependency lists or generic `Makefile`s) makes the
+root the project and preparation proceeds as above. Otherwise
+`managed_repository_discovery.discover` lists the folder top-down and stops at
+nested Git repositories, virtual environments, nested projects and paths the
+folder's ignore files hide (`ActivitySupervisedExchange` keeps one
+check-ignore answering per path, so an ignored directory is never listed);
+their paths are excluded before any Git walk, so Git never enters them either.
+A directory that holds nothing but nested projects is one shared folder of them.
+The owner can additionally name whole folders of read-only run/reference data
+(`shared_folders=...`, recorded as `sharedFolders`): they are shared whole and
+never entered, which is how a project whose `work/` holds runtime distributions,
+wheels, bundles and reports avoids versioning them.
+Each listing is appended to a discovery journal in
+`integration_control._control_root()/preparations/` (never in the folder), so an
+interrupted or refused preparation resumes where it stopped; the journal is
+discarded once preparation succeeds, and a mismatched header or torn record
+discards only what follows it. When such a folder holds projects with a manifest
+of their own, only the owner can say whether they belong to this project, so
+preparation refuses with `ambiguous_project_root` instead of guessing: its
+`details` carry the candidates grouped by top-level folder, the question, the
+options and the recommended answer (`shared`), and nothing is written into the
+folder and no Worker exists. The answer is supplied as
+`prepare_managed_repository(nested_projects=...)`, recorded as `nestedProjects`
+in the manifest, and never overridden by a later call (`decision_recorded`).
+`scripts/prepare_project_folder.py` reports a folder read-only
+(`preview_preparation`) and applies the owner's answer.
+
+Measurement (autoharness on DolphinFS, 1,397,250 files, read-only dry run):
+discovery listed 37,631 directories in 65 s instead of walking and listing 1.4M
+paths, and refused with the typed question (21,673 nested projects: `work/`
+21,668, `reference/` 5); resuming from the journal took 8.7 s. Sharing nested
+projects alone would still version 21,825 files (694 MiB) of runtime
+distributions, wheels, bundles and reports (192 s). Sharing `work/` and
+`reference/` as the owner's data folders instead versions 89 files (7.4 MiB)
+with 4 shared paths in about 12 s. A folder with a project manifest at its root
+and bulky data is still prepared in one pass with its data shared.
+
+`preview_preparation` and the script write only into their scratch directory;
+nothing is created, changed or removed in the folder during a dry run. The
+script applies the owner's answers without Git:
+`python3 scripts/prepare_project_folder.py <folder> --nested-projects shared
+--shared-folder work --shared-folder reference --apply`.
+
 Every preflight refreshes the policy before the Worker's input snapshot, so
-newly added bulky data joins the shared set (which only grows); no further
-commit is made. Repositories with their own history are never changed.
-Remaining refusals carry a bilingual remedy without Git commands: a
-subdirectory of another repository, a linked worktree, a
-missing or remote root, an unwritable folder, and an unborn repository with
-staged files (Tofu does not commit someone else's staged work). Delegation
-calls the check through `admission.require_isolated_worker_root` before creating
-any conversation or grant (accepted replays are not rechecked) and returns a
-refusal with `execution_started: false` and do-not-retry recovery. Worker
-binding repeats it for files/project grants before workspace creation or the
-first model request, failing through `task_start_failed` with the remedy as its
-hint. Late `admit_tool` refusals raise `ToolAdmissionRefused` and settle as
-failed (`docs/contracts/TURN_SETTLEMENT.md`). `await_project_workers` adds the
-settled `error` (kind/detail/hint) for failed, interrupted or truncated Workers.
+newly added bulky data (and nested projects, under a recorded `shared` answer)
+joins the shared set, which only grows; no further commit is made. Repositories
+with their own history are never changed. Remaining refusals carry a `code`
+naming the cause and a bilingual remedy without Git commands: a subdirectory of
+another repository, a linked worktree, a missing or remote root, an unwritable
+folder, an unborn repository with staged files (Tofu does not commit someone
+else's staged work), an ambiguous project root (above) and a stalled volume.
+Delegation calls the check through `admission.require_isolated_worker_root`
+before creating any conversation or grant (accepted replays are not rechecked)
+and returns a refusal with `execution_started: false`, the typed `code`, its
+`details` and do-not-retry recovery (an ambiguous root names the owner question
+instead). Worker binding repeats it for files/project grants before workspace
+creation or the first model request, failing through `task_start_failed` with
+the remedy as its hint, so the same cause reaches the Coordinator when the
+delegation ran on another host. Late `admit_tool` refusals raise
+`ToolAdmissionRefused` and settle as failed
+(`docs/contracts/TURN_SETTLEMENT.md`). `await_project_workers` adds the settled
+`error` (kind/detail/hint) for failed, interrupted or truncated Workers.
 
 Measurement (RSI Exam on DolphinFS, Git 2.34, dry run against a scratch Git
 directory): first preparation 15 s (content walk 10.7 s, baseline 3.6 s);
@@ -382,11 +486,21 @@ isolation, review and publication); versioning everything (checkout cost on
 network volumes grows with file count, and every Worker would copy the data);
 a separate non-Git snapshot/publication store (a second delivery authority);
 committing someone else's staged index; guidance that overwrites a person's
-file. Verification: `test_managed_repository.py`,
-`test_worker_workspace_refusal.py`, `test_project_dispatch_file_lifecycle.py`
-(plain folder to isolated write, review and publication back into the folder),
-`test_workspace_completion.py`, `test_coordinator_workers.py` and
-`test_tool_admission_refusal_verdict.py`.
+file. For large folders: a file-count cap, size budget or timeout (the owner
+rules out caps, and a cap only moves the failure); guessing which nested
+projects are part of the project (a manifest-less monorepo and a folder of
+copies look alike, so only the owner decides, once and recorded); sharing
+nested projects unconditionally (would silently make a project's own packages
+read-only to workers); preparing into a worker checkout before the owner
+answered (writes into the folder and creates a Worker that cannot work).
+Verification: `test_managed_repository.py`,
+`test_managed_repository_large_folders.py` (typed ambiguity with an untouched
+folder, both owner answers, pruned discovery, resume, typed stall, read-only
+preview), `test_activity_supervised_process.py`,
+`test_project_dispatch_file_lifecycle.py` (plain folder to isolated write,
+review and publication back into the folder), `test_workspace_completion.py`,
+`test_coordinator_workers.py` (the owner's question as the delegation's tool
+result) and `test_tool_admission_refusal_verdict.py`.
 
 Problem: rejecting a project path solely because it contains a symlink forced
 people to reopen the same folder and resend their request, even though the real
@@ -507,7 +621,25 @@ is not supersession, but a changed request or principal is refused.
 A new attempt on the same human input joins the same account. A request whose
 input is not genuine human input (a report relay, a channel event or any other
 nonhuman initiator; `SyntheticSource`) opens no account and starts normally;
-delegation from it is still refused. GET
+delegation from it is still refused.
+
+A request the Global Router forwarded (`origin.forwardedFrom`, ROUTER.md R2) is
+genuine human input once `verify_forwarded_turn` admits it: the owner's verbatim
+words of the current request, or of an active standing instruction. Its
+nonhuman evidence (the router note, the instruction's triggering event) rides
+**inside the same input** as labelled context after the owner text
+(`originalContent` keeps the owner's verbatim words, which is what
+`authored_text` and the forward verification compare); it is never a second
+input, because a second input would start its own synthetic Coordinator request
+whenever the steer window was closed and be refused here. So an authorized
+forward — including one applied from a standing instruction while the owner is
+away — delegates Workers, pages them read-only and finishes its request through
+the unchanged `source_for_task` path, opens the ordinary request account above,
+and needs no new "继续". The instruction's `projectPath` scopes where it may be
+applied and pausing/cancelling it stops future applications
+(`route_to_project`); work already forwarded keeps the authority it was admitted
+with. Specifications: `tests/router/test_proactive_instruction_dispatch.py`.
+GET
 `/api/v4/project/coordination/budget` (owner-scoped `conversations`, passive)
 returns combined Coordinator + Worker tokens, model requests, tool calls, active
 Workers, whether receipts are complete, and any pending decision. The former
@@ -559,7 +691,9 @@ sessions and tells the human what matters.
   acknowledgement replays as unchanged, a replaced binding starts empty and an
   older binding can never overwrite a newer one. Writes push the existing
   `project` hint. GET `/api/v4/project/coordination/progress?path=`
-  (owner-scoped `conversations`, passive) returns `progressState`.
+  (owner-scoped `conversations`, passive) returns `progressState`. The board
+  is also the Coordinator's checklist and refreshes live from its write's
+  round ([One progress source](#one-progress-source-owner-decision-2026-11-08)).
 - Browser. `frontend/src/features/coordinator-progress.ts` is the only thing
   pinned atop the bound Coordinator chat: a collapsible card that reads as a
   todo list and starts folded to its head, one line holding the title, the
@@ -585,9 +719,10 @@ sessions and tells the human what matters.
   language beside its auto-translated replies. Decision: while the human reads
   the Coordinator chat auto-translated (the publishing turn's config, else the
   conversation's stored settings; a project-dispatch continuation's config
-  pins translation off, so only the settings decide there), every
-  `update_task_progress` call, an unchanged one too so a failed translation
-  retries, schedules one optional job on the shared reconstructible
+  pins translation off, so only the settings decide there), every board
+  write (`update_task_progress`, or a `todo_write` publishing the checklist),
+  an unchanged board too so a failed translation retries, schedules one
+  optional job on the shared reconstructible
   translation lane (`lib/conversations/coordinator_progress_translation.py`).
   The job translates only the board texts that lack a translation in that
   language through `lib/translate/display_texts.py`, which runs each text as a
@@ -645,9 +780,8 @@ made the human audit records instead of reading progress); leaving follow-ups in
 a banner (another state to track, with no answer control); timed decisions via
 `report_to_user(kind=decision)` plus `request_user_decision` (a report the human
 cannot answer in place); blocking every question (stalls work that has a
-sensible default); deriving the board from `todo_write` (one in-progress item,
-per-turn scope and continuation nudges suit an agent's steps, not a human's
-tasks).
+sensible default). Keeping the board and the `todo_write` checklist as two
+lists was superseded on 2026-11-08 (below).
 
 Verification: `tests/project_mod/test_coordinator_progress.py` (board and
 translation merge), `tests/translate/test_display_texts.py`,
@@ -657,6 +791,126 @@ translation merge), `tests/translate/test_display_texts.py`,
 `tests/conversation/test_conversation_command_inject_mode.py` (steer quotes),
 `frontend/src/features/coordinator-progress.test.ts`,
 `project-coordination-surface.test.ts` and `project-coordination-entry.test.ts`.
+
+### One progress source (owner decision 2026-11-08)
+
+Problem: a Coordinator kept two progress lists. `update_task_progress` wrote
+the board; `todo_write` kept a separate task-local checklist (in one owner
+Coordinator: 167 board writes beside 87 checklist writes of other, longer
+English steps), so the two drifted, and the owner asked to simplify them into
+one. The board also did not refresh live: its only refresh was the `project`
+push, which `push_event` delivers to the writing process's own sockets, and a
+Coordinator's tools run in the resident execution host, which has none under
+the default `inproc` push bus. The pinned board changed only after the owner
+left the chat and came back. The checklist view stayed live because its round
+reaches the browser through the conversation stream, which the API host's
+commit watch wakes for writes of every process.
+
+Decision: one progress record with two views.
+
+- Record. The board head stays the only store of a Coordinator that keeps a
+  board (its tool ceiling has `update_task_progress`; the Router Watchdog's has
+  not). The task's checklist state (`_todoState`, the Turn's `todoState`, the
+  context composer's Active Task Checklist) is the board's plan projection
+  (`plan_from_board`: tasks in board order without `cancelled` ones, the
+  summary as explanation), never a second list. Both writes hold the task's
+  progress lock, so they cannot interleave.
+- Writes. `update_task_progress` publishes the board and adopts its plan
+  (`publish_task_board`). Its receipt adds `plan`, the checklist the model now
+  holds, which is also the evidence that keeps the checklist block from being
+  re-injected while the receipt is visible. `todo_write` keeps its schema and
+  validation; in such a chat it publishes the accepted checklist as the board
+  (`plan_publication`, `board_from_plan`): items become tasks, a task keeps its
+  note while its title and status are unchanged, the summary stays, and a first
+  board takes the explanation when it fits on one line, else its current item.
+  A checklist the board cannot show (an item over 120 characters or on several
+  lines, or `blocked`) is rejected with that reason and changes neither view;
+  so are a replaced binding and a failed save. Every other chat keeps its own
+  checklist exactly as before.
+- Live refresh. Each progress write's round carries `coordinatorProgress`
+  (project, Coordinator, binding revision, board revision) beside the plan's
+  `todos`/`todoState`. The retained tool-round renderer feeds both to the live
+  rail checklist and, through `runtimeScope.observeCoordinatorProgress`, to the
+  coordination surfaces: a board revision newer than the shown one of the same
+  binding re-reads the board once (`observeProgress`) and repaints it in place,
+  keeping fold and focus; older, repeated and foreign revisions read nothing.
+  The `project` push remains for writers whose process serves the sockets.
+
+Alternatives rejected: deriving the board from the task-local checklist (that
+state lives for one turn and has no summary, notes or `cancelled`); a new
+combined record (a migration for the fields the board head already validates);
+widening board tasks to checklist limits (a task row is one readable line and
+its translation entries share the board's text bounds); relaying execution-host
+push frames to the API host for this (a second cross-process transport for what
+the durable conversation stream already delivers); polling the board or
+re-reading it on every conversation commit. Push-only hints written by the
+execution host (the board's display translation, report unread state) still
+reach the browser only at its next read.
+
+Verification: `tests/project_mod/test_coordinator_progress.py` (the one-source
+invariant over both write paths, board-rule rejections, a replaced binding,
+translation, the Watchdog and ordinary chats, receipt evidence),
+`project-coordination-surface.test.ts` (re-read without a push or navigation)
+and the real-browser journey in `tests/frontend/test_project_coordinator_browser.py`.
+
+### Commitments on the task board (owner request 2026-11-08)
+
+Problem: a Coordinator or the Global Router tells the owner "I'll report back
+when X" or "I'll resume at 23:20", and nothing records or checks it. The
+follow-up happens only if some later event happens to wake the lead. A
+Coordinator could not wait for a time at all: with no Worker active, its
+continuation counted idle turns as stalls and ended in a blocked report. This
+is the promise ledger of [ROUTER.md](ROUTER.md#r10-proactive-coordination-owner-request-2026-11-08) R10.
+
+Decision: a commitment is a board task with a `due` time, so the board the
+owner reads is the ledger, and the platform wakes the lead when it is due.
+
+- Record. `progressTask.due` (ISO 8601 date-time with offset) is optional. A
+  task carrying it is a commitment to the owner: by then the task is done or
+  the lead reports on it. A new or changed `due` must be in the future. An
+  open commitment (`pending` or `in_progress`) is identified by its title, so
+  two open commitments cannot share a title.
+- Lifecycle. Keeping it is `completed`; dropping it is `cancelled` (tell the
+  owner why); re-dating it is a new `due`. A write that omits an open
+  commitment is refused and changes neither view, so a commitment never
+  disappears silently; `todo_write` keeps each task's `due` by title.
+- Receipts. The same board head carries a platform-written `commitments`
+  list (reconstructible from the board, never authority): per title the first
+  and current due, the number of slips, the wake receipt and the closure
+  (`kept`, `late`, `cancelled`). It is written in the same CAS as the board, so
+  a board and its receipts never disagree.
+- Wake. A write that changes the earliest open due time arms one scheduler
+  `once:` row for that minute (deterministic id per owner, Coordinator and
+  minute; type `coordinator_commitment_due`). The row's handler re-reads the
+  head and wakes the lead once for every open commitment due by then that has
+  no wake receipt for its current due. Inside an open request with a
+  continuation policy, the wake is that request's continuation (reason
+  `commitment_due`), so the lead may resume, re-delegate or verify work under
+  the request's authority. Otherwise it is one `proactive` notice through
+  `dispatch_scheduled_turn(..., inject_mode='steer')`, command id
+  `commitment-due:` + digest of (owner, Coordinator, titles and due times):
+  a running lead is steered, an idle one starts a turn that can report, ask
+  and update the board but cannot delegate. Each due time wakes once. A
+  commitment still open after its wake is overdue; the digest and
+  `get_router_projects` list it, and nothing wakes the lead for it again.
+- Waiting is not stalling. A continuation with no active Worker and an open
+  commitment due later waits until that time instead of retrying with
+  backoff, so a lead can wait for a quota reset or a run's expected end.
+
+Alternatives rejected: a promise store and list beside the board (the second
+progress list the owner asked to remove); detecting promises in reply text (a
+model guess, and nothing to show the owner); a reminder interval or repeated
+wakes for an overdue commitment (a knob and a wake storm; the digest surfaces
+it); task IDs on the board (the board is model-authored in full each write,
+and titles already identify tasks for notes and translation).
+
+Verification: `tests/project_mod/test_coordinator_commitments.py` (board rules,
+drop guard, receipts, arming, one wake per due time, busy lane, replaced
+binding), `test_coordinator_commitment_continuation.py` (future due is a wait
+not a stall, due wake while a Worker runs, already-woken dedup, other
+Coordinator ignored), and `tests/router/test_proactive_replay.py` (today's
+scenarios: stalled worker, overdue promise, quota-reset deadline, channel
+reconnect).
 
 ### Result-driven Coordinator continuation
 
@@ -677,8 +931,10 @@ input retains priority. Duplicate notifications/CAS retries reuse one grant and
 one ordinary birth. Failure wakes only the Coordinator policy and preserves the
 existing skip-on-error rule for ordinary queued messages.
 
-`get_project_workers` pages at most 32 thin owned assignment facts; full evidence
-stays in ordinary conversations. `cancel_project_work` checks the human steering
+`get_project_workers` pages at most 32 thin owned assignment facts and returns
+only the leading rows that reach the model inline, with a cursor that resumes
+exactly after the last row shown (history pages expose `rowOlderCursors`); full
+evidence stays in ordinary conversations. `cancel_project_work` checks the human steering
 or original-continuation boundary above and aborts the exact Worker attempt under
 the existing publication lock.
 `finish_project_request` requires a durable report Turn: `complete` requires all
@@ -734,6 +990,13 @@ Calling the optional injected reader directly was rejected: ordinary production
 repositories omit it, so a durable successor could be created but never bound
 back to its assignment. The worker continuation specification exercises both
 reader configurations and preserves the exact predecessor/successor fences.
+
+A background batch's deterministic Continue stays a single wake even after a
+later human attempt supersedes it. Replaying its settled receipt neither moves
+the assignment backward nor reports a new launch; unconsumed command results
+remain available to the next real turn. The ordinary command replay and queue
+owners enforce this without weakening dispatch evidence or creating another
+receipt store.
 
 A continuation that ends without changed work/review/delivery evidence (including
 a failed Coordinator turn) is retried after `stallRetrySeconds` backoff
@@ -1140,10 +1403,40 @@ Router can address the owner's conversations; a project Coordinator addresses
 conversations in its project. The live binding and owner are checked on every
 call. The Watchdog and ordinary Workers receive neither control capability.
 
-Status reads the canonical synchronization snapshot and exposes Turn/Attempt
-identities, revisions, settlement/resume options, queue and active phase without
-execution config. An explicit Turn ID reads that Turn; `get_conversation` remains
-the transcript reader. Status is passive and is never cached as authorization.
+Status never reads a whole conversation. Problem: it read the complete
+synchronization snapshot and filtered `turn_id` afterwards, so a long history
+failed with `database_resource_exhausted` ("turn response exceeds its bounded
+streamed payload") even for one Turn, and a medium one spilled every Turn into
+an artifact. Decision: an explicit `turn_id` reads that Turn's metadata and its
+current Attempt by identity. Otherwise one lane (default `main`) is read
+newest-first through `turn.sync.page`, each page one bounded read that the
+repository reads again smaller when the authority refuses it at its response
+bound, and Turns are admitted while the result still reaches the model inline
+under the single tool-result budget (`fits_tool_result_budget` in
+`lib/tasks_pkg/compaction/_budget.py`). The newest Turn is always shown;
+`window.next_before_ordinal` with `lane_id` pages older Turns. Both forms expose
+Turn/Attempt identities, revisions, settlement/resume options and the queue
+preview without execution config; the live presentation phase and replay head
+stay browser concerns. `get_conversation` remains the transcript reader. Status
+is passive and is never cached as authorization. Alternatives rejected: a fixed
+Turn count per window (either spills heavy settlements into an artifact or hides
+Turns that fit), `turn.sync.snapshot` with `turn_limit` (bounded only for linear
+conversations; a branched one still takes the whole-history path), and a new
+metadata-only page operation (a new semantic operation on both authorities,
+while page reads already stay inside the existing bound). Specification:
+`tests/conversation/test_coordinator_status_bound.py` (SQL and native, a history
+beyond a 96 KiB response bound).
+
+Partial results are readable by every Coordinator role. A result above the
+single tool-result budget becomes a partial envelope whose only recovery is
+`read_tool_artifact`/`search_tool_artifact` (kept eager in the registry for
+exactly this reason), yet `COORDINATOR_TOOLS` (and so `ROUTER_TOOLS`) and
+`WATCHDOG_TOOLS` lacked them: a Coordinator got an `artifactRef` it could not
+read. The readers are now in all three ceilings; they only page results the
+role already received. Coordinator list reads additionally return a first page
+the model reads inline (see `get_project_workers` and project message
+directories), so the reader is the fallback for other oversized results
+(`get_conversation`, `get_project_assignment`), not the normal path.
 
 Control supports `continue`, `checkpoint_resume`, `regenerate` and exact-attempt
 `stop`. It validates the current authorized Coordinator request through the
@@ -1184,21 +1477,137 @@ cannot be mutated. The tool call and ordinary command receipts retain provenance
 Alternatives rejected: generating a new user message would change the meaning of
 Continue; starting a private executor would split lifecycle authority; granting
 an arbitrary synthetic user the owner's identity would bypass dispatch grants.
+A Coordinator's next instruction to an ended Worker is the separate `follow_up`
+action ("Continuing an ended Worker session" below), never a resume.
 Session settings, new messages, human confirmations and deletion remain separate
 commands. Verification: `tests/project_mod/test_coordinator_session_control.py`
 and `tests/conversation/test_coordinator_session_control.py`.
+
+The browser's own Continue, checkpoint resume, regenerate and guidance answer
+follow the same rule for a Worker Turn. When the Turn's current attempt was
+dispatched, the conversation command service resumes it through that attempt's
+`TrustedDispatch` admission (same task identity, grant fence and assignment
+association). When the grant can no longer authorize a resume, the command
+refuses with `worker_binding_refused` and an explanation, before anything is
+written. Problem: on 2026-11-06 a browser Continue on a Worker conversation
+started an ordinary chat attempt in the API host. It had another task identity
+and no grant, and its result never reached the Coordinator. Alternative
+rejected: refusing every browser Continue on Worker conversations would take
+the owner's direct recovery control away for no gain; the binding is the same
+authority the Coordinator uses. Turns the owner typed into a Worker
+conversation keep their ordinary execution. Verification:
+`tests/conversation/test_worker_ui_continue_binding.py`.
+
+A successor Attempt of a Worker Turn resolves its grant through one owner,
+`admission.turn_dispatch`. The public attempt command performs the same lookup
+before capturing configuration, so a browser resume keeps the assignment's
+principal and account. An invalid grant raises `worker_binding_refused` before
+acceptance; it never falls back to an unbound owner task. The real-start suite
+also verifies that refusal leaves the current attempt and recorded usage intact.
+Synthetic callers keep their supplied principal and must already match the
+explicit grant; they cannot borrow this owner-originated resume authority.
+Problem (2026-11-07 10:45, worker-80e6d733, assignment 6ddab2df): a browser
+Continue that ran unbound (before the browser path bound Worker Turns) became
+the Turn's current attempt. Both `control_conversation` and the browser read the grant only from the
+selected attempt's config, so the Coordinator's continue started, but also
+unbound. It ran under the owner's principal with no ledger, and the assignment
+kept naming its failed attempt. Decision: when the selected attempt carries no
+grant, the dispatch birth's `project-dispatch:<assignment>:output` presentation
+locates the assignment. Its grant applies only when the association names this
+exact Turn of this recipient conversation; the successor then advances the
+association from the attempt it names, and `bind_account` accepts the unbound
+attempt as the settled predecessor. A Turn without that presentation reads
+nothing more. Alternatives rejected:
+- Adopting the unbound attempt's result: its effects ran outside the grant and
+  were never recorded, and its checkout may be another one.
+- Refusing Continue on such Turns: the lane can then only be re-delegated.
+- The latest assignment of the conversation without the exact Turn match: a Turn
+  the owner typed into a Worker conversation would be captured by the grant.
+Verification:
+`tests/conversation/test_worker_attempt_real_start.py::test_a_continue_after_an_unbound_owner_attempt_runs_under_the_assignment`
+(Coordinator and owner) and `::test_an_owner_continue_of_a_failed_worker_turn_runs_under_the_assignment`.
+
+#### Continuing an ended Worker session (follow_up)
+
+Problem: one Worker session per goal is faster and cheaper (owner direction
+2026-11-08: "adding an elephant could always be discussed within a single
+session"), yet a Coordinator could only regenerate an ended Worker Turn or
+delegate a new Worker that rediscovered the context. Nothing created a new Turn
+in a Worker conversation under its grant, and a new Turn's attempt could not bind
+the assignment's account: `bind_account` recognised only the storage-issued
+`_resumeSource` of an attempt in the same Turn and refused the rest with "Worker
+tool reservations cannot be replenished".
+
+Decision: `control_conversation(action=follow_up, instruction=...)` pins the
+Worker's latest settled Turn, its Attempt and its projectionRevision, like every
+session control. The instruction becomes that conversation's next Turn: a
+`virtual_user` input stamped by the Coordinator (never a human message), and the
+ended Turn keeps its attempt, revision and result.
+- An unreviewed result whose delivery receipt is not `delivered` continues its own
+  assignment (`ProjectDispatchService.follow_up`). The input attaches right after
+  the pinned Turn (`requireParentIsLaneTail`), and `TrustedDispatch(follows=...)`
+  advances the association only from the exact association the Coordinator read.
+  Grant, checkout and account carry over: the accepted config carries the
+  predecessor as `_projectDispatchFollowUp`, which `bind_account` checks against
+  the settled attempt before it continues the ledgers. The result is reviewed with
+  `review_project_work` as usual. As for every in-place resume, the follow-up's start
+  reopens the held receipt for its own attempt and its settlement captures the checkout
+  ("Delivery follows the attempt that completes" in
+  [project integration](modules/project_integration.md)), so the accepted checkpoint
+  carries the earlier and the follow-up edits.
+- A review is immutable and a `delivered` receipt never reopens (its checkout may
+  already be reclaimed). Such a result continues as a new assignment of the current
+  request in the same conversation, through the ordinary delegation with the
+  conversation reused, with a fresh checkout of the current branch. Its identity is
+  the pinned association, so a retry replays it and another instruction for the same
+  result is refused; an accepted result whose delivery has not landed is refused
+  until it lands.
+
+A replay with identical arguments reports the accepted Turn and starts nothing; once
+the session moved on, an older pin is refused. Human messages and steers in the
+Worker conversation keep their ordinary paths: a queued human input supersedes the
+follow-up, and a running Worker takes context through `send_project_message`, not
+`follow_up`. Workers gain no authority. Automatic continuations follow up only
+their original request's Workers (`worker_control`), and the owner's delegation
+(Router R9) never follows up.
+
+Reuse or split: reuse the session for follow-ups of the same goal, including fixes
+the Coordinator would otherwise request with `decision=rework` (follow up before
+reviewing). Split into a new Worker for independent parallel work, an unrelated
+goal, or a session that keeps failing or whose context no longer helps.
+
+Alternatives rejected:
+- Regenerating the Turn discards the result and its context.
+- A project message that wakes an idle Worker would make the passive mailbox an
+  execution scheduler.
+- A new assignment for every follow-up moves the checkout and the account on each
+  step and loses undelivered work.
+- Reopening a reviewed assignment would make reviews mutable.
+
+Verification: `tests/conversation/test_worker_attempt_real_start.py::test_a_follow_up_continues_an_ended_worker_session_as_its_next_turn`
+(through review and a committed delivery of both attempts' edits),
+`::test_a_follow_up_after_a_final_result_continues_the_session_as_a_linked_assignment` and
+`::test_a_follow_up_is_refused_before_anything_starts_when_the_session_cannot_continue`
+(SQL and native), and the follow-up specifications in
+`tests/project_mod/test_coordinator_session_control.py` and `test_coordinator_workers.py`.
 
 Problem: permitted Coordinator tools were absent from default keyword-routed
 wire schemas and had to be rediscovered on every new task. Decision:
 `coordinator_policy.prepare_coordinator_tool_surface` derives required-direct
 exposure from the existing role policy intersected with the **post-gate**
-executable catalog. Assembly applies it to genuine bound roots and validated
+executable catalog, limited to the role's usage-derived core: `ROUTER_DIRECT_TOOLS`
+for the Global Router, `COORDINATOR_DIRECT_TOOLS` for a Project Coordinator, every
+Watchdog tool. The role's other tools stay eager, so only a route's tool-name budget
+hides them ([LLM_COST_OPTIMIZATION.md](LLM_COST_OPTIMIZATION.md#6-gateway-tool-name-budget)).
+Assembly applies it to genuine bound roots and validated
 continuations, not ordinary chats, foreign owners or transient children. It
 preserves Plan/readonly/selection/authorization checks and does not expand a
 worker's issued tool scope. Alternatives rejected: making tools global `_ALWAYS`
 entries grants irrelevant visibility; a separate role whitelist drifts from
 execution authority. `test_coordinator_tool_surface.py` verifies actual wire
-schemas, retries, discovery modes and negative authority cases.
+schemas, retries, discovery modes and negative authority cases;
+`test_coordinator_tool_name_budget.py` keeps every role surface within the Claude
+tool-name budget.
 
 Problem: assignment inventory, conversation inventory and actual execution were
 conflated, hiding zero-Turn workers. Decision: persisted empty catalog entries
@@ -1693,7 +2102,13 @@ delivery and Coordinator wake never arrived.
 
 Decision: a restart-paused assignment resumes automatically through the existing
 startup recovery pass and the ordinary Continue command, in its own conversation,
-under the same grant. A new assignment records one deterministic workspace task
+under the same grant. Each assignment that the pass leaves unresumed is logged
+with its reason: a warning when a restart-paused lane's grant was revoked or its
+deadline passed, info for an in-scope lane that had run (a coordinator profile
+or a grant without the durable-Stop lifecycle), debug for plain filters and
+settled executions. One `skipped` counter used to hide all of these (after the
+2026-11-06 restart, four of five interrupted lanes got no attempt and no line
+said why). Verification: `tests/project_mod/test_project_dispatch_recovery_reasons.py`. A new assignment records one deterministic workspace task
 identity (`project-worker:<assignmentId>`) in accepted config and its association;
 an older assignment without that field inherits its interrupted attempt's actual
 workspace task. Every physical attempt works under that identity (its work id),
@@ -1704,6 +2119,30 @@ Its task event stream likewise continues after the predecessor's durable cursor
 and the resumed attempt, as its Turn's current bound Attempt, takes over the task
 result recovery left `interrupted` while the predecessor stays fenced
 ([Storage](STORAGE.md#restart-readiness-and-recovery)).
+
+Coordinator wakes continue the same way. Problem: continuation treated a
+restart-interrupted Coordinator wake as settled and, once its backoff ran out,
+minted a new wake whose brief made the Coordinator re-read every Worker; after
+the 2026-11-08 restart both Coordinators lost their interrupted round this way.
+Decision: `continuation._proposal` hands a restart-paused previous wake back as
+`existing`, so `dispatch_authorized` continues it in place through the same
+restart continuation (`project-dispatch-resume:<assignment>:<attempt>`) under
+its grant. A restart-paused human request Turn that has no wake yet proposes
+`resume_source`, and `recover_coordinator` continues that Turn in place through
+the ordinary resume command of the restart resume pass
+([Run continuity](RUN_CONTINUITY.md#restart-paused-conversations-resume-by-themselves)),
+idempotent with that pass. A request Turn continued in place (by either, or by
+the owner's Continue) owns follow-through until its current Attempt settles:
+previously its interrupted original Attempt counted as settled, so a wake could
+race the continued Attempt. Once the continued Turn settles, Worker results wake
+the request as before. Alternatives rejected: keeping the fresh wake and adding
+the interrupted round to its brief (a second resume path that still re-reads the
+Workers); leaving the request Turn to the restart resume pass alone (it depends
+on quiesce records the stopping generation writes, which the restart deploying
+this change does not). Verification:
+`tests/project_mod/test_coordinator_continuation.py::test_a_restart_paused_coordinator_wake_continues_in_place_instead_of_a_new_wake`,
+`::test_a_restart_paused_human_request_continues_in_place_instead_of_a_new_wake`
+and `::test_a_request_turn_the_owner_continued_owns_follow_through_until_it_settles`.
 
 Durable-worker attempts. Problem: `turn.attempt.dispatch_worker` binds every
 Attempt to its own task `conversation-attempt:<attemptId>`, while task
@@ -1743,36 +2182,82 @@ Specs:
 - `tests/conversation/test_durable_attempt_execution.py::test_accepted_workspace_task_id_never_renames_the_claimed_task`
 - `tests/tasks_pkg/test_conversation_worker_binding.py::test_project_grant_workspace_id_never_renames_the_claimed_task`
 - `tests/project_mod/test_delivery_resume_demand.py::test_working_recovery_reads_the_executing_attempt_and_settles_the_work_id`
+- `tests/conversation/test_worker_attempt_real_start.py`: a fresh Worker, a
+  restart-paused Worker resumed by boot recovery, and Coordinator and owner
+  Continues of a failed Worker Turn, on SQLite and native storage. Delegation,
+  the durable claim, task registration, `bind_account` and the Git checkout are
+  production code; only the model context and the run loop's provider outcome
+  are controlled. The identity cases fail at `917c6390e3`.
 
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
-to that successor. The accepted `_resumeSource` of a restart Continue also restores
-the assignment's conserved model and tool accounts: the last model ordinal,
-cumulative usage and original nonce, the last tool-occurrence ordinal and the
-shared-request tool-reservation counter continue once, never restart at one or
-fabricate another occurrence account.
+to that successor. The accepted `_resumeSource` of every successor of the bound
+Turn (Continue, checkpoint resume, guidance answer or Regenerate) also restores
+the assignment's conserved model and tool accounts, whatever settled its
+predecessor: the last model ordinal, cumulative usage and original nonce, the
+last tool-occurrence ordinal and the shared-request tool-reservation counter
+continue once, never restart at one or fabricate another occurrence account. An
+account with no recorded occurrence has nothing to continue and starts like a
+first attempt.
 Problem: `bind_account` proposed a zero reservation counter for every generation
-and refused any stored counter that differed, so every restarted Worker that had
+and refused any stored counter that differed, so a resumed Worker that had
 reserved a tool failed to start (`Worker tool reservations cannot be
 replenished`); with only that changed, its first tool still collided with stored
-tool-occurrence ordinal one. Decision: a validated
-restart Continue whose stored counter names the same root task and nonce keeps
+tool-occurrence ordinal one. Restricting recovery to `server_restart` also made
+later retries after a failed start hit the same refusal. Decision: verify the
+accepted receipt's exact predecessor attempt, task, Turn, conversation and settled
+status. A successor whose stored counter names the same work id and nonce keeps
 that counter, and `ExecutionBudget.restore_tool_account` continues both tool
 sequences without restoring spent slots (a finite tool cap refuses, as for the
-model account). A fresh start, another root or nonce, or a predecessor that is
-not `interrupted` still refuses. Alternatives rejected: resetting the counter
+model account). A fresh start, another root or nonce, a live predecessor, or
+evidence that differs from the accepted receipt still refuses. Alternatives
+rejected: resetting the counter
 erases the request's recorded tool usage and is the replenishment the fence
 exists to stop; a fresh nonce per generation forks the one durable account; and
 accepting reservation ordinals beyond `count + 1` would hide lost or forged
 reservations; adopting the stored count only as an offset over budget ordinals
 that restart at one still collides the first resumed tool with occurrence ordinal
 one, and stacking that offset on the restore counts every stored reservation twice.
-Specs: `tests/project_mod/test_coordinator_request_budget.py::test_restart_resumed_worker_continues_its_tool_reservation_counter`,
+Specs: `tests/project_mod/test_coordinator_request_budget.py::test_accepted_resume_continues_the_worker_tool_reservation_counter`,
 `::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`,
+`::test_resume_receipt_must_match_exact_predecessor_before_restoring_counts`,
+`tests/storage/test_coordinator_resume_allowance.py` (all selected authorities),
 `tests/agent_core/test_tool_account_restore.py` and
 `tests/project_mod/test_coordinator_workers.py::test_restart_continue_keeps_counting_the_worker_tool_reservations`,
 `::test_a_new_physical_account_still_cannot_replenish_worker_tool_reservations`
 and `::test_each_restart_generation_continues_the_one_worker_tool_account_once`.
+
+Problem (2026-11-07): only a restart Continue kept the account, so a successor
+whose immediate predecessor ended any other way could not start once the Worker
+had called a tool. The common chain was a restart interrupting the Worker, its
+boot-recovery Continue failing before entry, and a Coordinator
+`control_conversation` continue of that failed attempt refused in 3 s with
+`Worker tool reservations cannot be replenished` (three lanes at 08:57; sixteen
+lanes on 11-05 and 11-06 after a provider failure or a failed restart Continue).
+The owner's browser Continue escaped the refusal only because it ran unbound,
+outside the grant. Every such lane had to be re-delegated. Decision: `bind_account`
+continues the one account for every successor whose `_resumeSource` names a
+settled (not pending or running) attempt of the bound Turn in the recipient
+conversation: the same work-id root and nonce, the stored counter and restored
+ordinals. A fresh account (no resume source), another root or nonce, a live
+predecessor and a predecessor from another Turn still refuse. Continuing is not
+replenishment: the counter and ordinals only grow, and the Turn authority and the
+association's review fence still decide whether a successor may exist at all.
+Alternatives rejected:
+- Keeping the restart-only rule: any platform failure after a Worker's first tool
+  call ends its lane, and recovery means a new lane, checkout and context.
+- Allowing selected predecessor causes: a cause allow-list grows with every new
+  failure code, and why the predecessor ended does not change the account.
+- Walking back to the last restart-interrupted ancestor: provider failures and
+  Stops still refuse, and the account lives on the assignment, not the lineage.
+- A fresh account per successor: it resets the counter or forks the nonce, and
+  its first model or tool occurrence collides with stored ordinal one.
+
+Specs: `tests/project_mod/test_coordinator_request_budget.py::test_every_successor_of_the_bound_turn_continues_the_worker_tool_account`,
+`::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`
+and, through the real start path,
+`tests/conversation/test_worker_attempt_real_start.py::test_a_coordinator_continue_of_a_failed_worker_turn_starts_and_the_assignment_follows`.
+
 A background-command completion for an eligible unfinished execution uses this
 same Continue path; its receipts stay durable and are replayed into the resumed
 Worker turn. The
@@ -1833,7 +2318,12 @@ is created, and no still-running command is killed. Replay of the same block is
 idempotent, and a wake row stored by an earlier release is retired without a turn.
 A revoked grant whose execution is still settling, lacks evidence, or loses the
 projection race also starts no model turn; its durable receipts remain available
-for a later evidence-settlement pass. Exact assignment reads expose the evidence
+for a later evidence-settlement pass. Because those receipts stay queued, every
+maintenance tick re-evaluates them: its decisions read Turn metadata only, and
+the Worker Turn's projection is read only to attach the block or to observe it
+once at a new `projectionRevision`; while that revision stands, the process
+remembers the attached block instead of rereading a multi-megabyte projection
+per tick (2.4% of the execution host's GIL samples on 2026-11-08). Exact assignment reads expose the evidence
 through the bound result. A human entering
 the Worker conversation still uses the ordinary human-authorized command path;
 this is not a user Stop and never reports an authority refusal as one.
@@ -1966,8 +2456,10 @@ Git gates and `origin.delivery` own publication. Final fresh checks run under th
 same repository lock used by grant revocation, before intent and apply/fast-forward.
 Changing the checkpoint cannot reuse an old publish request. No new delivery store
 or worker is introduced. `canonicalDelivery=true` derives only from the exact
-owner/project/task-matching durable `delivered` receipt, not completion, acceptance,
-candidate `merged` or a publish request. Automatic byte delivery need not change HEAD.
+owner/project/task-matching durable `delivered` receipt with commit evidence
+(`delivery.canonical_delivery`), not completion, acceptance, candidate `merged` or a
+publish request; an uncommitted working-tree publication projects as `pending` or
+`blocked` (`delivered_uncommitted`).
 Alternatives rejected: acceptance-as-publication and UI-only fencing lose authority.
 
 ### Dispatch storage waits
@@ -2053,11 +2545,192 @@ Specifications: `tests/project_mod/test_project_dispatch_contention.py`. It
 races Coordinator delegations and foreign commits against a Worker's model and
 tool occurrences, tears authority snapshots, revokes and Stops during
 contention, and covers the Coordinator request account, delegation and read
-tools. Not covered: `cancel_project_work`, `review_project_work`,
-`finish_project_request`, `request_user_decision` and the dispatch itself of
-`dispatch_project_assignment` still return contention as an uncertain outcome
-with their existing recovery. A contended `wake_project_dependents` is still
-retained for the next settlement or startup recovery.
+tools. The Coordinator write tools are covered by the next section. Not
+covered: the dispatch itself of `dispatch_project_assignment` still returns
+contention as an uncertain outcome with its existing recovery. A contended
+`wake_project_dependents` is still retained for the next settlement or startup
+recovery.
+
+### Coordinator write tools read through dispatch contention
+
+Problem: the same head CAS the reads race also serializes every Coordinator
+write. At 16:15 CST on 2026-11-06, with about 17 Workers live,
+`review_project_work` returned
+`{"error": "Concurrent/uncertain dispatch update; read before retrying"}` and
+the review was lost until the Coordinator replayed it by hand. The review's CAS
+callback re-reads the Worker's full Turn projection on every attempt, so a
+multi-megabyte result makes each of the bounded attempts slow enough to lose
+again. `cancel_project_work`, `finish_project_request` and
+`request_user_decision` share the same path.
+
+Decision: `execute_coordinator_tool` runs these four commands through
+`reread_on_contention`, exactly like delegation. The first attempt runs as
+before; only contention enters the persistence wait, bounded by its existing
+liveness contract (ACK, owner Stop, server shutdown). Each repeat re-validates
+live authority and re-takes the publication lock, so a contended call never
+holds that lock while it waits. Replay is unchanged: an identical review,
+cancel, finish receipt or pending decision is a durable no-op (the decision
+keeps its first due time), and a different one is still refused as immutable.
+A real verdict met on the re-read — a revoked grant, a changed binding, an
+already settled request — still refuses at once. `consider_project_message`
+and `send_project_message` are unchanged: they commit through the per-recipient
+mailbox CAS, never the dispatch head, so this contention cannot reach them.
+
+Alternatives rejected: waiting inside the publication lock (a contended review
+would block publication), returning the contention to the caller with recovery
+text (the Coordinator must then replay by hand, and the first attempt already
+proved the command is idempotent), and shortening the review's evidence read
+(useful, but a separate optimization, not an authority fix; it now reads Turn
+metadata, see the compact receipts below).
+
+Specifications: `tests/project_mod/test_project_dispatch_contention.py`
+(review/cancel/finish/decision races, replay, a revocation committed during
+contention) on in-memory storage. Not covered: these tools racing the real
+head on SQLite and PostgreSQL. There the head race is specified for a Worker's
+writes only
+(`tests/storage/test_project_dispatch_persistence.py::test_racing_head_commits_never_stop_a_segmented_worker`).
+
+### Compact review and cancel receipts (2026-11-08)
+
+Problem: `review_project_work` and `cancel_project_work` returned the whole
+Coordinator view: the request (brief, granted tools, delegation policy) and the
+Worker's complete Turn projection. In the 2026-11-08 Coordinator conversation
+(first 145 of 315 messages) 51 reviews and 18 cancels returned 1.3 MB (review
+median, max 12 MB) and 3.1 MB (cancel median, max 9.5 MB) of JSON; the model saw
+a 12,000-character prefix, about 3.2-3.8k tokens of brief and tool names that
+never reached the decision or delivery, or only "Tool returned a structured
+result." when the JSON stayed under 1 MB. Each call also materialized the
+projection and persisted it as a multi-megabyte artifact.
+
+Decision: both tools return a compact effect receipt: `assignment_id`,
+`decision` (`accept`/`reject`/`rework`, or `cancelled`), `grant_revision`,
+`revoked`, `result_revision`, `execution_status`, `checkpoint_sha`, `delivery`,
+`canonical_delivery` and `next_step`. The service answers from the
+settlement-only view, and the review's ownership pre-check and its revision
+check read Turn metadata, so neither command materializes the projection.
+Evidence stays with `get_project_assignment` and `get_conversation`. Measured on
+two real calls of that conversation (receipt rebuilt from their recorded
+delivery state, same token counter): an accepted review with a checkpoint went
+from 3,469 to 365 visible tokens (its 7.2 MB result no longer read or stored), a
+cancel from 3,473 to 155 (3.8 MB). `tests/project_mod/test_coordinator_receipts.py`
+pins the shape and the metadata-only reads.
+
+Alternatives rejected: keeping the full view and relying on the artifact readers
+(every review still writes a multi-megabyte artifact and needs a second call to
+reach its own outcome), trimming the view but keeping its evidence shape (the
+request alone is 3-25k characters and is not an effect), and returning only an
+acknowledgement (the Coordinator would need `get_project_assignment` again for
+the revisions a rework or dependency pin copies and for the delivery state).
+
+### A repeated Stop of an ended attempt does not withdraw later work
+
+Problem: `abort_attempt` withdrew the whole conversation's dispatch even when
+the attempt had already settled. A human Stop of an ended turn therefore planted
+a NEW watermark dated at the retry, revoking every earlier grant in that
+conversation — including grants created after the original Stop. The 11/06
+`dispatch_grant_revoked` investigation of assignment 4143b9a2 did not come from
+this path: that grant was revoked by its own Coordinator's
+`cancel_project_work` at 07:49:59 CST (turn acd247ee, attempt 32ac97a5), so the
+background-delivery verdict was correct. But the mechanism remains a real
+authority hazard, and `control_session`'s stop branch already refuses it.
+
+Decision: the withdrawal is dated at the attempt's settlement (`settledAt`,
+falling back to `createdAt`, else epoch 0), never at the retry. The original
+withdrawal is still retired — the watermark record keeps the maximum timestamp
+and the revocation pass still runs — but it never moves forward to withdraw
+grants created after the human's Stop. Live attempts are unchanged: their Stop
+is dated now, before the executor is signalled.
+
+Alternatives rejected: skipping the withdrawal entirely on a terminal retry
+(would strand the original pending revocation, contradicting the recovery
+contract that a repeated Stop retires it), and using the attempt's `createdAt`
+only (a long-running attempt would misdate its own Stop).
+
+Specifications: `tests/project_mod/test_project_dispatch_recovery.py`
+(`test_stop_of_an_ended_attempt_never_withdraws_later_work`,
+`test_terminal_attempt_stop_reuses_the_original_watermark`, and the existing
+Stop-watermark suites).
+
+### Delegated Workers and outside-workspace writes (proposal, not implemented)
+
+Problem: on 2026-11-06 three delegated project Workers set
+`allow_outside_workspace=true` and registered a new workspace root (`tofu_2`),
+and a fourth did so on `interview-materials` after a refusal. The flag's
+contract requires the USER's explicit confirmation of the exact destination.
+A delegated Worker's input is delegated context, so it cannot carry that
+confirmation: the Worker cannot distinguish "the human said write here" from
+"the Coordinator's brief says write here". Today nothing in the write path
+knows the caller is a delegated Worker, so the flag is accepted verbatim.
+
+Decision (proposed, awaiting owner approval; no code changed): a delegated
+Worker (a task whose config carries `_projectDispatchAdmission`, including a
+Coordinator continuation and its swarm children) may not use
+`allow_outside_workspace=true` to register a new workspace root. The write is
+refused with an instructive error naming the boundary: write inside the
+registered isolated workspace, use `/tmp` for scratch (which stays exempt), or
+have the owner write there directly. Detection uses the existing admission
+carrier in the task config at the write-path owner
+(`lib/project_mod/write_tools/_paths.py`), reached through the same
+`tool_admission_scope` the file-scope admission already uses, so it covers
+write_file/edit_file/apply_diff/insert and the MCP local-path adapter without
+changing the file-grant scoped path, which never consults the flag. The tool
+schema description stays truthful for humans; the refusal names why the flag
+cannot apply to this caller.
+
+Alternatives considered:
+- Record an owner confirmation in the Worker's grant and accept the flag only
+  when the grant names the exact destination. Rejected for now: the only owner
+  delegation grant that exists (`lib/lifecycle_approval.DELEGATION_SCOPES`)
+  covers restart/conversation_control, and docs/ROUTER.md R9 requires a new
+  owner decision to add an operation; the router-grant lane also notes that a
+  tool-level human confirmation is a different boundary, and the grantee there
+  is the owner's Router, never Workers. This remains the right shape if the
+  owner later wants a per-destination approval flow, and would then be an
+  explicit new grant kind with the destination path in its scope, not a flag.
+- Refuse only the root registration but still write the file. Rejected: the
+  write is the side effect the confirmation exists for; the root is merely how
+  the workspace records it.
+- Do nothing and rely on the briefs. Rejected: it already happened four times.
+
+### One dispatch head per owner and project (measurement and proposal)
+
+Problem: every dispatch write commits against one CAS head per owner and
+project (`ProjectDispatchRepository._change` committing through
+`SegmentedDispatch.commit`), including every Worker's
+model and tool records, reservations, delegations, bindings, reviews and
+revocations. Since the contention fix (live 14:54 CST 2026-11-06) losers wait
+instead of dying, so with about 20 Workers the head serializes the project.
+
+Measurement (2026-11-06, an ad-hoc count of the `[AgentPersistence]` wait and
+completion lines and the contention verdicts in `logs/app.log*`; the script is
+not part of the repository): before the fix
+there were 15 authority stops by contention and 16 'read before retrying'
+verdicts. After the fix: 30 contended Worker model-occurrence calls (median
+2.2 s, p90 8.2 s, max 70 s), 19 tool occurrences (median 2.9 s), 17 tool
+reservations (median 1.8 s), and 10 Coordinator delegations whose waits
+dominated: median 517 s, p90 608 s, max 739 s, about 72 minutes of Coordinator
+wall time over 1 h 40 m. The delegation path re-reads a whole cohort per
+attempt, so a busy head tears almost every snapshot; the Worker's own
+single-assignment writes are two orders of magnitude shorter.
+
+Proposal (report only; not implemented): keep one head for cross-assignment
+invariants, but stop making every per-assignment ledger write depend on it.
+Concretely, an occurrence/reservation commit for one assignment would commit
+against that assignment's own document version (and, where a new document is
+created, an assignment-scoped sequence) instead of the project head, while the
+project head still fences multi-document reads, delegation, review, revocation
+and migration. Invariants that must hold on every backend (TofuDB, SQLite,
+Postgres): (a) a multi-document read's snapshot witness still covers every row
+it reads, so per-assignment writes must advance some witness the reader checks;
+(b) revocation and review still linearize with the assignment's own document,
+so a contended per-assignment write can never resurrect a revoked grant;
+(c) the head's `nextSequence`, counts and allowance indexes stay exact, which
+is the part that forces either an assignment-scoped sequence or a head write
+on document creation; (d) the SQL and native authorities implement the same
+commit contract, so this is a storage-contract change, not only a repository
+one. Because (c) and (d) span owners and both storage backends, this stays a
+proposal until that contract is agreed; the contention fix above removes the
+kills in the meantime.
 
 ### Dispatch authority stop causes
 
@@ -2129,9 +2802,10 @@ immutable and its accounts append-only), so one validation loads and
 schema-validates the budget document once instead of twice. The association
 is immutable once bound and binding precedes executor birth; request and profile
 are immutable through `mutate`; so a reread or second validation of the same state
-returns the same row. The row serves only that decision: descriptor I/O, the tool
-and model intent observers, the next admission and publication each validate live
-again. A change committed between the former first and second validation was
+returns the same row. The row serves only that admission (a tool batch shares it
+with its calls' gates; see the next section): descriptor I/O, the tool and model
+intent fences, the next admission and publication each validate live again. A
+change committed between the former first and second validation was
 refused by the second; it is now refused by the next live fence before any effect,
 the same outcome as a change committed just after the former second validation.
 Alternatives rejected: retaining validated rows or verdicts across admissions or
@@ -2149,6 +2823,86 @@ CPU of 17.5 instead of 7.4 ms. These are host observations of one component.
 ten authority faults in every mode (the former admission passed the same table),
 and that one decision reads exactly one validation's ports plus the bound executor,
 with a row equal to a fresh validation and reread.
+
+### One live validation per tool-batch admission
+
+Problem: 2026-11-07/08 `[RoundPrepTiming]` records charged project Workers p50
+904 ms and p90 1.8 s of `build_body.tool_metadata` per round (ordinary chats p50
+54 ms): `coordinator_scope` validated the Worker's grant and validated it again
+through `current_continuation` on every round to learn a role the grant fixes for
+its lifetime. Tool calls repeated the pattern: incident phase records show
+`dispatch_authority` eight times per call in 257 of 313 slow tool calls (417 s).
+Batch admission, the pipeline and executor role checks, the executor admission,
+the file-handler selection, both tool-intent checks and each nested handler
+scope validated live, each reading the dispatch record, three Stop watermarks,
+the binding twice, both conversations, both source Turns, the delegation attempt,
+the bound executor and the registered checkout. Both intent checks ran under the
+ExecutionBudget lock, so they serialized the concurrent calls of one batch.
+
+Decision: validate once per admission and keep one live fence per effect.
+
+- Request building reads no dispatch storage. `bind_account` pins the role of
+  the grant it validated (`_projectDispatchRole`: that carrier and, for a
+  Coordinator continuation, the scope from immutable request/grant fields);
+  `coordinator_scope` returns it after checking the carrier is unchanged (a
+  lost carrier still stops the task). Live authority stays where effects are
+  admitted: every model request's dispatch intent (validation, intent CAS with
+  its revocation check, validation) and tool admission below. A revocation
+  between rounds is refused by the next round's model dispatch intent, before
+  any provider sees the request, with the same stop cause as before.
+- A tool batch is one admission. `_admit_dispatch_tool_calls` validates once
+  (`admission.admit_dispatch` → `DispatchAdmission`), decides every call from it
+  and hands it to its calls' executors (`_execute_tool_one(dispatch_admission=)`).
+  `admitted_call` makes it the call scope, so the executor admission, the
+  file-handler selection, the intent's pre-check and every nested `tool_scope`
+  decide from it: `validated_dispatch(admission=)` reruns only the in-memory
+  carrier, identity, execution and account fences, and the admission resolves
+  the registered checkout at most once. A caller without a batch (streaming
+  prefetch, a direct executor call) validates once per call and shares it the
+  same way. An admission is never stored on a task or used by another batch.
+- Each call's tool intent remains its effect fence. The intent CAS refuses a
+  revoked or revised grant against the authoritative row it writes (exact
+  invalidation keyed to the grant revision, as model intents already do), and
+  one live validation follows the durable intent before the handler runs, at
+  the same point as the former second intent check. A refusal there settles the
+  intent `not_entered`. Descriptor I/O, model intents and every later batch
+  still validate live.
+
+The effect fence cannot share the batch's validation: the verdict depends on
+evidence the dispatch record does not own. A Coordinator Stop whose grant
+revocation lost its CAS is witnessed only by its Stop watermark; the binding
+epoch, the source Turns, both conversations, the bound executor's attempt and
+the registered checkout have their own owners. No authoritative revision covers
+them together, so sharing up to the effect would need a TTL or count (excluded)
+or a storage-contract change that makes each owner advance one witness, and a
+call waiting behind an ordered sibling would start after an acknowledged
+withdrawal. The intent CAS invalidates exactly what the record owns at no extra
+read; the rest is read once, at the latest point before the effect.
+
+Read counts on the injected storage fakes (`record` covers the dispatch record
+and Stop watermarks; every port read counted): request building per round, a
+Worker 23 → 0 and a Coordinator continuation 33 → 0; one tool batch of one
+`read_files` call 143 → 29 reads, of three calls 429 → 59 (one validation per
+batch and per call, plus one checkout read per batch; ledger writes unchanged at
+two per call); one streamed (prefetched) project read 51 → 14. Each saved
+validation is about thirteen reads, and the intent holds the ExecutionBudget
+lock for one validation instead of two.
+
+Alternatives rejected: a TTL or round/batch verdict cache (a revocation, Stop,
+rebinding or source change must reach the next admission; owner decision above);
+keying a shared verdict on the dispatch head or assignment revision alone (blind
+to the evidence listed above); dropping the intent's live validation (it fences
+the effect); keeping the pre-intent validation instead of the post-intent one
+(a change committed during the intent CAS would no longer be refused); a
+process-local revocation signal (the API and execution hosts do not share it).
+Specification: `tests/project_mod/test_project_dispatch_admission_once.py`
+(zero reads and unchanged role decisions per round; a removed carrier stops
+request building; revocation between rounds; exact batch and prefetch reads; and for a
+revoked, durably stopped, rebound, source-changed, settled, superseded,
+workspace-discarded or carrier-less grant both refusal at the next batch
+admission and refusal before any handler when committed after a batch's
+admission, with the former per-gate revalidation's stop cause; these decision
+specifications pass unchanged on the former code).
 
 ### Stored-row schema verdicts and metadata Turn reads
 
@@ -2174,7 +2928,7 @@ value that differs from its decoded canonical JSON (a tuple or a non-string key
 encodes like a list or string key but validates differently) is always walked.
 Retention is one digest per row identity the process has checked, replaced on
 change, with no size, age or flag; mutation checks reuse it for their unchanged
-rows. Caller-supplied request, batch, source, profile, admission and Stop
+rows. Caller-supplied request, batch, source, admission and Stop
 validation, the derived admission projection, the finite JSON checks and every
 ownership, occurrence, budget, graph, Stop, binding and source check still run on
 every read: the memo states only that exact stored content is well-formed and
@@ -2201,6 +2955,20 @@ the walk; changed, invalid, tuple-valued and other-definition rows are walked),
 `test_coordinator_workers.py` (source and background-completion reads),
 `test_project_dispatch_dependencies.py::test_publication_validation_reads_the_result_turn_as_metadata`
 and `test_turn_lifecycle.py::test_resume_model_switch_reads_the_submitted_turn_as_metadata`.
+
+Profile validation follows the same rule (2026-11-08). `scope.validate_profile` runs on
+every tool admission, admission projection and dispatch ledger write (`profile_for`) and
+for every assignment on every load; its repeated schema walk was about 5% of the
+execution host's GIL samples on 2026-11-08. The walk and its path/tool checks are a
+pure function of the JSON value, so the process keeps the digest of each exact profile
+content it proved valid (`_VALID_PROFILE_DIGESTS`, canonical JSON, the stored-row
+exactness rule) and returns a fresh decoded copy for equal content. Any other content,
+including a caller's not seen before, is walked, and content that fails is never
+remembered; retention is one digest per distinct valid profile, with no size, age or
+flag. Same benchmark, fresh-process ABAB medians: 82.2/82.1 -> 45.0/45.2 ms with
+unchanged rows and 88.1/88.0 -> 50.5/50.4 ms with one advanced row; one 36-tool project
+profile 490-512 -> 16 microseconds per call. Specification:
+`test_project_dispatch_scope.py::test_profile_content_walks_its_schema_once_and_invalid_content_never_passes`.
 
 ## Atomic bounded conversation batches
 
@@ -2329,11 +3097,16 @@ DEBUG only. Decision: under the publication lock, after `validate_publication`,
 the service asks `release_publication_hold` to rerun the same live fence for
 that exact receipt; a cleared hold becomes `pending`, which views and waits
 report as delivery in progress. The receiver still publishes and rechecks every
-fence, and a failed release leaves the hold to its next pass. A hold that starts
-or changes reason logs its cause once at WARNING. Alternatives rejected:
-reading the pin's time against the receipt in the view (an unchanged later
-refusal never rewrites the receipt, so it would read as pending forever) and
-logging every retry (one line per held row per pass). Specs:
+fence, and a failed release leaves the hold to its next pass. A fail-closed hold
+names its hidden cause at WARNING once per process, and again whenever the cause
+changes or the hold clears and returns. Keying on the reason code alone missed
+holds already stored before a restart and a new cause under the same code. The
+process keeps the last logged cause per held row, and a row drops out once its
+check no longer fails closed. Alternatives rejected: reading the pin's time
+against the receipt in the view (an unchanged later refusal never rewrites the
+receipt, so it would read as pending forever); logging every retry (one line per
+held row per pass); persisting the cause in the receipt (a new durable receipt
+field and a write per cause change, only to deduplicate a log line). Specs:
 `test_publication_pin_retires_the_stale_hold_without_publishing` and the pin
 and cause cases in `test_coordinator_publication_recovery.py`.
 
@@ -2420,9 +3193,10 @@ PostgreSQL and native authorities) are the executable specifications.
 
 Each active configured project round performs scoped metadata and one head point
 read, plus the pending index and the segments of eligible pending originals once
-segments are sealed; never an owner-wide scan. A directory shows 20 previews of
-256 characters with a stable-ID backward cursor across segments; exact-ID tool
-lookup retrieves the original. Input selection defers whole messages using
+segments are sealed; never an owner-wide scan. A directory shows up to 20
+previews of 256 characters, keeping the newest that reach the model inline, with
+a stable-ID backward cursor across segments; exact-ID tool lookup retrieves the
+original. Input selection defers whole messages using
 token/headroom and escaped-byte budgets. Final canonical prompt admission still
 owns total cost. Idle adds no executor.
 

@@ -11,7 +11,11 @@ DB, cleaned up after):
   2. STRICT ACCOUNTING: summary buckets are a disjoint partition — they
      sum EXACTLY to totalMs; gaps + covered = the turn interval.
   3. TTFT: waiting_model → first delta; a tool_start settles a tokenless
-     round's TTFT candidate.
+     round's TTFT candidate. An attempt that fails (or is retried) before
+     its first token is a failed attempt (``failedAttemptMs``); the retry's
+     window opens at the next attempt's start. A window whose first token
+     was never observed ends at its request/round and is neither; the
+     dispatcher's measured first-token offset outranks a late/lost delta.
   4. Retry coalescing: N ``retrying`` beats = ONE wait span (latest
      attempt kept); the wait bucket beats the llm bucket on overlap
      (429 time is wait, not model time).
@@ -246,7 +250,307 @@ def test_retry_beats_coalesce_and_outrank_llm():
         # The llm window [0, 25000] minus the 19s wait = 6s of model time:
         # a 429 stall is NEVER billed to the model bucket.
         assert s['llmMs'] == 6000
+        # The first retry ends the attempt's first-token window as a failed
+        # attempt; without an observed attempt start no TTFT is claimed.
+        (window,) = _spans(doc, 'llm_ttft')
+        assert (window['tStart'], window['tEnd']) == (_T0 + 100, _T0 + 1000)
+        assert window['status'] == 'error'
+        assert window['attrs']['failedAttempt'] is True
+        assert window['attrs']['statusCode'] == 429
+        assert (s['ttftMs'], s['failedAttemptMs']) == (0, 900)
         _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def _attempt(offset, span_id, attempt, *, parent='model:task:4', **fields):
+    """One dispatcher attempt boundary, shaped like stream_llm_response's."""
+    kind = 'model_request_complete' if fields else 'model_request_start'
+    return (kind, offset, {
+        'spanId': span_id, 'parentSpanId': parent, 'roundNum': 4,
+        'requestTag': 'R4', 'requestLevel': 'provider_attempt',
+        'attemptScope': 'dispatcher', 'attempt': attempt,
+        'model': 'kunlunbedrock.claude-opus-5.5-m17', **fields})
+
+
+_SINGLE_DISPATCH = {'providerDispatches': 1, 'droppedEvents': 0,
+                    'deliveryFailures': 0, 'flushIncomplete': False,
+                    'diagnosticFailures': 0}
+
+
+def test_gateway_504_then_retry_splits_the_failed_attempt_from_ttft():
+    """55f61236 R4: a 2,000 s gateway hold ending in HTTP 504, a 344 ms
+    backoff, then a retry whose own first token took ~11 s. Only the retry's
+    wait is TTFT; the hold is a failed attempt. Buckets do not change."""
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 3}),
+        ('model_request_start', 100, {
+            'spanId': 'model:task:4', 'roundNum': 4, 'requestTag': 'R4',
+            'requestLevel': 'logical', 'model': 'claude-opus-5.5'}),
+        ('phase', 101, {'phase': 'waiting_model',
+                        'detailKey': 'stream.phase.waitingForModel'}),
+        _attempt(113, 'provider:1', 1),
+        ('phase', 20_000, {'phase': 'waiting_model',
+                           'detailKey': 'stream.phase.waitingForResponse'}),
+        _attempt(2_000_441, 'provider:1', 1, status='failed', statusCode=504,
+                 errorKind='RateLimitError', durationMs=2_000_328),
+        ('phase', 2_000_445, {'phase': 'retrying', 'attempt': 1, 'statusCode': 504,
+                              'detailKey': 'stream.phase.retryGateway'}),
+        _attempt(2_000_789, 'provider:2', 2),
+        ('phase', 2_005_000, {'phase': 'waiting_model',
+                              'detailKey': 'stream.phase.waitingForResponse'}),
+        # The coalesced delta lands 55 ms after the dispatcher's first output.
+        ('delta', 2_011_900, {}),
+        _attempt(2_013_641, 'provider:2', 2, status='succeeded',
+                 finishReason='tool_calls', durationMs=12_852),
+        ('model_request_complete', 2_013_648, {
+            'spanId': 'model:task:4', 'roundNum': 4, 'requestTag': 'R4',
+            'requestLevel': 'logical', 'status': 'succeeded',
+            'finishReason': 'tool_calls', 'durationMs': 2_013_548,
+            'observerIsolation': _SINGLE_DISPATCH}),
+        ('round_usage', 2_013_649, {
+            'roundNum': 4, 'tag': 'R4', 'model': 'claude-opus-5.5',
+            'tokensIn': 10, 'tokensOut': 5,
+            'usage': {'request_span_id': 'model:task:4', 'request_dispatch_seq': 1,
+                      'stream_elapsed_ms': 12_777, '_response_headers_ms': 950,
+                      '_dispatch': {'ttft_ms': 11_056.322, 'latency_ms': 12_853,
+                                    'ttft_measurement': 'measured'}}}),
+        ('round_end', 2_013_700, {'roundNum': 3, 'reason': 'final'}),
+        ('done', 2_013_700, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        failed, ttft = _spans(doc, 'llm_ttft')
+        assert (failed['tStart'], failed['tEnd']) == (_T0 + 101, _T0 + 2_000_441)
+        assert failed['status'] == 'error' and failed['parent'] == 'r3.llm'
+        assert {key: failed['attrs'].get(key) for key in (
+            'failedAttempt', 'statusCode', 'detailKey', 'errorKind')} == {
+            'failedAttempt': True, 'statusCode': 504,
+            'detailKey': 'stream.phase.retryGateway', 'errorKind': 'RateLimitError'}
+        (wait,) = _spans(doc, 'retry_wait')
+        # The retried attempt's start ends the backoff and opens its window.
+        assert (wait['tStart'], wait['tEnd']) == (_T0 + 2_000_445, _T0 + 2_000_789)
+        assert ttft['tStart'] == wait['tEnd'] and ttft['attrs']['attempt'] == 2
+        # The dispatcher's measured offset from that start beats the delta.
+        assert ttft['tEnd'] == _T0 + 2_000_789 + 11_056
+        assert ttft['status'] == 'done'
+        assert ttft['attrs']['firstTokenSource'] == 'dispatch'
+        assert not ttft.get('truncated') and 'failedAttempt' not in ttft['attrs']
+        s = doc['summary']
+        assert (s['ttftMs'], s['failedAttemptMs']) == (11_056, 2_000_340)
+        assert (s['retryWaitMs'], s['waitMs']) == (344, 344)
+        assert s['llmMs'] == s['totalMs'] - 344 - s['orchestrationMs']
+        (llm,) = [span for span in _spans(doc, 'llm') if span['parent'] == 'r3']
+        assert llm['attrs']['attempts'][0]['responseHeadersMs'] == 950
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_task_level_retry_opens_the_next_window_at_the_next_request():
+    """A logical request that fails before its first token is a failed
+    attempt; the next request's start (which ends the retry wait) opens the
+    retry's window, not its later waiting_model beat."""
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('model_request_start', 100, {'spanId': 'model:t:1', 'roundNum': 1}),
+        ('phase', 150, {'phase': 'waiting_model'}),
+        ('model_request_complete', 5_100, {
+            'spanId': 'model:t:1', 'status': 'failed',
+            'errorKind': 'PrematureStreamClose'}),
+        ('phase', 5_200, {'phase': 'retrying', 'attempt': 1,
+                          'detailKey': 'stream.phase.retryGeneric'}),
+        ('model_request_start', 6_000, {'spanId': 'model:t:2', 'roundNum': 1}),
+        ('phase', 6_100, {'phase': 'waiting_model'}),
+        ('delta', 6_500, {}),
+        ('model_request_complete', 9_000, {'spanId': 'model:t:2',
+                                           'status': 'succeeded'}),
+        ('round_end', 9_100, {'roundNum': 1, 'reason': 'final'}),
+        ('done', 9_100, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        failed, ttft = _spans(doc, 'llm_ttft')
+        assert (failed['tStart'], failed['tEnd'], failed['status']) == (
+            _T0 + 150, _T0 + 5_100, 'error')
+        assert failed['attrs']['errorKind'] == 'PrematureStreamClose'
+        assert failed['attrs']['detailKey'] == 'stream.phase.retryGeneric'
+        assert (ttft['tStart'], ttft['tEnd'], ttft['status']) == (
+            _T0 + 6_000, _T0 + 6_500, 'done')
+        assert (doc['summary']['ttftMs'], doc['summary']['failedAttemptMs']) == (
+            500, 4_950)
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_retry_inside_an_open_attempt_keeps_its_first_token_window():
+    """Network recovery waits before the attempt's send, inside the attempt:
+    the attempt did not fail, so its window runs to the first token."""
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 3}),
+        ('model_request_start', 100, {'spanId': 'model:task:4', 'roundNum': 4}),
+        ('phase', 101, {'phase': 'waiting_model'}),
+        _attempt(110, 'provider:1', 1),
+        ('phase', 1_000, {'phase': 'retrying', 'attempt': 0, 'statusCode': 0,
+                          'detailKey': 'stream.phase.retryCooldownWait'}),
+        ('phase', 4_000, {'phase': 'retrying', 'attempt': 0, 'statusCode': 0,
+                          'detailKey': 'stream.phase.connectingModel'}),
+        ('delta', 6_000, {}),
+        _attempt(7_000, 'provider:1', 1, status='succeeded'),
+        ('model_request_complete', 7_010, {'spanId': 'model:task:4',
+                                           'status': 'succeeded'}),
+        ('round_end', 7_100, {'roundNum': 3, 'reason': 'final'}),
+        ('done', 7_100, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        (window,) = _spans(doc, 'llm_ttft')
+        assert (window['tStart'], window['tEnd'], window['status']) == (
+            _T0 + 101, _T0 + 6_000, 'done')
+        (wait,) = _spans(doc, 'retry_wait')
+        assert (wait['tStart'], wait['tEnd']) == (_T0 + 1_000, _T0 + 6_000)
+        assert doc['summary']['failedAttemptMs'] == 0
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_storage_wait_beat_is_not_an_attempt_failure():
+    """A retrying beat that names no retry attempt (the persistence wait
+    hint) is a wait, not the end of an attempt."""
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 3}),
+        ('model_request_start', 100, {'spanId': 'model:task:4', 'roundNum': 4}),
+        ('phase', 101, {'phase': 'waiting_model'}),
+        ('phase', 200, {'phase': 'retrying', 'detail': 'Waiting for storage'}),
+        _attempt(3_000, 'provider:1', 1),
+        ('delta', 5_000, {}),
+        _attempt(6_000, 'provider:1', 1, status='succeeded'),
+        ('model_request_complete', 6_010, {'spanId': 'model:task:4',
+                                           'status': 'succeeded'}),
+        ('round_end', 6_100, {'roundNum': 3, 'reason': 'final'}),
+        ('done', 6_100, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        (window,) = _spans(doc, 'llm_ttft')
+        assert (window['tStart'], window['tEnd'], window['status']) == (
+            _T0 + 101, _T0 + 5_000, 'done')
+        (wait,) = _spans(doc, 'retry_wait')
+        assert (wait['tStart'], wait['tEnd']) == (_T0 + 200, _T0 + 3_000)
+        assert doc['summary']['failedAttemptMs'] == 0
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def _lost_delta_round(usage=None, isolation=_SINGLE_DISPATCH):
+    events = [
+        ('round_start', 0, {'roundNum': 3}),
+        ('model_request_start', 100, {'spanId': 'model:task:4', 'roundNum': 4}),
+        ('phase', 101, {'phase': 'waiting_model'}),
+        _attempt(110, 'provider:1', 1),
+        # Its deltas were never delivered (event-store outage).
+        _attempt(8_000, 'provider:1', 1, status='succeeded'),
+        ('model_request_complete', 8_010, {
+            'spanId': 'model:task:4', 'status': 'succeeded',
+            'observerIsolation': isolation}),
+    ]
+    if usage is not None:
+        events.append(('round_usage', 8_011, {'roundNum': 4, 'tag': 'R4',
+                                              'usage': usage}))
+    return events + [
+        ('round_end', 8_100, {'roundNum': 3, 'reason': 'tools'}),
+        ('round_start', 9_000, {'roundNum': 4}),
+        ('phase', 9_100, {'phase': 'waiting_model'}),
+        ('delta', 10_000, {}),
+        ('round_end', 12_000, {'roundNum': 4, 'reason': 'final'}),
+        ('done', 12_000, {'finishReason': 'stop'}),
+    ]
+
+
+_MEASURED_3S = {'request_span_id': 'model:task:4',
+                '_dispatch': {'ttft_ms': 3_000.4, 'ttft_measurement': 'measured'}}
+
+
+@pytest.mark.parametrize('usage, isolation, expected', [
+    # No first-token evidence: the request's own end bounds the window.
+    (None, _SINGLE_DISPATCH, (8_010, 'unknown', True, 900)),
+    # The dispatcher measured the settled attempt's first output.
+    (_MEASURED_3S, _SINGLE_DISPATCH, (3_110, 'done', False, 3_009 + 900)),
+    # Two dispatches: the last attempt need not be the measured one.
+    (_MEASURED_3S, {**_SINGLE_DISPATCH, 'providerDispatches': 2},
+     (8_010, 'unknown', True, 900)),
+    # Lost observer events: the attempt list may be incomplete.
+    (_MEASURED_3S, {**_SINGLE_DISPATCH, 'droppedEvents': 1},
+     (8_010, 'unknown', True, 900)),
+    # An upper bound is not a measurement.
+    ({**_MEASURED_3S, '_dispatch': {
+        'ttft_ms': 7_890, 'ttft_measurement': 'unobserved_stream_upper_bound'}},
+     _SINGLE_DISPATCH, (8_010, 'unknown', True, 900)),
+])
+def test_lost_deltas_close_the_window_at_its_request_complete(
+        usage, isolation, expected):
+    tid = _tid()
+    _seed(tid, _lost_delta_round(usage, isolation))
+    t_end, status, unobserved, ttft_ms = expected
+    try:
+        doc = _fold(tid)
+        first, second = _spans(doc, 'llm_ttft')
+        assert (first['tStart'], first['tEnd'], first['status']) == (
+            _T0 + 101, _T0 + t_end, status)
+        assert bool(first.get('truncated')) is unobserved
+        assert bool(first['attrs'].get('firstTokenUnobserved')) is unobserved
+        assert (second['tStart'], second['tEnd']) == (_T0 + 9_100, _T0 + 10_000)
+        # An unobserved first token is neither TTFT nor a failed attempt.
+        assert (doc['summary']['ttftMs'], doc['summary']['failedAttemptMs']) == (
+            ttft_ms, 0)
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_window_without_first_token_evidence_ends_at_its_round():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('phase', 100, {'phase': 'waiting_model'}),
+        ('round_end', 5_000, {'roundNum': 1, 'reason': 'tools'}),
+        ('round_start', 6_000, {'roundNum': 2}),
+        ('phase', 6_100, {'phase': 'waiting_model'}),
+        # Event delivery fails here; the terminal lands hours later.
+        ('done', 30_006_000, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        first, second = _spans(doc, 'llm_ttft')
+        assert (first['tEnd'], first['status'], first['truncated']) == (
+            _T0 + 5_000, 'unknown', True)
+        assert second['tEnd'] == _T0 + 30_006_000 and second['truncated'] is True
+        assert second['attrs']['firstTokenUnobserved'] is True
+        assert (doc['summary']['ttftMs'], doc['summary']['failedAttemptMs']) == (0, 0)
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_running_snapshot_keeps_the_open_window_running():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('phase', 100, {'phase': 'waiting_model'}),
+    ])
+    try:
+        doc = _fold(tid, now_ms=_T0 + 5_000)
+        (window,) = _spans(doc, 'llm_ttft')
+        assert (window['tEnd'], window['status']) == (_T0 + 5_000, 'running')
+        assert not window.get('truncated')
+        assert doc['summary']['ttftMs'] == 4_900
     finally:
         _cleanup(tid)
 
@@ -1062,7 +1366,7 @@ def test_admission_wait_is_a_tool_child_that_ends_at_admission():
         assert s['toolMs'] == 100 + 1000  # announce sliver + post-admission run
         assert set(s) == {'totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
                           'approvalWaitMs', 'flowStepMs', 'orchestrationMs',
-                          'unattributedMs', 'ttftMs', 'overBudget',
+                          'unattributedMs', 'ttftMs', 'failedAttemptMs', 'overBudget',
                           'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
                           'startupMs', 'roundPrepMs', 'roundSettleMs', 'finalizeMs'}
         _assert_strict_accounting(doc)
@@ -1205,6 +1509,7 @@ def test_terminal_settlement_logs_one_summary_line_from_the_frozen_fold(caplog):
     tid = _tid()
     _seed(tid, [
         ('round_start', 0, {'roundNum': 1}),
+        ('phase', 40, {'phase': 'waiting_model'}),
         ('phase', 100, {'phase': 'retrying', 'attempt': 1}),
         ('delta', 400, {}),  # first output ends the backoff
         ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
@@ -1236,10 +1541,13 @@ def test_terminal_settlement_logs_one_summary_line_from_the_frozen_fold(caplog):
         assert fields['status'] == 'done' and fields['rounds'] == '2'
         for key in ('totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
                     'approvalWaitMs', 'unattributedMs', 'ttftMs', 'flowStepMs',
-                    'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs'):
+                    'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
+                    'failedAttemptMs'):
             assert int(fields[key]) == summary[key], key
         assert int(fields['admissionWaitMs']) == 5_000
         assert int(fields['retryWaitMs']) == 300
+        # The retried attempt's pre-first-token wait, not first-token time.
+        assert (int(fields['failedAttemptMs']), int(fields['ttftMs'])) == (60, 0)
         assert int(fields['admissionWaitMs']) + int(fields['retryWaitMs']) \
             + int(fields['spawnWaitMs']) == summary['waitMs']
         assert list(fields)[:16] == [
@@ -1296,7 +1604,7 @@ def test_absolute_byte_fail_safe_keeps_every_aggregate_summary_field(monkeypatch
 
     summary = {'totalMs': 13, 'llmMs': 1, 'toolMs': 1, 'waitMs': 3, 'compactionMs': 1,
                'approvalWaitMs': 1, 'flowStepMs': 1, 'orchestrationMs': 4,
-               'unattributedMs': 1, 'ttftMs': 1,
+               'unattributedMs': 1, 'ttftMs': 1, 'failedAttemptMs': 1,
                'admissionWaitMs': 1, 'retryWaitMs': 1, 'spawnWaitMs': 1,
                'startupMs': 1, 'roundPrepMs': 1, 'roundSettleMs': 1, 'finalizeMs': 1,
                'overBudget': [{'spanId': 's', 'kind': 'tool', 'name': 'n',

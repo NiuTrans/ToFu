@@ -64,7 +64,6 @@ class TestParser:
         assert args['description'] == 'Update src/app.py'
         assert args['edits'] == [{
             'path': 'src/app.py',
-            'operation': 'replace',
             'anchor': 'def main():\n    old_call()\n    return 0',
             'content': 'def main():\n    new_call()\n    return 0',
         }]
@@ -101,12 +100,13 @@ class TestParser:
         assert args is None
         assert 'rename' in error
 
-    def test_anchorless_insertion_fails_with_insert_guidance(self):
+    def test_anchorless_insertion_fails_with_replace_guidance(self):
         patch = ('*** Begin Patch\n*** Update File: a.py\n@@\n'
                  '+brand_new_line\n*** End Patch\n')
         args, error = parse_codex_patch(patch)
         assert args is None
-        assert 'insert_after' in error
+        assert 'existing line' in error and '`anchor`' in error
+        assert 'insert_' not in error
 
     def test_truncated_patch_still_converts_complete_ops(self):
         patch = ('*** Begin Patch\n*** Update File: a.py\n@@\n'
@@ -171,7 +171,7 @@ class TestIngestIntegration:
 
     def test_json_edit_file_payload_untouched(self):
         payload = ('{"description": "d", "edits": [{"path": "a", '
-                   '"operation": "replace", "anchor": "x", '
+                   '"anchor": "x", '
                    '"content": "y"}]}')
         ingested = ingest_tool_call(
             {'function': {'name': 'edit_file', 'arguments': payload}},

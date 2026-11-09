@@ -54,6 +54,7 @@ logger = get_logger(__name__)
 __all__ = [
     'RESPONSES_PROFILES',
     'openai_body_to_responses',
+    'responses_reasoning_replay',
 ]
 
 #: Per-upstream dialect knobs. ``instructions=None`` → omit the field.
@@ -100,6 +101,43 @@ def _is_gpt_56(model: str) -> bool:
     """
     from lib.model_info._openai_gpt56 import is_official_gpt56_model
     return is_official_gpt56_model(model)
+
+
+def _legacy_feature_gates(body: dict, profile: str) -> tuple[bool, bool]:
+    """``(public, stateful)`` defaults for a caller without a route contract.
+
+    Preserve established stateless replay/cache for legacy callers. Public
+    extensions keep their separate gate; selected profiles stay closed-world.
+    The stateful fallback must ALSO stay closed-world: an EXPLICIT
+    compatible feature profile names a GENERIC Responses upstream (which
+    frequently rejects unknown OpenAI fields), so model-name inference may
+    never re-open replay/cache for it — the absent key keeps the
+    pre-route-features stateful gate, and the codex profile carries its own
+    replay/cache contract for codex models.
+    """
+    is_gpt_56 = _is_gpt_56(body.get('model', ''))
+    feature_profile = str(
+        body.get('_responses_feature_profile') or '').strip().lower()
+    public = is_gpt_56 and profile != 'codex' and feature_profile == 'openai'
+    stateful = (is_gpt_56 and (public or not feature_profile)) or profile == 'codex'
+    return public, stateful
+
+
+def responses_reasoning_replay(body: dict, *, profile: str = 'default') -> bool:
+    """Whether the Responses request for canonical ``body`` replays reasoning.
+
+    One decision binds both directions: the request asks for
+    ``reasoning.encrypted_content`` and resends stored items only when it is
+    true, and the response adapters retain ciphertext only when it is true.
+    Some gateways stream encrypted reasoning nobody asked for (the
+    your-llm-gateway.example.com Kunlun face); kept on a route that cannot send it back,
+    checked conversion refuses every later request as mandatory continuity.
+    """
+    from lib.llm.route_features import body_route_profile, route_feature
+    declared = route_feature(body_route_profile(body), 'responses_reasoning_replay',
+                             protocol='responses',
+                             oauth='codex' if profile == 'codex' else '')
+    return _legacy_feature_gates(body, profile)[1] if declared is None else declared
 
 
 def _add_stable_prefix_breakpoint(items: list[dict]) -> bool:
@@ -283,28 +321,16 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
 
     model = body.get('model', '')
     is_gpt_56 = _is_gpt_56(model)
-    feature_profile = str(
-        body.get('_responses_feature_profile') or '').strip().lower()
     from lib.llm.route_features import body_route_profile, route_feature
     selected = body_route_profile(body)
-    legacy_public = is_gpt_56 and profile != 'codex' and feature_profile == 'openai'
-    # Preserve established stateless replay/cache for legacy callers. Public
-    # extensions keep their separate gate; selected profiles stay closed-world.
-    # The stateful fallback must ALSO stay closed-world: an EXPLICIT
-    # compatible feature profile names a GENERIC Responses upstream (which
-    # frequently rejects unknown OpenAI fields), so model-name inference may
-    # never re-open replay/cache for it — the absent key keeps the
-    # pre-route-features stateful gate, and the codex profile carries its own
-    # replay/cache contract for codex models.
-    legacy_stateful = (is_gpt_56 and (
-        legacy_public or not feature_profile)) or profile == 'codex'
+    legacy_public, legacy_stateful = _legacy_feature_gates(body, profile)
 
     def supports(feature, legacy=legacy_public):
         declared = route_feature(selected, feature, protocol='responses',
                                  oauth='codex' if profile == 'codex' else '')
         return legacy if declared is None else declared
 
-    replay_enabled = supports('responses_reasoning_replay', legacy_stateful)
+    replay_enabled = responses_reasoning_replay(body, profile=profile)
 
     summary_enabled = supports(
         'responses_reasoning_summary', profile == 'codex' or legacy_public)
@@ -474,6 +500,8 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
 
     reverse: dict = tool_name_reverse(body)  # truncated tool name → original (response side restores)
 
+    from lib.llm_sanitize.lineage import ProjectionLineage
+    lineage = ProjectionLineage(body, 'responses_projection')
     out['input'] = _messages_to_input(
         body.get('messages') or [], reverse,
         wire_ids=wire_tool_call_ids(
@@ -483,6 +511,7 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
         replay_response_items=replay_enabled,
         allow_compaction=compaction_enabled,
         programmatic_tool_names=programmatic_names,
+        lineage=lineage,
         default_image_detail=(
             'original' if (supports('responses_image_detail')
                            and str(body.get('_image_detail') or '').lower()
@@ -528,6 +557,7 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
             report[f'{key}_omitted'] = 1
     if report:
         out['_conversion_report'] = report
+    lineage.finish(out)
     return out, reverse
 
 
@@ -578,7 +608,7 @@ def _messages_to_input(messages: list, reverse: dict, *,
                        replay_response_items: bool = False,
                        allow_compaction: bool = False,
                        programmatic_tool_names: set[str] | None = None,
-                       default_image_detail: str = '') -> list:
+                       default_image_detail: str = '', lineage=None) -> list:
     """OpenAI messages[] → Responses input[] items."""
     items: list = []
     ptc_names = programmatic_tool_names or set()
@@ -731,6 +761,9 @@ def _messages_to_input(messages: list, reverse: dict, *,
         elif role != 'assistant' or content_parts:
             items.append({'type': 'message', 'role': api_role,
                           'content': content_parts})
+            if lineage is not None:
+                lineage.emit(index, msg.get('content'), content_parts,
+                             message=len(items) - 1, region='input')
 
         # Current canonical calls, never captured executable shells.
         items.extend(function_calls)

@@ -29,6 +29,12 @@ from .repository import (
     RepositoryPort,
     StoredAuthority,
 )
+from .request_authority import (
+    RequestRoutingAuthority,
+    bind_request_routing_authority,
+    request_routing_repository,
+    share_request_routing_authority,
+)
 from .change_notifications import notify_model_routing_changed
 from .migration import (
     MigrationIssue,
@@ -85,6 +91,7 @@ __all__ = [
     "OwnerBoundary",
     "ProviderOfferingRef",
     "RepositoryPort",
+    "RequestRoutingAuthority",
     "RouteCandidate",
     "RouteCandidateCompiler",
     "RouteHealthRegistry",
@@ -102,6 +109,7 @@ __all__ = [
     "compile_model_fallback_candidates",
     "connection_urls",
     "build_discovered_provider_bundle",
+    "bind_request_routing_authority",
     "CapabilityRoute",
     "discovered_provider_id",
     "listed_model_count",
@@ -113,6 +121,8 @@ __all__ = [
     "parse_native_model_selection",
     "plan_legacy_migration",
     "public_projection",
+    "request_routing_repository",
+    "share_request_routing_authority",
     "legacy_route_snapshot",
     "mint_routed_slot_group",
     "list_capability_routes",

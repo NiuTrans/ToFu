@@ -814,16 +814,9 @@ def sync_search_config():
     Result counts, page sizes, timeouts and download limits are tofu-search's
     own defaults (``SearchConfig``); the host does not re-declare them.
     """
-    proxy_url = _resolve_proxy_url()
-    # The FULL global-pool failover chain behind the primary: a primary that
-    # dies mid-run (hk-gw tunnel-403, 2026-08-20) no longer empties search —
-    # tofu-search races the remaining entries + the direct path in parallel.
-    proxy_failover = []
-    try:
-        from lib.proxy import global_proxy_failover_urls
-        proxy_failover = [u for u in global_proxy_failover_urls() if u != proxy_url]
-    except Exception as e:
-        logger.debug('[Bridge] proxy failover list resolve failed: %s', e)
+    # HTTP and anonymous browser contexts resolve the current host policy at
+    # call time. Do not probe a canary or retain a second proxy failover chain.
+    proxy_url, proxy_failover = '', []
 
     # ── Pre-fetch relevance gate (tofu-search >=0.3.2) ──
     # These three knobs have NO env-var fallback inside tofu_search.configure(),
@@ -878,6 +871,7 @@ def sync_search_config():
         search_deadline_secs=search_deadline_secs,
         fetch_url_deadline_secs=fetch_url_deadline_secs,
         skip_domains=set(_lib.SKIP_DOMAINS),
+        fetch_skip_domains=set(_lib.FETCH_SKIP_DOMAINS),
         # The per-page LLM relevance gate stays off: measured verdicts dropped
         # the official docs a fetch asked for (5 of 7 judged irrelevant), and
         # each judged page cost a model call plus 1.5-3.6 s. Search output is
@@ -917,6 +911,11 @@ def sync_search_config():
         gateway_cfg = engine_settings((getattr(_lib, '_SAVED_CONFIG', None) or {}).get('search'))
         _cfg.update(gateway_cfg)
 
+    from lib.search.network_transport import (
+        requests_transport, httpx_client_factory, browser_proxy_resolver)
+    _cfg['requests_transport'] = requests_transport
+    _cfg['httpx_client_factory'] = httpx_client_factory
+    _cfg['browser_proxy_resolver'] = browser_proxy_resolver
     tofu_search.configure(**_cfg)
     effective = tofu_search.get_config()
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '

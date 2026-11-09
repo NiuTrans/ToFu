@@ -26,3 +26,8 @@ Run the repository test that owns the changed workflow, such as
 `tests/desktop/test_desktop_build_workflow.py`, `tests/server/test_mobile_client_apk_url.py`,
 or `tests/desktop_dist/test_installer_parity.py`. Inspect the rendered YAML diff and run the
 same repository script invoked by the affected job when locally available.
+
+`scripts/verification_scope.py` selects incremental or full CI qualification;
+`ci.yml` runs the shared candidate verifier and validates required job results.
+Scope and aggregation contracts live in `docs/TESTING_STRATEGY.md`; verify
+`tests/meta/test_ci_verification_scope.py` and `test_ci_results.py`.

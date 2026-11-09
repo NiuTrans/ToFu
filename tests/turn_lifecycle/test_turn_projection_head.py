@@ -82,7 +82,7 @@ def test_projection_head_folds_exact_revision_chain_and_reuses_cache():
         middle, current, base_revision=8, target_revision=9)
     session = _Session([_event(8, first), _event(9, second)])
     session.turn_projection_cache = TurnProjectionCache(
-        1024 * 1024, max_entries=4)
+        1024 * 1024)
     row = _row(base)
 
     assert projection_from_turn_row(session, row) == current
@@ -138,7 +138,7 @@ def test_materialized_settled_projection_does_not_consume_live_cache():
     row["status"] = "completed"
     session = _Session([])
     session.turn_projection_cache = TurnProjectionCache(
-        1024 * 1024, max_entries=4)
+        1024 * 1024)
 
     assert projection_from_turn_row(session, row) == projection
     assert session.turn_projection_cache.stats()["entries"] == 1
@@ -162,7 +162,7 @@ def test_settled_projection_reuses_revision_exact_cache_entry():
     row["status"] = "completed"
     session = _Session([])
     session.turn_projection_cache = TurnProjectionCache(
-        1024 * 1024, max_entries=4)
+        1024 * 1024)
 
     assert projection_from_turn_row(session, row) == projection
     assert session.turn_projection_cache.stats()["entries"] == 1

@@ -17,7 +17,11 @@ import threading
 import time
 from pathlib import Path
 
+from lib.git_runtime import GIT_STALL_SECONDS
 from lib.log import get_logger
+from lib.project_mod.activity_supervised_process import (
+    ACTIVITY_SAMPLE_SECONDS, process_tree_activity,
+)
 
 logger = get_logger(__name__)
 
@@ -57,12 +61,17 @@ def _drain_retired_output(fd: int, tail: bytearray, lock: threading.Lock) -> boo
 
 def run_worktree_add(argv: list[str], *, cwd: Path, env: dict[str, str],
                      pass_fds: tuple[int, ...] = (), cancellation=None,
-                     idle_timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
-    """A healthy large checkout may exceed 90s; a stalled checkout may not.
+                     idle_timeout: float = GIT_STALL_SECONDS) -> subprocess.CompletedProcess[str]:
+    """A healthy slow checkout may take any time; only a stalled one fails.
 
-    LC_ALL fixes Git's progress grammar. Only increasing completed-file counts
-    with an unchanged positive total renew the deadline. Hooks must be disabled
-    by the caller. No command is replayed after a timeout or ambiguous write.
+    LC_ALL fixes Git's progress grammar. The idle window renews on increasing
+    completed-file counts with an unchanged positive total, and whenever some
+    thread of the Git process tree executed (the activity evidence of
+    ``activity_supervised_process``). Registration prints no file counts, and
+    a checkout reads its tree before its first count; on a contended volume
+    either phase alone outlasted the window (2026-11-06, lane c7081533: "files
+    0/unknown"). Hooks must be disabled by the caller. No command is replayed
+    after a timeout or ambiguous write.
     """
     if not math.isfinite(idle_timeout) or idle_timeout <= 0:
         raise ValueError('Worktree idle timeout must be positive')
@@ -114,9 +123,17 @@ def run_worktree_add(argv: list[str], *, cwd: Path, env: dict[str, str],
     try:
         os.set_blocking(process.stdout.fileno(), False)
         reader.start()
+        observed = process_tree_activity(process.pid)
+        sampled = time.monotonic()
         while True:
             if cancellation is not None and cancellation.is_set():
                 raise RuntimeError('Task cancelled during workspace materialization')
+            if time.monotonic() - sampled >= ACTIVITY_SAMPLE_SECONDS:
+                sample, sampled = process_tree_activity(process.pid), time.monotonic()
+                if sample != observed:
+                    observed = sample
+                    with lock:
+                        last_progress = max(last_progress, sampled)
             with lock:
                 idle = time.monotonic() - last_progress
                 detail = bytes(tail).decode('utf-8', errors='replace')
@@ -124,8 +141,9 @@ def run_worktree_add(argv: list[str], *, cwd: Path, env: dict[str, str],
                 raise RuntimeError('Git worktree output reader failed') from reader_error[0]
             if idle >= idle_timeout:
                 raise RuntimeError(
-                    f'Git worktree materialization stalled for {idle_timeout:g}s '
-                    f'(files {completed}/{total or "unknown"}): {detail[-1000:]}')
+                    f'Git worktree materialization stalled for {idle_timeout:g}s: no '
+                    f'Git thread ran and no file completed (the checkout volume is '
+                    f'unresponsive; files {completed}/{total or "unknown"}): {detail[-1000:]}')
             try:
                 returncode = process.wait(timeout=min(0.2, idle_timeout - idle))
                 break

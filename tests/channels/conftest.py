@@ -16,6 +16,12 @@ ROUTER = 'router-conv'
 OWNER_UID = '1001'
 
 
+@pytest.fixture(autouse=True)
+def no_builtin_robot(monkeypatch, tmp_path):
+    """No channel test sees an Internal package's built-in robot file (C6); tests opt in with their own."""
+    monkeypatch.setattr('lib.channels.dx.robot.BUILTIN_CREDENTIAL_FILE', tmp_path / 'no-builtin-robot.json')
+
+
 class RecordClient:
     """In-memory ``record.*`` authority with the real CAS/list contract."""
 

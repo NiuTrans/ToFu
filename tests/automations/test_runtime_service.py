@@ -86,18 +86,28 @@ def test_application_installs_once_and_keeps_its_shutdown_owner(monkeypatch):
     assert calls == ['create', 'start', 'stop', 'create', 'start', 'stop']
 
 
-@pytest.mark.parametrize('role,expected', [('all', True), ('worker', True), ('api', False), ('scheduler', False)])
-def test_process_role_limits_worker_startup(monkeypatch, role, expected):
+@pytest.mark.parametrize('role,expected,serves_requests', [
+    ('all', True, True), ('worker', True, False), ('api', False, True), ('scheduler', False, False)])
+def test_process_role_limits_worker_startup(monkeypatch, role, expected, serves_requests):
+    from lib.conversation_sync import delivery_runtime
     from lib.durable_worker import runtime
     from lib.server import server_background_services
+    from lib.tasks_pkg import command_control_runtime
     import lib.integration_control as integration
     calls = []
+    request_services = []
     monkeypatch.setattr(runtime, 'ensure_workers_started', lambda *_, **__: calls.append('automation') or True)
     monkeypatch.setattr(integration, 'ensure_worker_started', lambda: False)
     monkeypatch.setattr(server_background_services,
                         'start_registered_background_services', lambda *_, **__: None)
+    # The owners a request-serving role starts beside its workers.
+    monkeypatch.setattr(command_control_runtime, 'configure',
+                        lambda *_, **__: request_services.append('command-control'))
+    monkeypatch.setattr(delivery_runtime, 'ensure_started',
+                        lambda *_: request_services.append('conversation-delivery') or True)
     server_background_services.start_background_services(
         SimpleNamespace(extensions={}), process_role=role,
         load_saved_proxy_config=lambda: None, bootstrap_personal_key=lambda: None,
         environ={'TOFU_AGENT_WORKERS': '2'})
     assert bool(calls) is expected
+    assert request_services == (['command-control', 'conversation-delivery'] if serves_requests else [])

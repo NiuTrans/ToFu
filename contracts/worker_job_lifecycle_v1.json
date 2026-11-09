@@ -56,18 +56,19 @@
       "suspended": "request cancellation, retain suspended state, wake immediately for domain settlement; never mark an active external effect terminal"
     },
     "worker_job.claim_next": {
-      "suspended": "same priority/availability order as queued jobs; new claim advances fencing token and attempt number"
+      "suspended": "same priority/availability order as queued jobs; new claim advances fencing token and attempt number",
+      "retainedAcknowledgement": "retain_claim=true requires an exact command ID and stores the acquisition ACK in the existing command receipt. A process-bound runner retains one identity/payload until ACK, then revalidates claim_state; the receipt alone never authorizes dispatch. Idle horizons create no receipt."
     }
   },
   "invariants": [
-    "Only a running claim with the matching owner/token and unexpired lease can emit progress or external effects.",
+    "Only a running claim with matching owner/token and current authority epoch may emit progress or effects. Process-bound claims retain ownership until proved process exit or explicit release; elapsed time alone never revokes them. Legacy opaque workers still require an unexpired lease.",
     "Suspension is durable nonterminal waiting. It holds no executor or heartbeat thread.",
     "Cancellation of a suspended job wakes domain settlement instead of completing unknown external effects.",
     "The canonical runner invokes a registered cancellation handler before terminal settlement when a domain requires cleanup.",
     "Terminal domain accounting settles before terminal worker-job accounting.",
     "Claim, defer, cancel and complete update every affected index in the same transaction.",
     "SQLite serializes the writer; PostgreSQL cancel, defer and automation progress hold the current worker row through commit; native OCC validates its current-job dependency.",
-    "Only the current backend epoch and backend-owned advancing clock prove or extend a live lease; delayed or forged caller clocks cannot revive one."
+    "Only the current backend epoch and backend-owned advancing clock prove legacy leases or schedule process liveness rechecks; caller clocks never grant ownership."
   ],
   "conversationPublication": {
     "operations": [
@@ -85,7 +86,7 @@
     },
     "atomic": "Validate the bound job, user, kind, attempt, live holder/token and backend lease epoch/time in the same transaction as publication. SQL holds the worker row until commit; native records its OCC dependency.",
     "missingOrStale": "database_conflict; no Turn, task event, replay or terminal accounting writes; omission cannot select legacy authority",
-    "cancelled": "Start is refused. A current claim may drain evidence and checkpoints only after durable startedAt proves entry; an unentered cancelled attempt permits terminal cleanup only. The initial tool_effect entered event without reconciliation is a new effect admission: reject it after cancellation inside Turn and standalone replay transactions, including terminal wrappers and batches. A previously admitted effect can still return or attach reconciliation evidence. Cancellation never revokes the obligation to commit received evidence. Lost or expired claims remain refused for every write.",
+    "cancelled": "Start is refused. A current claim may drain evidence and checkpoints only after durable startedAt proves entry; an unentered cancelled attempt permits terminal cleanup only. The initial tool_effect entered event without reconciliation is a new effect admission: reject it after cancellation inside Turn and standalone replay transactions, including terminal wrappers and batches. A previously admitted effect can still return or attach reconciliation evidence. Cancellation never revokes the obligation to commit received evidence. Lost claims and expired legacy claims remain refused for every write.",
     "flow": "Visible phases and their progress/terminal events borrow the immutable root attempt's worker claim; caller-supplied root hints never grant authority.",
     "batch": "Each entry carries the proof. Any refusal rolls back the entire batch including a valid prefix.",
     "legacy": "An attempt with a non-durable binding retains its existing authority and accepts no worker claim.",
@@ -151,7 +152,6 @@
     "legacy": "empty epoch is non-live; indexed recovery adopts a new epoch without rewriting user state",
     "leaseIndexMarker": 255,
     "epochCharacters": 32,
-    "maximumLeaseProbesPerKind": 4,
     "maximumLeaseMilliseconds": 300000,
     "serverClock": {
       "format": "tofu.worker-lease-clock/v1",
@@ -165,7 +165,24 @@
         "stateBytes"
       ]
     },
-    "eligibilityClock": "backend-owned current UTC; absolute queue availability never uses the advancing lease high-water"
+    "eligibilityClock": "backend-owned current UTC; absolute queue availability never uses the advancing lease high-water",
+    "epochRangesPerKind": 4,
+    "processBoundOwner": {
+      "prefix": "tofu.worker-process/v1:",
+      "fields": [
+        "boot",
+        "pid_namespace",
+        "pid",
+        "started",
+        "instance"
+      ],
+      "encoding": "Colon-separated canonical lowercase boot UUID, positive decimal PID namespace inode, PID (1..2147483647), kernel start ticks, and lowercase 32-hex invocation instance. Fits the existing 256-character claimOwner field.",
+      "authority": "Matching owner/token/current epoch remains valid across a heartbeat deadline unless the storage host proves process death in the same boot and PID namespace. Foreign, inaccessible or unavailable process evidence cannot authorize takeover.",
+      "recovery": "Current-epoch expired entries are traversed in lease-index order, skipping protected processes without hiding other expired or queued jobs. Recheck protected entries after their existing heartbeat lease interval; this is a recovery wake horizon, never an execution limit.",
+      "lifecycle": "The local worker service captures its process identity before claiming. A joined invocation explicitly releases an unsettled claim before returning; transient storage failures wait without a task deadline. Process crash permits takeover after the recovery horizon; authority epoch changes still fence previous claims.",
+      "compatibility": "Opaque worker IDs retain the existing finite lease behavior. Platforms without an observable kernel process identity retain that legacy behavior; no process-death evidence is fabricated.",
+      "retention": "One bounded identity replaces the existing claimOwner value; no new row, heartbeat history, or registry."
+    }
   },
   "wakeAuthority": {
     "field": "wake_sequence",

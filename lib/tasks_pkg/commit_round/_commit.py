@@ -23,7 +23,7 @@ import threading
 import time
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
@@ -68,7 +68,7 @@ def _task_round_has_opaque_writer(task: dict) -> bool:
     except Exception as error:
         logger.debug(
             '[Task:%s] fh opaque-writer probe failed: %s',
-            str(task.get('id') or '')[:8],
+            str(task.get('id') or ''),
             error,
         )
         return True
@@ -112,12 +112,12 @@ def _spawn_async_commit_round(task: dict, project_enabled: bool,
                 round_has_opaque_writer,
                 workspace_evidence,
             ),
-            name=f'commit-round-{task["id"][:8]}',
+            name=f'commit-round-{task_log_tag(task["id"])}',
             daemon=True,
         ).start()
     except Exception as e:
         logger.warning('[Task:%s] failed to spawn async commit thread: %s',
-                       task['id'][:8], e, exc_info=True)
+                       task_log_tag(task['id']), e, exc_info=True)
 
 
 def _run_commit_round_async(task: dict, project_path: str,
@@ -134,7 +134,7 @@ def _run_commit_round_async(task: dict, project_path: str,
     path) so the authoritative per-round file list is built + persisted
     without ever blocking the terminal frame.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     if round_has_opaque_writer is None:
         # Compatibility for focused direct callers. Production spawners pass
         # the pre-release snapshot and never reread terminal toolRounds here.
@@ -180,6 +180,7 @@ def _run_commit_round_async(task: dict, project_path: str,
                        tid, error, exc_info=True)
 
     _save_written_lanes(task, tid)
+    _save_worker_workspaces(task, tid)
 
     linear_event_fields = (
         {'linearGitCheckpoint': linear_checkpoint}
@@ -549,6 +550,18 @@ def _save_written_lanes(task: dict, tid: str) -> None:
         logger.info('[Task:%s] lane work saved: %s', tid, saved)
 
 
+def _save_worker_workspaces(task: dict, tid: str) -> None:
+    """Save the work in progress of every local checkout this task is bound to, so it stays reconstructible."""
+    try:
+        from lib.tasks_pkg.workspace_delivery import save_worker_workspaces
+        saved = save_worker_workspaces(task)
+    except Exception as error:
+        logger.warning('[Task:%s] worker checkout save failed: %s', tid, error)
+        return
+    if saved:
+        logger.info('[Task:%s] worker checkout work saved: %s', tid, saved)
+
+
 def _patch_turn_projection_with_file_list(task: dict, amend_evt: dict) -> None:
     """Fold the derived file list into the settled turn-native projection.
 
@@ -586,4 +599,4 @@ def _patch_turn_projection_with_file_list(task: dict, amend_evt: dict) -> None:
         )
     except Exception as error:
         logger.debug('[Task:%s] turn-projection file-changes fold failed: %s',
-                     str(task.get('id') or '')[:8], error)
+                     str(task.get('id') or ''), error)

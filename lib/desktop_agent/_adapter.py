@@ -35,6 +35,7 @@ import time
 import zipfile
 
 import requests
+from lib.http_transport.client import http_get
 
 from lib.json_store import read_json, write_json_atomic
 from lib.log import get_logger
@@ -121,7 +122,7 @@ def _gh_get(url: str, timeout: int = 20) -> requests.Response:
     if host not in _ALLOWED_DOWNLOAD_HOSTS:
         raise ValueError(f'download host not allowed: {host}')
     from lib.desktop_agent._egress import _resolve_proxies
-    resp = requests.get(url, timeout=timeout, proxies=_resolve_proxies('env'),
+    resp = http_get(url, timeout=timeout, proxies=_resolve_proxies('env'),
                         headers={'User-Agent': 'tofu-agent-adapter/1.0',
                                  'Accept': 'application/vnd.github+json'},
                         stream=True)
@@ -387,7 +388,7 @@ def _healthy(port: int, api_key: str, timeout_s: float = _HEALTH_TIMEOUT_S) -> b
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(
+            resp = http_get(
                 f'http://127.0.0.1:{port}/v1/models',
                 headers={'Authorization': f'Bearer {api_key}'}, timeout=3)
             if resp.status_code == 200:

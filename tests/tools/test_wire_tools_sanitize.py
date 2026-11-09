@@ -143,7 +143,8 @@ class TestGptRootCombinatorProjection:
         schema = wire['tools'][0]['input_schema']
         for combinator in ('oneOf', 'anyOf', 'allOf'):
             assert combinator not in schema, combinator
-        assert {'content', 'content_ref'} <= set(schema.get('properties') or {})
+        assert 'content' in set(schema.get('properties') or {})
+        assert {'path', 'content'} <= set(schema.get('required') or [])
 
     def test_nested_combinators_survive_the_root_relaxation(self):
         # Anthropic only restricts the ROOT; a nested oneOf stays as written.

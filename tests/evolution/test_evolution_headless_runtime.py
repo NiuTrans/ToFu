@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib
 import json
 import asyncio
-import time
 import uuid
 import subprocess
 import shlex
@@ -18,6 +17,61 @@ import pytest
 
 pytest_plugins = ('tests._credential_sidecar',)
 pytestmark = pytest.mark.api
+
+
+@pytest.fixture
+def stage_workers(monkeypatch, credential_storage):
+    """Join every real stage before storage or provider fixtures can leave."""
+    from types import SimpleNamespace
+    from tofu_workers import DemandThreadPoolExecutor
+    from lib.tasks_pkg import spawn
+
+    original_spawn = spawn.spawn_task
+    futures, tasks, submitted = {}, {}, []
+
+    def join():
+        # A parent can append its reviewer before returning. Iterating the
+        # owned list includes those descendants; a status/seal is not a join.
+        first_error = None
+        for future in submitted:
+            try:
+                future.result()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
+    def close_pending():
+        # Failure before archive reconciliation must not leave a receiver that
+        # launches review under the next provider script. Never clear its flags.
+        from lib.evolution import runs
+        from lib.tasks_pkg.manager import persist_task_result
+        for task in tasks.values():
+            if task.get('_terminalPersistencePending'):
+                runs.cancel_run(task['config']['evolution']['run_id'],
+                                user_id=task['_userId'])
+                assert persist_task_result(task) is True
+                assert not task.get('_terminalPersistencePending')
+
+    with DemandThreadPoolExecutor(thread_name_prefix='headless-goal-test') as executor:
+        def spawn_owned_stage(task, *, runner=None):
+            future = original_spawn(task, runner=runner, executor=executor)
+            assert future is not None, 'The stage scheduler must return its physical Future'
+            tasks[task['id']] = task
+            futures[task['id']] = future
+            submitted.append(future)
+            return future
+
+        monkeypatch.setattr(spawn, 'spawn_task', spawn_owned_stage)
+        try:
+            yield SimpleNamespace(futures=futures, tasks=tasks, join=join,
+                                  close_pending=close_pending)
+        finally:
+            try:
+                join()
+            finally:
+                close_pending()
 
 
 def paired_search_command(protocol, *, conflicting_claim=False):
@@ -71,9 +125,9 @@ print(json.dumps(result))
 
 
 @pytest.mark.parametrize('credential_storage', ['sqlite', 'tofudb'], indirect=True, scope='module')
-@pytest.mark.parametrize('scenario', ['accepted', 'missing_review_audit', 'missing_measurements', 'archive_recovered', 'required_originals_uninspected', 'executor_tool_delivery', 'report_then_submit', 'local_command', 'local_command_failed', 'measured_science', 'measured_claim_conflict'])
+@pytest.mark.parametrize('scenario', ['accepted', 'missing_review_audit', 'missing_measurements', 'archive_recovered', 'archive_cancelled', 'required_originals_uninspected', 'executor_tool_delivery', 'report_then_submit', 'local_command', 'local_command_failed', 'measured_science', 'measured_claim_conflict'])
 def test_headless_goal_executes_reviews_and_persists_without_browser(
-        credential_storage, monkeypatch, scenario):
+        credential_storage, monkeypatch, scenario, stage_workers):
     include_evidence_audit = scenario != 'missing_review_audit'
     measured_science = scenario in ('measured_science', 'measured_claim_conflict')
     scientific = scenario == 'missing_measurements' or measured_science
@@ -89,7 +143,7 @@ def test_headless_goal_executes_reviews_and_persists_without_browser(
     calls = []
     frozen_protocol = None
     review_read_offsets = []
-    handoff_blocked = scenario == 'archive_recovered'
+    handoff_blocked = scenario in ('archive_recovered', 'archive_cancelled')
     original_prepare = runs._prepare_stage
     def prepare_stage(*args, **kwargs):
         if handoff_blocked and kwargs.get('stage') == 'reviewing':
@@ -235,16 +289,24 @@ def test_headless_goal_executes_reviews_and_persists_without_browser(
             started = (await response.get_json())['run']
             repeated = await client.post('/api/v4/evolution/runs', json=body, headers=headers)
             assert (await repeated.get_json())['run']['run_id'] == started['run_id']
-            deadline = time.monotonic() + 40
             current = started
+            if scenario == 'archive_cancelled':
+                await asyncio.to_thread(stage_workers.futures[started['task_id']].result)
+                original_task = stage_workers.tasks[started['task_id']]
+                assert original_task.get('_terminalPersistencePending')
+                # Exercise the same cleanup used if a case fails before cold
+                # recovery. No reviewer or original executor may be replayed.
+                stage_workers.close_pending()
+                assert calls == ['execute']
+                assert not original_task.get('_terminalPersistencePending')
             if scenario == 'archive_recovered':
                 from lib.evolution.stage_outcomes import read_metadata, recover
-                metadata = None
-                while time.monotonic() < deadline:
-                    metadata = read_metadata(started['run_id'], started['task_id'], user_id=owner)
-                    if metadata and metadata['archive_state'] == 'sealed':
-                        break
-                    await asyncio.sleep(.1)
+                # The deliberately interrupted terminal receiver must exit
+                # before its disposable storage authority is taken offline.
+                await asyncio.to_thread(stage_workers.futures[started['task_id']].result)
+                original_task = stage_workers.tasks[started['task_id']]
+                assert original_task.get('_activeWorkerCount') == 0
+                metadata = read_metadata(started['run_id'], started['task_id'], user_id=owner)
                 assert metadata and metadata['archive_state'] == 'sealed'
                 before = runs.get_run(started['run_id'], user_id=owner)
                 assert before['status'] == 'executing' and before['receipts'] == []
@@ -252,11 +314,7 @@ def test_headless_goal_executes_reviews_and_persists_without_browser(
                 backend = credential_storage.status()['backend']
                 credential_storage.stop()
                 script = """
-import json, sys, signal
-def expired(signum, frame):
-    raise TimeoutError('cold archive read deadline exceeded')
-signal.signal(signal.SIGALRM, expired)
-signal.alarm(70)
+import json, sys
 from lib.storage import StorageRuntime, StorageSupervisor
 from lib.storage.service import install_runtime_for_test
 from lib.evolution import runs
@@ -274,7 +332,6 @@ try:
         'content': task['content'], 'tokens': outcome['actuals']['tokens'],
         'archive_state': outcome['archive_state']}))
 finally:
-    signal.alarm(0)
     runtime.stop()
     install_runtime_for_test(None)
 """
@@ -283,7 +340,7 @@ finally:
                         [sys.executable, '-c', script], input=json.dumps({
                             'root': root, 'backend': backend, 'owner': owner,
                             'run_id': started['run_id']}), text=True,
-                        capture_output=True, timeout=90, check=True)
+                        capture_output=True, check=True)
                     independent = json.loads(process.stdout)
                     assert independent['run_id'] == started['run_id']
                     assert independent['task_id'] == started['task_id']
@@ -303,11 +360,19 @@ finally:
                 reconciled = await client.post(
                     f"/api/v4/evolution/runs/{started['run_id']}/reconcile", headers=headers)
                 assert reconciled.status_code == 200, await reconciled.get_json()
-            while current['status'] not in runs.TERMINAL and time.monotonic() < deadline:
-                await asyncio.sleep(.1)
-                snapshot = await client.get(f"/api/v4/evolution/runs/{started['run_id']}", headers=headers)
-                assert snapshot.status_code == 200
-                current = (await snapshot.get_json())['run']
+                current = (await reconciled.get_json())['run']
+                assert any(row['task_id'] == original_task['id'] for row in current['receipts'])
+                # Reconciliation consumed this exact original. Acknowledge its
+                # known failed receiver once through the ordinary persistence
+                # owner; this must not re-execute the producer or allocate review.
+                from lib.tasks_pkg.manager import persist_task_result
+                assert persist_task_result(original_task) is True
+                assert not original_task.get('_terminalPersistencePending')
+            await asyncio.to_thread(stage_workers.join)
+            snapshot = await client.get(f"/api/v4/evolution/runs/{started['run_id']}", headers=headers)
+            assert snapshot.status_code == 200
+            current = (await snapshot.get_json())['run']
+            assert all(not task.get('_terminalPersistencePending') for task in stage_workers.tasks.values())
             return current
 
         current = asyncio.run(journey())
@@ -337,19 +402,21 @@ finally:
                 measured = next(json.loads(line) for line in text.splitlines() if line.startswith('{"index"'))
                 assert measured == {'index': 3, 'comparisons': 2}
             assert '[exit code: '+ ('1' if scenario == 'local_command_failed' else '0') +']' in text
-        assert current['status'] == ('completed' if scenario in ('accepted', 'archive_recovered', 'executor_tool_delivery', 'report_then_submit', 'local_command', 'measured_science') else 'needs_attention' if scenario == 'required_originals_uninspected' else 'failed'), (current.get('error'), calls,
+        assert current['status'] == ('cancelled' if scenario == 'archive_cancelled' else 'completed' if scenario in ('accepted', 'archive_recovered', 'executor_tool_delivery', 'report_then_submit', 'local_command', 'measured_science') else 'needs_attention' if scenario == 'required_originals_uninspected' else 'failed'), (current.get('error'), calls,
             (task or {}).get('status'), (task or {}).get('error'),
             (task or {}).get('finishReason'))
-        assert calls == (['execute','execute','execute'] if scenario == 'local_command_failed' else ['execute', 'execute'] if scenario == 'measured_claim_conflict' else ['execute'] if scenario == 'missing_measurements' else ['execute', 'execute'] + ['review'] * (len(review_read_offsets) + 1) if scenario == 'measured_science' else ['execute', 'execute', 'review']
+        assert calls == (['execute'] if scenario == 'archive_cancelled' else ['execute','execute','execute'] if scenario == 'local_command_failed' else ['execute', 'execute'] if scenario == 'measured_claim_conflict' else ['execute'] if scenario == 'missing_measurements' else ['execute', 'execute'] + ['review'] * (len(review_read_offsets) + 1) if scenario == 'measured_science' else ['execute', 'execute', 'review']
                          if scenario in ('report_then_submit','local_command','measured_science') else ['execute', 'review'])
-        assert len(current['receipts']) == (1 if scenario in ('missing_measurements','local_command_failed','measured_claim_conflict') else 2)
-        assert current['actuals']['tokens'] >= (80 if scientific else 160)
+        assert len(current['receipts']) == (1 if scenario in ('archive_cancelled','missing_measurements','local_command_failed','measured_claim_conflict') else 2)
+        assert current['actuals']['tokens'] >= (80 if scientific or scenario == 'archive_cancelled' else 160)
         if scenario in ('accepted', 'archive_recovered', 'executor_tool_delivery', 'report_then_submit', 'local_command', 'measured_science'):
             assert current['review']['outcome'] == 'success'
             assert current['learning']['ok'] is True
         else:
             assert current['review'] is None
-            if scenario == 'required_originals_uninspected':
+            if scenario == 'archive_cancelled':
+                assert current['error'] == ''
+            elif scenario == 'required_originals_uninspected':
                 from lib.evolution.stage_outcomes import read_metadata
                 assert current['error'] == 'required originals were not linked and completely inspected'
                 assert current['receipts'][-1]['review_format_retry']['error'] == 'originals_uninspected'
@@ -388,11 +455,14 @@ finally:
         assert episode['actuals']['tokens'] == current['actuals']['tokens']
         assert runs.get_run(current['run_id'], user_id=owner) == current
     finally:
-        reset_dispatcher()
+        try:
+            stage_workers.join()
+        finally:
+            reset_dispatcher()
 
 
 @pytest.mark.parametrize('credential_storage', ['sqlite', 'tofudb'], indirect=True, scope='module')
-def test_final_program_manifest_completes_through_real_source_and_terminal_tools(credential_storage, monkeypatch):
+def test_final_program_manifest_completes_through_real_source_and_terminal_tools(credential_storage, monkeypatch, stage_workers):
     from lib.llm.stream_result import ProviderStreamResult
     from lib.llm_dispatch import reset_dispatcher
     from tests.support.model_routing import install_native_test_model_route
@@ -496,9 +566,8 @@ def test_final_program_manifest_completes_through_real_source_and_terminal_tools
             response = await client.post(f'/api/v4/evolution/programs/{pid}/commands',headers=headers,json={'action':'start'})
             assert response.status_code == 200, await response.get_json()
             program = (await response.get_json())['program']
-            deadline = time.monotonic()+40
-            while program['status'] == 'active' and time.monotonic() < deadline:
-                await asyncio.sleep(.1)
+            while program['status'] == 'active':
+                await asyncio.to_thread(stage_workers.join)
                 program = programs.advance_program(pid,user_id=owner)
             return program
         program = asyncio.run(journey())
@@ -513,4 +582,7 @@ def test_final_program_manifest_completes_through_real_source_and_terminal_tools
         assert review_meta['source_coverage']['ranges'] == [[0,observed_source['total_chars']]]
         assert get_episode(run['episode_id'],user_id=owner)['status'] == 'success'
     finally:
-        reset_dispatcher()
+        try:
+            stage_workers.join()
+        finally:
+            reset_dispatcher()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.agent_core.events import EventType, Phase, build_event, emit_phase
 from lib.tasks_pkg.manager import append_event
 
@@ -44,7 +44,7 @@ def emit_startup_phase(task: dict[str, Any], stage: str) -> None:
         )
     except Exception as exc:
         logger.debug('[Task %s] startup phase emit failed stage=%s: %s',
-                     (task.get('id') or '')[:8], stage, exc)
+                     (task.get('id') or ''), stage, exc)
 
 
 def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
@@ -70,12 +70,12 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
         if task.get('aborted') or task.get('status') in {
                 'done', 'error', 'aborted', 'interrupted'}:
             logger.debug('[Task:%s] skipping external-edit probe — task is '
-                         'cancelled or terminal', task['id'][:8])
+                         'cancelled or terminal', task_log_tag(task['id']))
             return
         if task.get('modifiedFileList') or task.get('modifiedFiles'):
             logger.debug('[Task:%s] skipping external-edit probe '
                          '— round already mutated files',
-                         task['id'][:8])
+                         task_log_tag(task['id']))
             return
         # Pass the set of known Tofu task ids so the probe can tell a
         # CONCURRENT conversation's write on the shared project root
@@ -87,7 +87,7 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
             _known_task_ids = set(chat_task_runtime.task_ids())
         except Exception as _kte:
             logger.debug('[Task:%s] known-task-id snapshot failed: %s',
-                         task['id'][:8], _kte)
+                         task_log_tag(task['id']), _kte)
             _known_task_ids = None
         from lib import file_history as fh
         _ext = fh.detect_external_edits(
@@ -96,18 +96,18 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
                 'done', 'error', 'aborted', 'interrupted'}:
             logger.debug('[Task:%s] external-edit probe completed after task '
                          'cancel/settlement — suppressing stale event',
-                         task['id'][:8])
+                         task_log_tag(task['id']))
             return
         if _ext.get('siblingFiles'):
             logger.info('[Task:%s] external-edit probe attributed %d '
                         'drifted file(s) to concurrent Tofu task(s) — '
-                        'suppressed IDE toast', task['id'][:8],
+                        'suppressed IDE toast', task_log_tag(task['id']),
                         len(_ext.get('siblingFiles', [])))
         if (task.get('modifiedFileList') or task.get('modifiedFiles')):
             logger.debug('[Task:%s] external-edit probe completed after '
                          'round started mutating files — not emitting '
                          'SSE event (attribution ambiguous)',
-                         task['id'][:8])
+                         task_log_tag(task['id']))
             return
         if _ext.get('committed'):
             append_event(task, build_event(
@@ -116,11 +116,11 @@ def _probe_external_edits(task: dict[str, Any], project_path: str) -> None:
                 sha=_ext.get('snapshotId'),
             ))
             logger.info('[Task:%s] captured %d external edit(s) snap=%s',
-                        task['id'][:8], len(_ext.get('files', [])),
+                        task_log_tag(task['id']), len(_ext.get('files', [])),
                         (_ext.get('snapshotId') or '')[:8])
     except Exception as e:
         logger.warning('[Task:%s] external-edit detection failed: %s',
-                       task['id'][:8], e)
+                       task_log_tag(task['id']), e)
 
 
 def start_external_edit_probe(task: dict[str, Any], project_path: str) -> None:
@@ -134,7 +134,7 @@ def start_external_edit_probe(task: dict[str, Any], project_path: str) -> None:
     threading.Thread(
         target=_probe_external_edits,
         args=(task, project_path),
-        name=f'ext-edit-probe-{task["id"][:8]}',
+        name=f'ext-edit-probe-{task_log_tag(task["id"])}',
         daemon=True,
     ).start()
 
@@ -231,7 +231,7 @@ def setup_project_context(
             )
         except Exception as _pe:
             logger.debug('[Task:%s] presence announce failed: %s',
-                         task['id'][:8], _pe)
+                         task_log_tag(task['id']), _pe)
 
     # Presence keepalive: a live task must read ACTIVE for its whole
     #   lifetime, not only while the model streams text (a >25s tool call
@@ -246,7 +246,7 @@ def setup_project_context(
             _presence_keepalive_start()
         except Exception as _pk:
             logger.debug('[Task:%s] presence keepalive start failed: %s',
-                         task['id'][:8], _pk)
+                         task_log_tag(task['id']), _pk)
 
     # ── File-history: capture any external (IDE) edits made between
     #    rounds. Runs SILENTLY in a background thread — no phase event,
@@ -257,7 +257,7 @@ def setup_project_context(
             start_external_edit_probe(task, project_path)
     except Exception as e:
         logger.warning('[Task:%s] could not start external-edit probe: %s',
-                       task['id'][:8], e)
+                       task_log_tag(task['id']), e)
 
 
 __all__ = [

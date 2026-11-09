@@ -50,9 +50,15 @@ and application shutdown; it never runs an agent loop. Both resident hosts
 borrow the manager's inherited EOF channel, verified by pipe identity, and
 retain the launch lease through physical cleanup. Verify
 `tests/server/test_execution_service.py` and `test_execution_lifespan.py`.
+`ExecutionService.recover` and `readiness_error` own executor reconciliation
+and readiness; the manager injects its existing failure budget and retains the
+single recovery record. Verify `test_execution_composition.py` for those ports.
 `execution_plan.py` prepares a source/environment/configuration digest before
 host admission; it uses the existing pinned-source discovery boundary and
 `runtime_replica`'s install fingerprint, and never copies an app.
+It runs the shared static storage boundary before drain. Only a source mismatch
+during application construction may authorize source refresh after physical
+exit; startup failures and policy/dependency changes keep the generation fence.
 The manager prepares both resident generations before drain, preserves unchanged
 execution across API restarts, and charges execution recovery to its existing
 failure budget. Verify `test_execution_composition.py` and the real headless

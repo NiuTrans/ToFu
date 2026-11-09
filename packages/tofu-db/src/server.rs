@@ -1159,15 +1159,17 @@ pub(crate) fn dispatch_one_request_inner_mode(
                             }
                             if is_command {
                                 if let Some(barrier) = &stores.wal_barrier {
-                                    // Strict durability is preserved: the response is
-                                    // written only after this commit's witness is
-                                    // covered. The wait runs WITHOUT the authority
-                                    // mutex, so concurrent connections pipeline
-                                    // instead of queueing behind one fsync.
+                                    // The response is written only after this
+                                    // commit's witness reaches its tier's
+                                    // acknowledgement point (Strict: synced,
+                                    // Normal: written). The wait runs WITHOUT the
+                                    // authority mutex, so concurrent connections
+                                    // pipeline instead of queueing behind one
+                                    // physical write or fsync.
                                     let witness = barrier.witness(authority.wal_len()?)?;
                                     drop(authority);
                                     let _stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_WAIT);
-                                    barrier.wait_witness(
+                                    barrier.wait_acknowledged(
                                         &witness,
                                         std::time::Instant::now() + crate::wal::MAX_BARRIER_WAIT,
                                     )?;
@@ -1458,7 +1460,7 @@ pub(crate) fn finish_parallel_command_with_permit(
     let response = session.finish_admitted(admitted, Ok(prepared.response), notices);
     if let Some((barrier, witness)) = durability {
         let _wait = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_WAIT);
-        barrier.wait_witness(&witness, Instant::now() + crate::wal::MAX_BARRIER_WAIT)?;
+        barrier.wait_acknowledged(&witness, Instant::now() + crate::wal::MAX_BARRIER_WAIT)?;
     }
     Ok(Some(RequestDispatch::Responded(response)))
 }
@@ -3172,6 +3174,90 @@ mod tests {
     /// The first deferred write after any overlay merge or structural commit
     /// republishes the root directory; under tombstone reclaim that root is
     /// part of every range witness. Steady state between merges starts there.
+    #[test]
+    fn metadata_and_worker_settlement_prepare_without_writer_and_revalidate_conflicts() {
+        for operation in ["integration.workspace.set_meta", "worker_job.complete", "worker_job.heartbeat"] {
+            for conflict in [false, true] {
+                let session = authenticator().authenticate(&hello()).unwrap();
+                let directory = tempfile::tempdir().unwrap();
+                let mut seeded = AuthorityDatabase::initialize(directory.path()).unwrap();
+                seeded.set_write_overlay_for_test(true);
+                let (command, concurrent) = if operation == "integration.workspace.set_meta" {
+                    dispatched(&mut seeded, &session, &retention_command("integration.workspace.register", json!({
+                        "user_id":11, "project_root":"/project", "task_id":"workspace", "title":"workspace",
+                        "workspace_path":"/workspace", "managed":false, "base_sha":"a".repeat(40), "now":1.0,
+                    }), "register"), 1000);
+                    let patch = |key: &str| retention_command("integration.workspace.set_meta", json!({
+                        "user_id":11, "project_root":"/project", "task_id":"workspace",
+                        "patch_json":format!("{{\"{key}\":true}}"), "now":1.0,
+                    }), key);
+                    (patch("prepared"), patch("concurrent"))
+                } else {
+                    dispatched(&mut seeded, &session, &retention_command("worker_job.enqueue", json!({
+                        "task_id":"settlement", "user_id":11, "tenant_id":"", "task_kind":"prepare-test",
+                        "idempotency_key":"settlement", "payload":{}, "priority":0, "available_at_ms":0, "now_ms":1000,
+                    }), "enqueue"), 1000);
+                    let claim = dispatched(&mut seeded, &session, &retention_command("worker_job.claim_next", json!({
+                        "worker_id":"holder", "task_kinds":["prepare-test"], "now_ms":1000, "lease_ms":300000,
+                    }), "claim"), 1000);
+                    let complete = retention_command("worker_job.complete", json!({
+                        "task_id":"settlement", "worker_id":"holder", "fencing_token":claim["fencingToken"],
+                        "now_ms":1000, "terminal_status":"succeeded", "result_ref":"result", "replay_cursor":0, "error":{},
+                    }), "complete");
+                    if operation == "worker_job.complete" {
+                        (complete, retention_command("worker_job.request_cancel", json!({
+                            "task_id":"settlement", "user_id":11, "now_ms":1000, "reason":"Stop",
+                        }), "cancel"))
+                    } else {
+                        // The holder's settlement ends the claim the heartbeat read.
+                        (retention_command("worker_job.heartbeat", json!({
+                            "task_id":"settlement", "worker_id":"holder", "fencing_token":claim["fencingToken"],
+                            "now_ms":1000, "lease_ms":300000, "replay_cursor":7,
+                        }), "heartbeat"), complete)
+                    }
+                };
+                let database = Mutex::new(seeded);
+                let stores = StorageV2Stores::new(&database, None);
+                let admitted = session.admit(&command, 1000).unwrap();
+                let wal_before = database.lock().unwrap().wal_len().unwrap();
+                let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+                    &stores, &session, admitted, &mut ||1000, &mut ||true).unwrap()
+                    else { panic!("{} must prepare outside the writer", command.operation) };
+                assert_eq!(database.try_lock().unwrap().wal_len().unwrap(), wal_before);
+                if conflict {
+                    dispatched(&mut database.lock().unwrap(), &session, &concurrent, 1000);
+                } else {
+                    dispatched(&mut database.lock().unwrap(), &session, &retention_command("record.put", json!({
+                        "namespace":"unrelated", "key":"live", "value":1,
+                    }), "live"), 1000);
+                }
+                let finished = finish_parallel_command(&stores, &session, admitted, prepared,
+                    &mut ||1000, &mut ||true).unwrap();
+                if conflict {
+                    assert!(finished.is_none(), "changed owner must invalidate preparation");
+                    let result = dispatched(&mut database.lock().unwrap(), &session, &command, 1000);
+                    if operation == "integration.workspace.set_meta" {
+                        assert_eq!(result["origin"]["concurrent"], true);
+                    } else {
+                        assert_eq!(result["ok"], false);
+                    }
+                } else {
+                    let Some(RequestDispatch::Responded(response)) = finished else { panic!("unrelated write refused") };
+                    assert_eq!(response.status, 0, "{:?}", response.error_message);
+                    let result: Value = serde_json::from_slice(&response.payload).unwrap();
+                    assert_eq!(result["ok"], true);
+                    if operation == "worker_job.heartbeat" {
+                        let stored = dispatched(&mut database.lock().unwrap(), &session, &request("worker_job.get", 11,
+                            json!({"task_id":"settlement", "user_id":11})), 1000);
+                        assert_eq!(stored["replayCursor"], 7, "the prepared heartbeat is what committed");
+                        assert_eq!(stored["leaseDeadlineMs"], result["job"]["leaseDeadlineMs"]);
+                    }
+                }
+                assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
+            }
+        }
+    }
+
     fn republish_root(databases: [&mut AuthorityDatabase; 2], session: &StorageV2Session, label: &str) {
         for database in databases {
             dispatched(database, session, &retention_command("record.put", json!({"namespace": "retention-prime",
@@ -3363,6 +3449,7 @@ mod tests {
     }
 
     include!("server_archive_lane_tests.rs");
+    include!("server_liveness_tests.rs");
 
 }
 

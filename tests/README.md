@@ -49,7 +49,15 @@ they join their domains once those land.
 ## Running tests
 
 ```bash
-# Quick: unit tests only (fast, no dependencies)
+# Default: current changes, with frozen inputs and valid evidence reuse
+make test
+make test-plan
+
+# One file or domain through the same verification engine
+make test TESTS="tests/project_mod/test_verification_defaults.py"
+make test TESTS="tests/paper/"
+
+# Complete unit gate (unconditional execution)
 make test-unit
 
 # Resource-aware xdist by default; explicit worker and serial overrides
@@ -62,19 +70,19 @@ make ci
 # With coverage
 make test-coverage
 
-# Individual markers
+# Individual markers and case-level diagnosis use pytest directly
 python -m pytest -m unit -v
 python -m pytest -m api --tb=long
 python -m pytest -m visual --tb=short
-
-# One domain directory
-python -m pytest tests/paper/ -q
 
 # Filter by name
 python -m pytest -k "test_build_body" -v
 
 # Suite self-audit (collection quality, assertion census)
 make suite-health
+
+# Complete existing release gate; no evidence reuse
+make test-full
 ```
 
 ## tests/ vs debug/
@@ -94,7 +102,7 @@ for regression prevention, it gets migrated to `tests/` with proper mocking.
    (see the placement rule above).
 2. Add `@pytest.mark.unit` (or `api`/`visual`/`slow`) to every test.
 3. Use fixtures from `conftest.py` for app boot/client/mock LLM.
-4. Verify: `make test-unit` passes.
+4. Verify the owning file with `make test TESTS="tests/<domain>/test_case.py"`, then its domain gate.
 5. Ensure `make ci` passes before submitting a PR.
 
 Frontend tests for migrated TypeScript owners should load the smallest real

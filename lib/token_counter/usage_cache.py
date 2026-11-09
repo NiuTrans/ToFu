@@ -150,7 +150,7 @@ def record_usage(conv_id: str, *,
             )
         logger.debug('[TokenCounter][UsageCache] conv=%s recorded %d tokens '
                      '(model=%s, msgs=%d, opaque_replay=%d)',
-                     conv_id[:8], prompt_tokens, model, message_count,
+                     conv_id, prompt_tokens, model, message_count,
                      max(0, int(opaque_replay_tokens or 0)))
     except Exception as e:
         logger.debug('[TokenCounter][UsageCache] record_usage failed: %s', e)
@@ -279,7 +279,7 @@ class UsageCacheCounter(TokenCounter):
                  + opaque_replay_tokens)
         logger.debug('[TokenCounter][UsageCache] conv=%s hit: %d (cached) + '
                      '%d (suffix) + %d (opaque replay) = %d',
-                     conv_id[:8], entry.prompt_tokens, delta_tokens,
+                     conv_id, entry.prompt_tokens, delta_tokens,
                      opaque_replay_tokens, total)
         return total
 

@@ -167,6 +167,71 @@ class ProfileMigrationTest {
         } finally { db.close() }
     }
 
+    @Test fun conditional_url_saves_and_late_gateway_stamps_refuse_internal_kinds() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), ProfileDatabase::class.java)
+            .allowMainThreadQueries().build()
+        try {
+            val dao = db.profileDao()
+            for (kind in listOf(KernelKind.LOCAL, KernelKind.SSH)) {
+                val id = dao.insert(Profile(alias = kind.name, baseUrl = "https://host.example/"))
+                val original = dao.getById(id)!!
+                // Keep the URL/auth identical to isolate the kind predicate.
+                val changed = original.copy(kind = kind, lastUsedAt = 999,
+                    ssh = SshEndpoint(host = "host.example", user = "me").takeIf { kind == KernelKind.SSH })
+                dao.update(changed)
+                assertEquals(0, dao.saveConnectionIfCurrent(
+                    id, original.baseUrl, original.alias, original.authType, original.projectPath,
+                    "reviewed", "https://reviewed.example/", original.authType, null, null,
+                ))
+                assertEquals(0, dao.setCookieHostIfCurrent(
+                    id, original.baseUrl, original.alias, original.authType, "host.example",
+                ))
+                assertEquals(changed, dao.getById(id))
+            }
+        } finally { db.close() }
+    }
+
+    @Test fun conditional_ssh_save_preserves_acquired_pin_recency_and_cookie_until_a_reviewed_machine_change() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), ProfileDatabase::class.java)
+            .allowMainThreadQueries().build()
+        try {
+            val dao = db.profileDao()
+            val endpoint = SshEndpoint(host = "dev.example", user = "me")
+            val id = dao.insert(Profile(alias = "box", baseUrl = "", kind = KernelKind.SSH, ssh = endpoint))
+            val editorSnapshot = dao.getById(id)!!
+            assertEquals(1, dao.pinSshHostKey(id, endpoint.host, endpoint.port, "SHA256:acquired"))
+            dao.touchLastUsed(id, 999)
+            dao.setCookieHost(id, "owner-marker")
+            val concurrent = dao.getById(id)!!
+            assertEquals(1, dao.saveSshConnectionIfCurrent(
+                id, editorSnapshot.baseUrl, editorSnapshot.alias, editorSnapshot.authType, editorSnapshot.projectPath,
+                endpoint.host, endpoint.port, endpoint.user, endpoint.remotePort,
+                "reviewed", endpoint.host, endpoint.port, "other", 16000,
+            ))
+            val saved = dao.getById(id)!!
+            assertEquals(concurrent.copy(alias = "reviewed", ssh = concurrent.ssh!!.copy(user = "other", remotePort = 16000)), saved)
+
+            // Each explicit host/port change is a new trust decision. Other
+            // session/recency metadata remains owned by its targeted writers.
+            for ((host, port) in listOf("reviewed.example" to 22, "reviewed.example" to 2222)) {
+                val before = dao.getById(id)!!
+                val ssh = before.ssh!!
+                if (ssh.hostKeySha256 == null)
+                    assertEquals(1, dao.pinSshHostKey(id, ssh.host, ssh.port, "SHA256:reacquired"))
+                assertEquals(1, dao.saveSshConnectionIfCurrent(
+                    id, before.baseUrl, before.alias, before.authType, before.projectPath,
+                    ssh.host, ssh.port, ssh.user, ssh.remotePort,
+                    before.alias, host, port, ssh.user, ssh.remotePort,
+                ))
+                val changed = dao.getById(id)!!
+                assertNull(changed.ssh?.hostKeySha256)
+                assertEquals("", changed.baseUrl)
+                assertEquals(999L, changed.lastUsedAt)
+                assertEquals("owner-marker", changed.cookieHost)
+            }
+        } finally { db.close() }
+    }
+
     @Test fun conditional_session_write_rejects_auth_and_alias_changes_at_same_url() = runBlocking {
         val db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), ProfileDatabase::class.java)
             .allowMainThreadQueries().build()

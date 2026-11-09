@@ -44,7 +44,7 @@ from lib.observability import InstrumentedThreadPoolExecutor
 # See _pipeline.py: futures-TimeoutError is a distinct class on 3.10.
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tool_results.tool_call_identity import ensure_unique_tool_call_ids
 from lib.tool_results.tool_caller_identity import (
     MAX_TOOL_CALLER_ID_CHARS,
@@ -304,7 +304,7 @@ class StreamingToolAccumulator:
         # tc_id → (future, fn_name, fn_args, submit_time)
         self._futures: dict[str, tuple[Future, str, dict, float]] = {}
         self._submitted_count = 0
-        self._tid = task['id'][:8]
+        self._tid = task_log_tag(task['id'])
         # tc_id → (rn, round_entry) for tools already announced via tool_start
         self._announced: dict[str, tuple[int, dict]] = {}
         self._announced_signatures: dict[str, tuple] = {}
@@ -542,7 +542,7 @@ class StreamingToolAccumulator:
                 logger.info(
                     '[%s] StreamingToolExec: settled orphan early-announced '
                     'round %s (tool=%s tc_id=%s) — superseded by %s',
-                    self._tid, rn, tool_name, tc_id[:8], _cause)
+                    self._tid, rn, tool_name, tc_id, _cause)
             except Exception as e:
                 entry['status'] = 'aborted'
                 finalized += 1
@@ -618,7 +618,7 @@ class StreamingToolAccumulator:
             logger.warning(
                 '[%s] StreamingToolExec: deferring invalid attributed call '
                 '%s (tc_id=%s) to the authority validator',
-                self._tid, fn_name, tc_id[:8])
+                self._tid, fn_name, tc_id)
             return
         if caller is not None:
             tool_call['caller'] = caller
@@ -626,7 +626,7 @@ class StreamingToolAccumulator:
             logger.debug(
                 '[%s] StreamingToolExec: deferring program child %s '
                 '(tc_id=%s caller=%s) until parent reconciliation',
-                self._tid, fn_name, tc_id[:8], caller.get('caller_id', ''))
+                self._tid, fn_name, tc_id, caller.get('caller_id', ''))
             return
 
         # Do not filter empty-args calls here. A distinct provider occurrence
@@ -645,7 +645,7 @@ class StreamingToolAccumulator:
             logger.warning(
                 '[%s] StreamingToolExec: deferring non-object arguments for '
                 '%s (tc_id=%s) to the typed parser',
-                self._tid, fn_name, tc_id[:8])
+                self._tid, fn_name, tc_id)
             fn_args = {}
             contract_allows_prefetch = False
         else:
@@ -678,7 +678,7 @@ class StreamingToolAccumulator:
                 logger.warning(
                     '[%s] StreamingToolExec: duplicate callback call_id=%s '
                     'ignored before announcement/prefetch',
-                    self._tid, tc_id[:8])
+                    self._tid, tc_id)
                 return
             # Same id, different action in one response: repair the callback
             # object itself. SSE finalization retains this object, so the final
@@ -690,7 +690,7 @@ class StreamingToolAccumulator:
             logger.warning(
                 '[%s] StreamingToolExec: conflicting callback call_id reminted '
                 'before announcement (tool=%s id=%s)',
-                self._tid, fn_name, tc_id[:12])
+                self._tid, fn_name, tc_id)
         elif tc_id in self._claimed_callback_ids:
             # The same provider id came back after an explicit attempt restart.
             # It is a new response occurrence even when payload bytes match.
@@ -737,7 +737,7 @@ class StreamingToolAccumulator:
             t0 = time.monotonic()
             logger.info('[%s] StreamingToolExec: pre-executing %s (tc_id=%s) '
                         'while model streams',
-                        self._tid, fn_name, tc_id[:8])
+                        self._tid, fn_name, tc_id)
 
             try:
                 future = self._pool.submit(
@@ -752,7 +752,7 @@ class StreamingToolAccumulator:
                 logger.warning(
                     '[%s] StreamingToolExec: prefetch submit failed for %s '
                     '(tc_id=%s); deferring to post-stream execution: %s',
-                    self._tid, fn_name, tc_id[:8], error,
+                    self._tid, fn_name, tc_id, error,
                 )
                 announced = self._announced.get(tc_id)
                 if announced is not None and announced[1].get('status') == 'searching':
@@ -831,7 +831,7 @@ class StreamingToolAccumulator:
 
         logger.info('[%s] StreamingToolExec: early tool_start emitted for '
                     '%s (tc_id=%s, rn=%d) — UI shows activity immediately',
-                    self._tid, fn_name, tc_id[:8], rn)
+                    self._tid, fn_name, tc_id, rn)
 
     def _execute_one_for_call(self, fn_name: str, fn_args: dict, tc_id: str) -> str | tuple:
         from lib.tools.execution_timing import tool_execution_timing
@@ -864,12 +864,12 @@ class StreamingToolAccumulator:
             Tool result content as string.
         """
         from lib.project_dispatch.admission import is_dispatch_task
-        file_scope = None
+        file_scope = admission = None
         if is_dispatch_task(self._task):
             # Same single admission as the serial executor, before any effect;
             # a refusal defers the call to the pipeline, which fails the turn.
-            from lib.project_dispatch.scope import admit_tool
-            file_scope = admit_tool(self._task, fn_name, fn_args, self._project_path)
+            from lib.project_dispatch.scope import admit_call
+            file_scope, admission = admit_call(self._task, fn_name, fn_args, self._project_path)
         from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
         from lib.tasks_pkg.delegate_mode import delegate_call_rejection
         denial = (coordinator_call_rejection(self._task, fn_name, fn_args, self._project_path)
@@ -919,9 +919,13 @@ class StreamingToolAccumulator:
                     _execute_kwargs['result_projection_items'] = _projection_items
 
                     _execute_kwargs['read_observations'] = _read_observations
-                _content = execute_tool(
-                    fn_name, fn_args, _base, conv_id=_conv_id,
-                    **_execute_kwargs)
+                from contextlib import nullcontext
+                from lib.project_dispatch.admission import admitted_call
+                # The tool's own dispatch scope decides from this call's admission.
+                with admitted_call(admission) if admission is not None else nullcontext():
+                    _content = execute_tool(
+                        fn_name, fn_args, _base, conv_id=_conv_id,
+                        **_execute_kwargs)
                 # Write-freshness token — THIS pre-exec path bypasses
                 #   _handle_project_tool (its result is cached as authoritative
                 #   and the serial pipeline skips re-execution), so the

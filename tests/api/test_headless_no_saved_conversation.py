@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shlex
 import threading
 
 import pytest
@@ -125,11 +127,11 @@ def _handle(receipt: str) -> str:
     return match.group(1)
 
 
-def _wait_until_finished(command_id, within_s=30.0):
-    """Wait on the registry's own completion; the bound only turns a hang into a failure."""
+def _wait_until_finished(command_id):
+    """Wait on actual completion; the enclosing test hang guard owns liveness."""
     from lib.tasks_pkg import background_commands
     info = background_commands.check_background_command(
-        command_id, user_id=OWNER, wait_s=within_s)
+        command_id, user_id=OWNER, wait_s=background_commands.WAIT_BACKGROUND_COMMAND_MAX_S)
     assert info and info['status'] == 'completed', info
     return info
 
@@ -246,18 +248,62 @@ async def _post(runtime, path, body):
     return text
 
 
+@pytest.fixture
+def gated_handoff_command(tmp_path):
+    """The real shell stays alive until this case releases its owned FIFO."""
+    fifo = tmp_path / 'command-release'
+    os.mkfifo(fifo)
+    descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    released = False
+    lock = threading.Lock()
+
+    def release():
+        nonlocal released
+        with lock:
+            if not released:
+                os.write(descriptor, b'\n')
+                released = True
+
+    try:
+        yield f'read -r _ < {shlex.quote(str(fifo))}; echo headless-handoff-done', release
+    finally:
+        release()
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize('finish_order', ['poll', 'inbox'])
 @pytest.mark.parametrize('mode', ['code_exec', 'project'])
 @pytest.mark.parametrize('route', ['chat', 'agent'])
 def test_long_command_hands_off_and_poll_collects_its_result(
-        route, mode, runtime, monkeypatch, tmp_path):
+        route, mode, finish_order, runtime, monkeypatch, tmp_path,
+        gated_handoff_command):
     from lib.tasks_pkg.handlers import _background_command as handoff
 
-    # Every subprocess is old enough for the elapsed-time handoff at once.
+    # Every subprocess is old enough for handoff, but its completion is owned
+    # by the case, not by interpreter startup or round-persistence latency.
     monkeypatch.setattr(handoff, 'AUTO_BACKGROUND_AFTER_S', 0.0)
+    command, release = gated_handoff_command
+    if finish_order == 'inbox':
+        from lib.tasks_pkg import background_commands
+        take = background_commands.take_run_completions
+
+        def complete_before_inbox(**kwargs):
+            for row in background_commands.list_background_commands(**kwargs):
+                release()
+                _wait_until_finished(row['command_id'])
+            return take(**kwargs)
+
+        monkeypatch.setattr(background_commands, 'take_run_completions', complete_before_inbox)
+
+    def poll_after_request_capture(seen):
+        # ScriptedProvider recorded the pre-poll request before this callback.
+        release()
+        return _call('poll', {'id': _handle(seen.tool_results(1)[0]),
+                              'wait_s': 60}, 'call-headless-2')
+
     provider = ScriptedProvider(
-        _call('run_command', {'command': 'sleep 1; echo headless-handoff-done'}),
-        lambda seen: _call('poll', {'id': _handle(seen.tool_results(1)[0]),
-                                    'wait_s': 60}, 'call-headless-2'),
+        _call('run_command', {'command': command}),
+        poll_after_request_capture,
         {'content': 'finished'}).install(monkeypatch)
     _run(_post(runtime, *_task_request(route, config=_command_config(mode, tmp_path))))
 
@@ -266,8 +312,18 @@ def test_long_command_hands_off_and_poll_collects_its_result(
     assert 'stopped' in receipt  # nothing started here outlives the response
     assert 'shown in the conversation' not in receipt
     assert 'headless-handoff-done' in polled
-    # poll already showed the result, so no round boundary presents it again.
-    assert '<background-command id=' not in json.dumps(provider.requests[2]['messages'])
+    # Poll suppresses future inbox delivery, not an already delivered original
+    # in chronological history. Both schedules must have no post-poll addition.
+    command_id = _handle(receipt)
+    prefix = f'<background-command id="{command_id}" '
+
+    def carriers(index):
+        return [message['content'] for message in provider.requests[index]['messages']
+                if isinstance(message.get('content'), str)
+                and message['content'].startswith(prefix)]
+
+    assert len(carriers(1)) == (1 if finish_order == 'inbox' else 0)
+    assert carriers(2) == carriers(1)
 
 
 @pytest.mark.parametrize('route', ['chat', 'agent'])

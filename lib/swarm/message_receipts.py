@@ -142,12 +142,15 @@ def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
     an exact live binding or a mailbox input witness can join the two. A resumed
     assignment can therefore have more than one participant task identity.
     """
-    from lib.swarm.run_messages import RunMessageRepository, binding_for, validate_target
+    from lib.swarm.run_messages import RunMessageRepository, binding_for, scope_key, validate_scope
     from lib.swarm.team_messages import coordinator_binding
     from lib.tasks_pkg.manager import task_user_id
 
     receipts, participants, versions = [], [], {}
     failures: list[BaseException] = []
+    # Every target shares the session's conversation scope: read it once per
+    # snapshot, not once per agent (an O(N) snapshot per event made it O(N^2)).
+    scope_verdicts: dict[tuple, BaseException | None] = {}
     agent_rows = {agent['id']: agent for agent in agents}
     targets = [(spec.id, spec.role, spec) for spec in specs]
     # Run parent identity is topology, not the project Coordinator role.
@@ -160,7 +163,18 @@ def snapshot_receipts(session, agents: list[dict], specs: list) -> dict:
             if (binding['owner'] != session.user_id
                     or binding['conversationId'] != session.conv_id):
                 raise ValueError('Snapshot owner does not match mailbox owner')
-            validate_target(binding, active_retained=False)
+            key = scope_key(binding)
+            if key not in scope_verdicts:
+                try:
+                    validate_scope(binding)
+                    scope_verdicts[key] = None
+                except Exception as error:
+                    # One scope's failure must not hide another agent's mailbox.
+                    logger.debug('Swarm snapshot scope rejected for %s: %s', agent_id, error)
+                    scope_verdicts[key] = error
+            if scope_verdicts[key] is not None:
+                failures.append(scope_verdicts[key])
+                continue
             payload, revision = RunMessageRepository(binding).load()
             agent = agent_rows.get(agent_id)
             rows = [receipt_fields(binding, {**item, 'messageSequence': sequence,

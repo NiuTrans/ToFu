@@ -12,7 +12,7 @@ import uuid
 
 import pytest
 
-from tests.conversation.test_durable_attempt_execution import claimed  # noqa: F401
+from tests.conversation.test_durable_attempt_execution import claimed as claimed
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api

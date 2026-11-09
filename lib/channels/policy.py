@@ -38,11 +38,17 @@ def robot_thread(account: dict[str, Any] | None) -> str:
 
     Only a group command chat: the robot posts into groups it is a member of,
     while a private chat with the robot would be a different conversation.
+    The robot is the Settings one or the Internal package's built-in one
+    (``lib.channels.dx.robot.effective_robot``, an immutable package file).
+    Whether it may post there for this server is the binding's decision
+    (``lib.channels.dx.robot.binding_refusal``).
     """
+    from lib.channels.dx.robot import effective_robot
     account = account or {}
     chat = str(account.get('commandChat') or '')
-    has_robot = bool((account.get('robot') or {}).get('clientId'))
-    return chat if has_robot and chat and ThreadKey.parse(chat).kind == 'gid' else ''
+    if not chat or ThreadKey.parse(chat).kind != 'gid':
+        return ''
+    return chat if effective_robot(account) is not None else ''
 
 
 def owner_uid(account: dict[str, Any] | None) -> str:
@@ -61,11 +67,29 @@ def has_command_chat(channel: str) -> bool:
     return bool(CHANNEL_TRAITS[channel]['commandChat'])
 
 
-def classify(event: ChannelEvent, mode: str, owner: str) -> str:
+def classify(event: ChannelEvent, mode: str, owner: str, *, robot_chat: bool = False) -> str:
     """Return ``command``, ``candidate``, ``context`` or ``drop`` (C2 table).
 
     ``ignore`` never reaches here (ingress keeps only thread metadata).
+    ``robot_chat`` marks the account's robot thread (``robot_thread``): one
+    robot application serves many Tofu servers (C6), so there everyone but
+    the owner is context. Another member may be another server's owner,
+    answered by that server, and robot posts that are not this account's own
+    echoes are another server's; a review of either would answer a second time
+    or bounce robot posts between servers.
+
+    A message the platform marks as a bot's or a platform notice
+    (``sender_kind``) is at most context: kept where a person's message would
+    be delivered, never a command or a candidate, so no review or auto-reply
+    answers one automated account with another.
     """
+    disposition = _classify_person(event, mode, owner, robot_chat=robot_chat)
+    if event.sender_kind != 'user' and disposition in ('command', 'candidate'):
+        return 'context'
+    return disposition
+
+
+def _classify_person(event: ChannelEvent, mode: str, owner: str, *, robot_chat: bool) -> str:
     owner_authored = bool(owner) and event.sender_id == owner
     if owner_authored:
         if not has_command_chat(event.channel):
@@ -75,6 +99,8 @@ def classify(event: ChannelEvent, mode: str, owner: str) -> str:
             # it to other channels; elsewhere it is context.
             return 'candidate' if mode == 'watch' else 'context'
         return 'command' if mode == 'command' else 'context'
+    if robot_chat:
+        return 'context'
     if mode in ('command', 'watch'):
         return 'candidate'
     if mode == 'mentions':

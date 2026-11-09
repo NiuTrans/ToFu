@@ -80,26 +80,20 @@ def text_update_charge_bytes(
 
 
 class TurnProjectionCache:
-    """Thread-safe LRU bounded by entries, charged bytes, and idle lifetime."""
+    """Thread-safe LRU bounded by charged bytes and idle lifetime."""
 
     def __init__(
         self,
         max_bytes: int,
         *,
-        max_entries: int | None = None,
         max_idle_seconds: float = 600.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_bytes <= 0:
             raise ValueError("projection cache max_bytes must be positive")
-        if max_entries is None:
-            max_entries = max(4, min(256, max_bytes // (1024 * 1024)))
-        if max_entries <= 0:
-            raise ValueError("projection cache max_entries must be positive")
         if max_idle_seconds <= 0:
             raise ValueError("projection cache idle lifetime must be positive")
         self.max_bytes = int(max_bytes)
-        self.max_entries = int(max_entries)
         self.max_idle_seconds = float(max_idle_seconds)
         self._clock = clock
         self._lock = threading.RLock()
@@ -167,7 +161,7 @@ class TurnProjectionCache:
         stored_matches_projection: bool,
         stable_segments: bool,
     ) -> bool:
-        """Retain one baseline when it fits both cache budgets."""
+        """Retain one baseline when it fits the byte budget."""
         charge = max(1, int(charge_bytes))
         now = self._clock()
         with self._lock:
@@ -191,10 +185,10 @@ class TurnProjectionCache:
             )
             self._entries[key] = entry
             self._charged_bytes += charge
-            while (
-                len(self._entries) > self.max_entries
-                or self._charged_bytes > self.max_bytes
-            ):
+            # Charged bytes are the only capacity bound: an entry count would
+            # evict live baselines once concurrent Turns outnumber it, making
+            # every event reload and refold its durable projection.
+            while self._charged_bytes > self.max_bytes:
                 oldest_key = next(iter(self._entries))
                 self._remove(oldest_key)
                 self._metrics["capacity_evictions"] += 1
@@ -221,7 +215,6 @@ class TurnProjectionCache:
                 **self._metrics,
                 "entries": len(self._entries),
                 "charged_bytes": self._charged_bytes,
-                "max_entries": self.max_entries,
                 "max_bytes": self.max_bytes,
                 "max_idle_seconds": self.max_idle_seconds,
             }

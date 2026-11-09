@@ -123,34 +123,33 @@ class TestCostMath:
         """A failed authority read must never masquerade as an empty month:
         the scan raises so no day is persisted as zero-cost."""
         with mock.patch(
-                "lib.conversations.repository.scan_conversations_bounded",
+                "lib.conversations.repository.scan_conversation_turn_usage",
                 side_effect=RuntimeError("authority unavailable")):
             with pytest.raises(RuntimeError, match="authority unavailable"):
                 cost._scan_costs_in_range(
                     0, 10**13, owner_user_id=OWNER_USER_ID)
 
-    def test_cost_scan_projects_usage_from_authority_snapshot(self):
-        from lib.conversations.repository import ConversationSnapshot
+    def test_cost_scan_projects_usage_from_authority_projection(self):
+        from lib.conversations.repository import ConversationTurnUsage
 
-        snapshot = ConversationSnapshot(
+        projection = ConversationTurnUsage(
             metadata={
-                "id": "c-projected", "title": "Projected",
+                "id": "c-projected", "title": "",
                 "created_at": 10, "updated_at": 20,
                 "settings": {"model": "fallback-model"},
             },
-            messages=[
-                {"role": "user", "content": "question"},
-                {
-                    "role": "assistant",
-                    "usage": {"prompt_tokens": 100, "completion_tokens": 25},
-                    "timestamp": 15, "model": "model-x",
-                    "providerId": "provider-y",
-                },
-            ],
+            message_count=2,
+            title_fallback="question",
+            turns=[{
+                "index": 1,
+                "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+                "timestamp": 15, "model": "model-x",
+                "providerId": "provider-y",
+            }],
         )
 
-        assert cost._usage_rows_from_snapshots([snapshot]) == [{
-            "id": "c-projected", "title": "Projected",
+        assert list(cost._usage_rows_from_projections([projection])) == [{
+            "id": "c-projected", "title": "",
             "created_at": 10, "updated_at": 20,
             "conv_model": "fallback-model", "first_content": "question",
             "msg_index": 1, "total_msgs": 2,
@@ -162,23 +161,25 @@ class TestCostMath:
     def test_projected_usage_row_preserves_cost_rollup(self):
         import datetime as _dt
         ts = int(_dt.datetime(2026, 8, 7, 12).timestamp() * 1000)
-        from lib.conversations.repository import ConversationSnapshot
-        snapshot = ConversationSnapshot(
+        from lib.conversations.repository import ConversationTurnUsage
+        projection = ConversationTurnUsage(
             metadata={
                 "id": "c-projected", "title": "Projected",
                 "created_at": ts, "updated_at": ts,
                 "settings": {"model": "fallback-model"},
             },
-            messages=[{
-                "role": "assistant", "timestamp": ts,
+            message_count=1,
+            title_fallback="",
+            turns=[{
+                "index": 0, "timestamp": ts,
                 "usage": {"prompt_tokens": 100, "completion_tokens": 25},
                 "model": "model-x", "providerId": "provider-y",
             }],
         )
 
         with mock.patch(
-                "lib.conversations.repository.scan_conversations_bounded",
-                return_value=(1, iter([snapshot]))), \
+                "lib.conversations.repository.scan_conversation_turn_usage",
+                return_value=(1, iter([projection]))), \
                 mock.patch.object(cost, "_calc_msg_cost_cny", return_value=1.25):
             got = cost._scan_costs_in_range(
                 ts - 1, ts + 1, 2026, 8,

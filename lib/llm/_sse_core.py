@@ -50,6 +50,7 @@ from typing import Any, Optional
 
 import lib as _lib
 from lib.llm._sse_framer import SSEEvent
+from lib.llm._stream_text import StreamTextBuffer
 from lib.llm.llm_errors import ProviderToolCallFloodError as ProviderToolCallFloodError
 from lib.llm._transport import StreamProgress, chat_url, headers
 from lib.llm.cache import add_cache_breakpoints
@@ -269,6 +270,7 @@ class RequestPlan:
     t0: float
     # Optional public Responses WebSocket transport metadata.  Kept off the
     # request body so generic providers never see Tofu control fields.
+    network_scope: str | None = None
     responses_transport: str = 'sse'
     responses_state_key: str = ''
     responses_profile: str = ''
@@ -519,6 +521,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         from lib.llm.responses_outbound import (
             ResponsesSSETranslator,
             openai_body_to_responses,
+            responses_reasoning_replay,
             responses_url,
         )
         # oauth='codex' selects the Codex dialect (instructions/include/
@@ -526,9 +529,13 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # the generic profile.
         _profile = 'codex' if oauth == 'codex' else 'default'
         _responses_profile = _profile
+        # The reply keeps exactly the encrypted reasoning this request asks
+        # for and replays; ``body`` is still the canonical request here.
+        _reasoning_replay = responses_reasoning_replay(body, profile=_profile)
         body, _resp_reverse = openai_body_to_responses(
             body, profile=_profile, stream=True)
-        wire_translator = ResponsesSSETranslator(model=body.get('model', ''))
+        wire_translator = ResponsesSSETranslator(
+            model=body.get('model', ''), reasoning_replay=_reasoning_replay)
         # Truncated (64-char) tool names echo back from the model — the
         # per-request reverse map restores them before tool dispatch.
         wire_translator.tool_name_reverse = _resp_reverse
@@ -642,6 +649,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                      _wire_item_count, 'yes' if body.get('tools') else 'no')
 
     trace_id = uuid.uuid4().hex
+    _context_lineage = _admitted_request.context_diagnostics()
+    if _context_lineage:
+        _context_lineage['traceId'] = trace_id
     if api_protocol == 'anthropic':
         from lib.llm.anthropic_outbound import anthropic_headers
         hdrs = anthropic_headers(api_key, extra_headers)
@@ -702,6 +712,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 )
             _request_activity_sink({
                 'kind': 'wire_projection',
+                **({'contextLineage': _context_lineage} if _context_lineage else {}),
                 'model': body.get('model') or '',
                 'backend': _tool_search_backend,
                 'toolNames': [
@@ -756,13 +767,16 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     raw_dumper.wire_region = None
     # The provider-visible tool surface as sent. A gateway may key cache reuse
     # on it (Sankuai Claude: joined names over ~492 bytes never reuse), so the
-    # per-round record carries it next to the logical catalog size.
+    # per-round record carries it next to the logical catalog size, plus the
+    # route's budget so an over-budget miss is attributed to the request.
     from lib.llm.tool_wire import tool_name_bytes
     _sent_tools = body.get('tools')
     raw_dumper.wire_tool_surface = {
         'count': len(_sent_tools) if isinstance(_sent_tools, list) else 0,
         'name_bytes': tool_name_bytes(_sent_tools),
     }
+    if _tool_name_budget_bytes:
+        raw_dumper.wire_tool_surface['name_budget_bytes'] = _tool_name_budget_bytes
     try:
         from lib.tasks_pkg.wire_fingerprint import (
             cache_relevant_controls, capture_wire_message_evidence,
@@ -905,10 +919,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                if key in _raw_archive_context},
         }
     raw_dumper.request_identity = _admitted_request.diagnostics()
+    raw_dumper.context_lineage = _context_lineage
 
     raw_dumper.reasoning_resolution = _reasoning_resolution
     return RequestPlan(url=url, hdrs=hdrs, body=_admitted_request, trace_id=trace_id,
                        raw_dumper=raw_dumper, wire_translator=wire_translator,
+                       network_scope='subscription' if oauth else None,
                        t0=t0, responses_transport=_responses_transport,
                        responses_state_key=_responses_state_key,
                        responses_profile=_responses_profile,
@@ -1059,7 +1075,7 @@ class SSEAccumulator:
         # calls), or (b) the model/gateway emitting the concatenated name
         # itself. The existing raw_sse_anomaly.log could NOT decide it: its
         # tool_calls samples are 100% ``toolu_bdrk_`` (bedrock line), zero
-        # frames from the sankuai OpenAI-compat line where the incident
+        # frames from the example-corp OpenAI-compat line where the incident
         # happened. So sample the shape here, on whatever line is live.
         # These counters change NO behaviour.
         self._tc_obs_index_absent = 0
@@ -1079,9 +1095,33 @@ class SSEAccumulator:
         # concatenated onto the previous one (the 2026-07-27 root cause).
         self._tc_obs_slot_split = 0
 
+    @property
+    def content(self) -> str:
+        return self._content_buffer.getvalue()
+
+    @content.setter
+    def content(self, value: str) -> None:
+        self._content_buffer = StreamTextBuffer(value)
+
+    @property
+    def thinking_text(self) -> str:
+        return self._thinking_buffer.getvalue()
+
+    @thinking_text.setter
+    def thinking_text(self, value: str) -> None:
+        self._thinking_buffer = StreamTextBuffer(value)
+
+    @property
+    def thinking_signature(self) -> str:
+        return self._signature_buffer.getvalue()
+
+    @thinking_signature.setter
+    def thinking_signature(self, value: str) -> None:
+        self._signature_buffer = StreamTextBuffer(value)
+
     def produced_output(self) -> bool:
         """Whether this attempt already received model output of any kind."""
-        return bool(self.content or self.thinking_text or self.thinking_signature
+        return bool(self._content_buffer or self._thinking_buffer or self._signature_buffer
                     or self.tool_calls_acc or self._mm_buf)
 
     def mark_aborted(self):
@@ -1521,7 +1561,7 @@ class SSEAccumulator:
         # and the opaque Claude signature, in separate chunks:
         #   [{"type":"thinking","thinking":"…"}]    ← text delta
         #   [{"type":"thinking","signature":"…"}]   ← signature (once per turn)
-        # The Meituan/sankuai OpenAI-compat gateway uses exactly this shape
+        # The YourProvider/example-corp OpenAI-compat gateway uses exactly this shape
         # for Claude models, so harvest both keys here.
         rd_parts = delta.get('reasoning_details')
         if isinstance(rd_parts, list):
@@ -1545,7 +1585,7 @@ class SSEAccumulator:
                 if not isinstance(d, dict) or not d.get('signature'):
                     continue
                 if isinstance(d['signature'], str):
-                    self.thinking_signature += d['signature']
+                    self._signature_buffer.append(d['signature'])
                 else:
                     self.record_malformed_frames(
                         1, ('invalid_reasoning_signature: expected a string',))
@@ -1553,7 +1593,7 @@ class SSEAccumulator:
             self.record_malformed_frames(
                 1, ('invalid_reasoning_details: expected an array',))
         if td:
-            self.thinking_text += td
+            self._thinking_buffer.append(td)
             self._notify_reasoning_progress(td)
             if self.on_thinking:
                 self.on_thinking(td)
@@ -1564,7 +1604,7 @@ class SSEAccumulator:
         _tsig = delta.get('thinking_signature')
         if _tsig:
             if isinstance(_tsig, str):
-                self.thinking_signature += _tsig
+                self._signature_buffer.append(_tsig)
             else:
                 self.record_malformed_frames(
                     1, ('invalid_thinking_signature: expected a string',))
@@ -1584,7 +1624,7 @@ class SSEAccumulator:
                 if self._mm_mode:
                     self._feed_minimax(cd)
                 else:
-                    self.content += cd
+                    self._content_buffer.append(cd)
                     if self.progress.mark_content(cd):
                         self._notify_actionable_output()
                     if self.on_content:
@@ -1948,7 +1988,7 @@ class SSEAccumulator:
             if self._mm_in_think:
                 end_idx = self._mm_buf.find('</think>')
                 if end_idx == -1:
-                    self.thinking_text += self._mm_buf
+                    self._thinking_buffer.append(self._mm_buf)
                     self._notify_reasoning_progress(self._mm_buf)
                     if self.on_thinking:
                         self.on_thinking(self._mm_buf)
@@ -1956,7 +1996,7 @@ class SSEAccumulator:
                 else:
                     think_part = self._mm_buf[:end_idx]
                     if think_part:
-                        self.thinking_text += think_part
+                        self._thinking_buffer.append(think_part)
                         self._notify_reasoning_progress(think_part)
                         if self.on_thinking:
                             self.on_thinking(think_part)
@@ -1968,14 +2008,14 @@ class SSEAccumulator:
                     if len(self._mm_buf) > 7 and '<' in self._mm_buf[-7:]:
                         safe = self._mm_buf[:self._mm_buf.rfind('<', max(0, len(self._mm_buf) - 7))]
                         if safe:
-                            self.content += safe
+                            self._content_buffer.append(safe)
                             if self.progress.mark_content(safe):
                                 self._notify_actionable_output()
                             if self.on_content:
                                 self.on_content(safe)
                         self._mm_buf = self._mm_buf[len(safe):]
                     else:
-                        self.content += self._mm_buf
+                        self._content_buffer.append(self._mm_buf)
                         if self.progress.mark_content(self._mm_buf):
                             self._notify_actionable_output()
                         if self.on_content:
@@ -1984,7 +2024,7 @@ class SSEAccumulator:
                 else:
                     before = self._mm_buf[:start_idx]
                     if before:
-                        self.content += before
+                        self._content_buffer.append(before)
                         if self.progress.mark_content(before):
                             self._notify_actionable_output()
                         if self.on_content:
@@ -2019,12 +2059,12 @@ class SSEAccumulator:
         # Flush MiniMax buffer
         if self._mm_mode and self._mm_buf:
             if self._mm_in_think:
-                self.thinking_text += self._mm_buf
+                self._thinking_buffer.append(self._mm_buf)
                 self._notify_reasoning_progress(self._mm_buf)
                 if self.on_thinking:
                     self.on_thinking(self._mm_buf)
             else:
-                self.content += self._mm_buf
+                self._content_buffer.append(self._mm_buf)
                 if self.progress.mark_content(self._mm_buf):
                     self._notify_actionable_output()
                 if self.on_content:
@@ -2355,7 +2395,7 @@ class SSEAccumulator:
             )
 
         # Diagnostics: tool_calls finish reason with ZERO payload
-        # (2026-08-06 kimi-k3/sankuai incident, conv msh3qeplzneph5 R3).
+        # (2026-08-06 kimi-k3/example-corp incident, conv msh3qeplzneph5 R3).
         # The gateway closed the stream cleanly reporting
         # finish_reason=tool_calls, yet not one tool_call delta accumulated
         # — the model's tool calls were lost UPSTREAM. Downstream this used
@@ -2455,6 +2495,9 @@ class SSEAccumulator:
         _request_identity = getattr(self.raw_dumper, 'request_identity', None)
         if _request_identity:
             usage['_request_identity'] = dict(_request_identity)
+        _context_lineage = getattr(self.raw_dumper, 'context_lineage', None)
+        if _context_lineage:
+            usage['_wire_context_lineage'] = _context_lineage
         _wfp = getattr(self.raw_dumper, 'wire_fp', None)
         if _wfp is not None:
             usage['_wire_fp'] = _wfp

@@ -29,7 +29,7 @@ import socket
 import time
 import uuid
 
-from lib.http_transport.client import http_post
+from lib.oauth.http import http_post
 from lib.log import get_logger
 from lib.oauth.token_store import OAuthExchangeError, load_token, save_token
 

@@ -190,3 +190,56 @@ fn legacy_steer_recovery_bytes_settle_atomically_at_each_commit_fault() {
         }
     }
 }
+
+#[test]
+fn steer_images_recover_with_their_writer_index_and_never_pass_as_legacy_records() {
+    let images = json!([{"preview":"/api/images/shot.png","url":"/api/images/shot.png","sizeKB":96}]);
+    for legacy in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let pair = accepted_executor_pair(&mut database, 11, "image-steer", 1_000);
+        let attempt = &pair["attempt"];
+        let attempt_id = attempt["attemptId"].as_str().unwrap();
+        execute(&mut database, &request("turn.attempt.bind", 11,
+            json!({"attempt_id":attempt_id,"task_id":"image-steer-task","user_id":11}),
+            Some("image-steer-bind")), 1_010).unwrap();
+        let read = request("turn.get", 11, json!({"conversation_id":"image-steer",
+            "turn_id":attempt["turnId"],"user_id":11}), None);
+        let mut projection = execute(&mut database, &read, 1_012).unwrap()["projection"].clone();
+        projection["content"] = json!("unchanged complete content");
+        execute(&mut database, &request("turn.event.record", 11,
+            json!({"attempt_id":attempt_id,"task_id":"image-steer-task","user_id":11,
+                "status":"running","event_type":"projection_updated","event_payload":{},
+                "projection":projection}), Some("image-steer-event")), 1_020).unwrap();
+        let key = recovery_bytes_key(attempt);
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let old = database.entity_get(&mut tx, &key).unwrap().unwrap();
+        drop(tx);
+        execute(&mut database, &request("turn.steer.commit", 11,
+            json!({"conversation_id":"image-steer","attempt_id":attempt_id,
+                "command_id":"image-steer-1","text":"看这张截图","images":images,
+                "author":{"actor":"human"},"user_id":11}), Some("image-steer-1")), 1_031).unwrap();
+        if legacy {
+            // A stale index beside an image record: the pre-fix writer that left
+            // indexes stale never stored images, so nothing explains this suffix.
+            let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            database.entity_put(&mut tx, key.clone(), old.clone()).unwrap();
+            database.commit(tx).unwrap();
+        }
+        let before = execute(&mut database, &read, 1_100).unwrap();
+        assert_eq!(before["projection"]["_userSteerInjects"][0]["previews"][0]["images"], images);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let recovered = execute(&mut database, &request("turn.recover", 11,
+            json!({"user_id":11}), Some("image-steer-recovery")), 2_000);
+        if legacy {
+            assert!(matches!(recovered, Err(SemanticExecutionError::Integrity(_))));
+            assert_eq!(execute(&mut database, &read, 2_001).unwrap(), before);
+        } else {
+            assert_eq!(recovered.unwrap()["recovered"], 1);
+            let after = execute(&mut database, &read, 2_001).unwrap();
+            assert_eq!(after["projection"], before["projection"]);
+            assert_eq!(after["status"], "interrupted");
+        }
+    }
+}

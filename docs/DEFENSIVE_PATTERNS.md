@@ -412,6 +412,28 @@ cause; keeping closures until task expiry retains captured environments.
 captured 64 KiB each: 6,553,600 captured payload bytes become zero reachable payload
 bytes after settlement while all receipts remain. This measures ownership, not RSS.
 
+### A finalizer never waits; an interrupted close leaves the resource open
+
+Problem: `EmbeddedRuntime._stop` marked the runtime closing, then waited for
+active calls. An interrupt raised in that wait (pytest-timeout's signal,
+KeyboardInterrupt) left it closing forever: every call was refused although
+the native handle stayed open, and every later close waited for a closer that
+no longer existed. Its `__del__` called that close, so collecting such a
+runtime blocked whichever thread happened to allocate, indefinitely (a test
+worker inside an unrelated fixture). Decision: a close
+interrupted before it takes the handle restores the open state, wakes waiting
+closers and re-raises; the close did not happen. A finalizer runs at an
+arbitrary allocation point of any thread, so it never waits on a condition or
+blocks on a lock: it acquires only without blocking, closes only an open, idle
+resource and otherwise leaves the handle to process exit. An unreachable
+object has no callers, so a busy or closing state there is leftover state.
+Alternatives rejected: a timeout on the finalizer's wait still stalls an
+arbitrary allocation site and adds a tuning constant; removing the finalizer
+leaks every native handle whose owner forgets to close it. Anchor:
+`tofu_db/embedded.py` (`_stop`, `__del__`); regression:
+`tests/tofudb/test_embedded_runtime_lifecycle.py` (interrupted close, finalizer
+on mid-close and busy runtimes).
+
 ## Report orthogonal outcomes independently
 
 `timed_out`, cancellation, exit status, and error kind are orthogonal facts.
@@ -607,6 +629,18 @@ boot pin in the measured catalogue, with no per-request or uptime growth.
 The Supervisor and lifecycle manager
 processes do not install the finder. Verify `tests/runtime_pinned_import_source/`.
 
+Frozen execution admission distinguishes an application's import root from an
+environment merely stored beneath it. Problem: a lexical checkout-path prefix
+classified `.venv/.../site-packages` as application code, so a lazy dependency
+import failed boot even though its installed environment was in the execution
+plan. Decision: derive the resolved module's import root from its qualified name
+and package/module spec, then compare that root to the declared application
+roots. New application modules and packages still fail the frozen-generation
+fence. Alternatives rejected: exempting a directory named `.venv` encodes one
+environment layout; pinning installed dependencies duplicates the interpreter
+fingerprint and loads unrelated sources. Synthetic real imports cover contained
+and symlinked environments plus newly added nested application packages.
+
 ## An empty catch names what it swallows
 
 A `catch`/`except` body that does nothing must name, in a comment at the catch
@@ -726,8 +760,14 @@ their existing meaning. This observation owns no second execution lifecycle.
 Poll reads activity before capturing events: an exit during that capture must
 cause another drain, never an inactive page that omits the worker's last event.
 TTL and capacity reclamation share one eligibility predicate that protects
-entered callbacks. Normal TTL starts at the later of primary completion and
-last callback exit, without rewriting the public completion timestamp. Explicit
+entered callbacks and durable exit evidence (`_exitReceiptPending`, held by a
+claim-bound conversation carrier until its exit receipt commits; recovery joins
+that carrier instead of inferring exit from its absence). The mark is one flag
+on an already retained carrier: joined completion clears it before returning,
+and otherwise the first re-claim after the lease ends records the receipt.
+Normal TTL starts at
+the later of primary completion and last callback exit, without rewriting the
+public completion timestamp. Explicit
 owner removal/discard keeps its existing authority. Measurement in
 `test_task_worker_observation.py`: with TTL 10, completion at clock 100 and exit
 at 200, the carrier survives both TTL/capacity sweeps during execution, survives

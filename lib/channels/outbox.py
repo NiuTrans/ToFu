@@ -8,14 +8,21 @@ drafts announced in the command chat, ``never`` refuses; C5, C11); audit and
 record the owner's decisions on items for other people; label agent text in
 third-party threads with ``[Tofu 代发]``; send
 per thread in queue order (threads independent; drafts and failures never
-block); reconcile an unknown result against recent thread history by the
-item's marker or client ID (a notification-robot item by its posted texts)
-before any resend; keep the provider message ID for echo suppression. An
+block); keep a deferred result (not connected, rate limited) queued and its
+thread held until the platform's named time; reconcile an unknown result
+against recent thread history by the item's marker or client ID (a
+notification-robot item by its posted texts, resuming after the parts
+already posted) before any resend, where only a read that succeeds is
+evidence: one that fails leaves the item as it is and holds only its own
+thread (channel protocol P4); keep the
+provider message ID for echo suppression. An
 item with attachments (C10) is sent as parts, each with its own state; an
-accepted file counts as sent only once the thread shows it.
+accepted file counts as sent only once the thread shows it. A text longer
+than the sender's documented limit is sent as chunks, each its own message
+with its own state (channel protocol P4/P5).
 
 Entry points: ``enqueue``, ``approve``, ``discard``, ``execute``,
-``confirm_echo``, ``record_robot_texts``, ``robot_echo``,
+``confirm_echo``, ``record_robot_texts``, ``record_robot_posted``, ``robot_echo``,
 ``register_executor``/``kick``. The sender port is the
 running adapter of the item's channel (``send``, ``history_since``); each
 adapter executes only its own channel's items. This module performs no I/O of
@@ -36,18 +43,23 @@ from lib.channels.model import (
 from lib.channels.policy import effective_reply_policy, is_command_chat, owner_uid
 from lib.channels.store import ChannelStore, is_conflict, now_ms
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 logger = get_logger(__name__)
 
 # Provider results that prove nothing was sent; every other failure is unknown.
-# GitHub (C8) adds refused credentials and permission or lock refusals; a rate
-# limit stays unknown, so the item is reconciled and resent after the limit.
+# GitHub (C8) adds refused credentials and permission or lock refusals.
 DEFINITE_SEND_FAILURES = frozenset({
     'invalid_input', 'unsupported_target', 'reply_target_not_found',
     'reply_target_lookup_failed', 'sdk_not_found', 'auth_failed', 'forbidden',
     'attachment_rejected',
 })
+# Provider results that prove nothing was sent yet and ask for a later send (the
+# channel protocol's deferred receipts, x-legacy deferredSendCodes): not
+# connected, or the platform's rate limit. The item stays queued and holds its
+# thread until the result's ``retryAfterMs`` (the next pass when it names no
+# time); a deferral is no attempt, so it is neither reconciled nor a fault.
+DEFERRED_SEND_CODES = frozenset({'not_connected', 'rate_limited'})
 
 
 # An echo that confirms no item: a send of the bridge's own connection without
@@ -68,6 +80,11 @@ class OutboxSender(Protocol):
                         marker: str) -> dict[str, Any]: ...
 
     def history_from(self, thread: ThreadKey, external_id: str) -> list[ChannelEvent]: ...
+
+    # Optional: a sender whose identity documents a text limit in ``thread`` (descriptor
+    # ``maxTextBytes``) names it, and a longer text goes out as chunks; a sender without this
+    # method sends each item's text as one message.
+    def max_text_bytes(self, thread: ThreadKey) -> int | None: ...
 
 
 _EXECUTORS: dict[tuple[int, str], Callable[[], None]] = {}
@@ -130,7 +147,8 @@ def enqueue(owner: int, thread: str, text: str, *, idempotency_key: str,
             attachments: list[dict[str, Any]] | None = None, authority: str = 'owner',
             review: frozenset[str] | None = None, needs_approval: bool = False,
             store: ChannelStore | None = None) -> OutboxItem:
-    """Record one outbound message; ``attachments`` are admitted records (``lib.channels.attachments``).
+    """Record one outbound message; ``attachments`` are admitted records (``lib.channels.attachments``),
+    named in the text instead where the platform carries no files.
 
     ``authority`` is the request's authority (C11, ``lib.channels.assistant``):
     model tools pass their Turn's; owner-side code paths (command-chat
@@ -143,9 +161,6 @@ def enqueue(owner: int, thread: str, text: str, *, idempotency_key: str,
     store = store or ChannelStore(owner)
     key = ThreadKey.parse(thread)
     attachments = [dict(record) for record in attachments or ()]
-    if attachments and not CHANNEL_TRAITS[key.channel].get('attachments'):
-        raise ChannelError('attachments_unsupported',
-                           f'{CHANNEL_TRAITS[key.channel]["label"]} threads take no attachments')
     if not isinstance(text, str) or not text.strip():
         raise ChannelError('invalid_text', 'Text must be non-empty')
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
@@ -178,13 +193,13 @@ def enqueue(owner: int, thread: str, text: str, *, idempotency_key: str,
     if decided_by:
         item.extra['decision'] = {'kind': 'queued', 'by': decided_by, 'atMs': created,
                                   'turnId': str(origin.get('turnId') or '')}
-    if attachments:
-        item.extra['attachments'] = attachments
+    _place_attachments(item, key.channel, attachments)
     # Everything for other people is audited; the command chat is the owner's own.
     stored, new = store.create_outbox_item(item, audit=not command)
     from lib.channels.attachments import identities
+    requested = stored.extra.get('attachments') or stored.extra.get('degradedAttachments') or []
     if not new and (stored.extra.get('authoredText') != text or stored.reply_to != (reply_to or None)
-                    or identities(stored.extra.get('attachments') or []) != identities(attachments)):
+                    or identities(requested) != identities(attachments)):
         raise ChannelError('idempotency_conflict',
                            'This idempotency_key was already used with different content')
     if stored.state == 'queued':
@@ -192,6 +207,20 @@ def enqueue(owner: int, thread: str, text: str, *, idempotency_key: str,
     elif stored.state == 'draft':
         _announce_draft(store, stored)
     return stored
+
+
+def _place_attachments(item: OutboxItem, channel: str, attachments: list[dict[str, Any]]) -> None:
+    """Files go as their own messages where the platform carries them (C10); elsewhere the text names
+    each one instead (channel protocol P5: degraded, never refused or dropped), so a draft shows it too."""
+    if not attachments:
+        return
+    if CHANNEL_TRAITS[channel].get('attachments'):
+        item.extra['attachments'] = attachments
+        return
+    from lib.channels.attachments import degraded_note
+    item.extra['degradedAttachments'] = attachments
+    notes = [degraded_note(record, CHANNEL_TRAITS[channel]['label']) for record in attachments]
+    item.text = item.text.rstrip() + '\n\n' + '\n'.join(notes)
 
 
 def _announce_draft(store: ChannelStore, item: OutboxItem) -> None:
@@ -317,6 +346,18 @@ def record_robot_texts(store: ChannelStore, item_id: str, texts) -> None:
     _transition(store, item_id, change)
 
 
+def record_robot_posted(store: ChannelStore, item_id: str, message_ids) -> None:
+    """Note the parts of an in-flight robot item posted so far, in order: no attempt posts them again (C6)."""
+    message_ids = [str(value) for value in message_ids]
+
+    def change(item):
+        if item.state != 'sending':
+            return None
+        item.extra['robotPosted'] = message_ids
+        return item
+    _transition(store, item_id, change)
+
+
 def robot_echo(store: ChannelStore, event: ChannelEvent) -> bool:
     """Whether ``event`` is one of the notification robot's own posts in its thread.
 
@@ -346,14 +387,18 @@ def _delivery_text(store: ChannelStore, item: OutboxItem) -> str:
         authored = str(item.extra.get('authoredText') or item.text)
         translated = translate_display_texts(
             [authored], target, log_tag='channel-outbox:' + item.id).get(authored)
-        if not translated:
-            translated = item.text
-        if item.extra.get('replyToExternalId') is None and not item.text.startswith(authored):
-            translated = item.text.replace(authored, translated, 1)
+        text = item.text
+        if translated and item.text.endswith(authored):
+            # Only the authored text is translated; the enqueue prefix (the
+            # disclosure label outside the command chat) is kept exactly once.
+            prefix = item.text[:len(item.text) - len(authored)]
+            labelled = bool(prefix.strip()) and translated.startswith(prefix.strip())
+            text = translated if labelled else prefix + translated
+
         def change(current):
             if current.state != 'sending':
                 return None
-            current.text = translated
+            current.text = text
             current.extra['deliveryTextReady'] = True
             return current
         return _transition(store, item.id, change).text
@@ -363,25 +408,68 @@ def _delivery_text(store: ChannelStore, item: OutboxItem) -> str:
         return item.text
 
 
+def _claim(current: OutboxItem) -> OutboxItem | None:
+    """queued -> sending before the network call; a deferral's hold is spent once it is due."""
+    if current.state != 'queued':
+        return None
+    current.state, current.attempt_at_ms = 'sending', now_ms()
+    current.extra.pop('notBeforeMs', None)
+    return current
+
+
+def _held(item: OutboxItem) -> bool:
+    """Whether a deferred item still waits for the time its platform named."""
+    return int(item.extra.get('notBeforeMs') or 0) > now_ms()
+
+
+def _deferral(result: dict[str, Any]) -> tuple[str, int | None] | None:
+    """``(code, retry after ms)`` of a deferred send result, else None."""
+    code = str((result.get('error') or {}).get('code') or '')
+    if result.get('ok') or code not in DEFERRED_SEND_CODES:
+        return None
+    retry = result.get('retryAfterMs')
+    return code, (int(retry) if isinstance(retry, int) and not isinstance(retry, bool) and retry > 0 else None)
+
+
+def _defer(store: ChannelStore, item_id: str, code: str, retry_after_ms: int | None) -> OutboxItem:
+    """A send definitely not made yet: queued again, its thread held until the named time."""
+    def change(current):
+        if current.state != 'sending':
+            return None
+        current.state, current.error = 'queued', code
+        if retry_after_ms:
+            current.extra['notBeforeMs'] = now_ms() + retry_after_ms
+        return current
+    item = _transition(store, item_id, change)
+    logger.info('[Channels] outbox send deferred item=%s: %s; next attempt %s', item_id, code,
+                f'after {retry_after_ms} ms' if retry_after_ms else 'at the next pass')
+    return item
+
+
 def _send(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
     if item.extra.get('attachments'):
         return _send_parts(store, item, sender)
-
-    def claim(current):
-        if current.state != 'queued':
-            return None
-        current.state, current.attempt_at_ms = 'sending', now_ms()
-        return current
-    item = _transition(store, item.id, claim)
+    item = _transition(store, item.id, _claim)
     if item.state != 'sending':
         return item
+    thread = ThreadKey.parse(item.thread)
+    text = _delivery_text(store, item)
+    declared = getattr(sender, 'max_text_bytes', None)
+    limit = declared(thread) if declared is not None and 'textChunks' not in item.extra else None
+    if limit is not None and len(text.encode('utf-8')) > limit:
+        item = _plan_chunks(store, item.id, limit)
+    if item.extra.get('textChunks'):
+        return _send_chunks(store, item, sender)
     try:
-        result = sender.send(ThreadKey.parse(item.thread), _delivery_text(store, item), marker=item.id,
+        result = sender.send(thread, text, marker=item.id,
                              reply_to_external_id=item.extra.get('replyToExternalId'))
     except Exception as error:
         logger.warning('[Channels] outbox send outcome unknown item=%s: %s', item.id,
                        type(error).__name__)
         result = {'ok': False, 'error': {'code': 'unknown', 'message': type(error).__name__}}
+    deferral = _deferral(result)
+    if deferral is not None:
+        return _defer(store, item.id, *deferral)
     code = str((result.get('error') or {}).get('code') or '')
 
     def settle(current):
@@ -411,14 +499,22 @@ def _reconcile(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> O
     """Search thread history since the attempt for the item's marker or client ID."""
     if item.extra.get('attachments'):
         return _reconcile_parts(store, item, sender)
+    if item.extra.get('textChunks'):
+        return _reconcile_chunks(store, item, sender)
     thread = ThreadKey.parse(item.thread)
     found = None
-    history = sender.history_since(thread, item.attempt_at_ms)
+    try:
+        history = sender.history_since(thread, item.attempt_at_ms)
+    except Exception as error:
+        logger.warning('[Channels] outbox reconciliation read failed item=%s: %s; it stays %s',
+                       item.id, type(error).__name__, item.state)
+        return item
     for event in history:
         if event.outbox_marker == item.id or (item.client_id and event.client_id == item.client_id):
             found = event
             break
     robot_texts = item.extra.get('robotTexts') or []
+    shown: list[str] = []
     if found is None and robot_texts:
         # A robot item is sent when every part it posts is in the history (C6).
         owner = owner_uid(store.account(thread.channel))
@@ -428,6 +524,12 @@ def _reconcile(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> O
             for text in robot_texts:
                 store.remember_echo(thread.channel, ROBOT_ECHO, external_id=posted[text].external_id,
                                     client_id=None)
+        else:
+            # Parts go out in order: the next attempt continues after the ones the history shows.
+            for text in robot_texts:
+                if text not in posted:
+                    break
+                shown.append(posted[text].external_id)
 
     def change(current):
         if current.state not in ('sending', 'unknown'):
@@ -437,11 +539,193 @@ def _reconcile(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> O
             current.client_id = current.client_id or found.client_id or None
         else:
             current.state, current.queued_at_ms = 'queued', current.queued_at_ms or now_ms()
+            if len(shown) > len(current.extra.get('robotPosted') or ()):
+                current.extra['robotPosted'] = shown
         return current
     item = _transition(store, item.id, change)
     if item.state == 'sent':
         store.remember_echo(thread.channel, item.id, external_id=item.external_id,
                             client_id=item.client_id)
+    return item
+
+
+# ── text chunks (channel protocol P4/P5): one item, several messages ────────────
+#
+# A text beyond the sender's documented limit (``max_text_bytes``, the
+# descriptor's ``maxTextBytes`` of the identity it sends as) is cut once, on its
+# final delivery text, into chunks of at most that many UTF-8 bytes, after a line
+# break where one fits. ``extra['textChunks']`` keeps each chunk's end offset in
+# the item's text and its own state; each chunk is its own intent with the marker
+# ``<item>/t<n>``. A sent chunk is never sent again. An unknown one is looked up
+# by its marker or client ID before anything after it, and sent again only when
+# the history does not show it (on a platform without history: at least once,
+# C12); a deferral resumes at the chunk it deferred; a refused chunk fails the
+# item and nothing after it is sent.
+
+def _chunk_marker(item_id: str, index: int) -> str:
+    """The marker and intent ID of text chunk ``index`` of item ``item_id`` (protocol ``OutboundIntent``)."""
+    return f'{item_id}/t{index}'
+
+
+def _chunk_ends(text: str, limit: int) -> list[int]:
+    """End offsets of ``text``'s chunks of at most ``limit`` UTF-8 bytes, in order.
+
+    A chunk ends after a line break where the line fits, and otherwise after
+    the last whole character that fits.
+    """
+    ends: list[int] = []
+    end = size = 0  # ``text[:end]`` is planned; its last, open chunk holds ``size`` bytes
+    for line in text.splitlines(keepends=True):
+        width = len(line.encode('utf-8'))
+        if size and size + width > limit:
+            ends.append(end)
+            size = 0
+        while width > limit:
+            head = line.encode('utf-8')[:limit].decode('utf-8', 'ignore')
+            if not head:
+                raise ValueError(f'a text limit of {limit} bytes cannot hold one character')
+            end += len(head)
+            ends.append(end)
+            line = line[len(head):]
+            width = len(line.encode('utf-8'))
+        end += len(line)
+        size += width
+    if size or not ends:
+        ends.append(end)
+    return ends
+
+
+def _chunk_text(item: OutboxItem, index: int) -> str:
+    chunks = item.extra['textChunks']
+    return item.text[chunks[index - 1]['end'] if index else 0:chunks[index]['end']]
+
+
+def _plan_chunks(store: ChannelStore, item_id: str, limit: int) -> OutboxItem:
+    """Cut the item's delivery text into chunks once; every later attempt sends the same chunks."""
+    def change(current):
+        if current.state != 'sending' or 'textChunks' in current.extra:
+            return None
+        current.extra['textChunks'] = [{'end': end, 'state': 'pending'} for end in _chunk_ends(current.text, limit)]
+        # The chunks still to send are cut from this exact text: no later translation may replace it.
+        current.extra['deliveryTextReady'] = True
+        return current
+    return _transition(store, item_id, change)
+
+
+def _record_chunk(store: ChannelStore, item_id: str, index: int, result: dict[str, Any]) -> OutboxItem:
+    """Note one chunk's send result: sent, refused, deferred (definitely not sent) or unknown."""
+    code = str((result.get('error') or {}).get('code') or '')
+    external_id = str(result.get('externalId') or '') or None
+    client_id = str(result.get('clientId') or '') or None
+
+    def change(current):
+        if current.state != 'sending':
+            return None
+        chunk = dict(current.extra['textChunks'][index])
+        if chunk['state'] != 'pending':
+            return None
+        if result.get('ok'):
+            chunk.update(state='sent', externalId=external_id, clientId=client_id, error=None)
+        elif code in DEFINITE_SEND_FAILURES:
+            chunk.update(state='failed', error=code)
+        elif code in DEFERRED_SEND_CODES:
+            chunk.update(error=code)
+        else:
+            chunk.update(clientId=client_id or chunk.get('clientId'), error=code or 'unknown')
+        current.extra['textChunks'][index] = chunk
+        return current
+    item = _transition(store, item_id, change)
+    if result.get('ok'):
+        store.remember_echo(ThreadKey.parse(item.thread).channel, _chunk_marker(item_id, index),
+                            external_id=external_id, client_id=client_id)
+    return item
+
+
+def _chunks_sent(item: OutboxItem) -> None:
+    """Every chunk is sent: so is the item, under its first chunk's IDs."""
+    first = item.extra['textChunks'][0]
+    item.state, item.error = 'sent', None
+    item.external_id = first.get('externalId') or None
+    item.client_id = first.get('clientId') or item.client_id
+
+
+def _send_chunks(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
+    """Send the chunks not sent yet, in order, stopping at the first that is not sent."""
+    thread = ThreadKey.parse(item.thread)
+    for index in range(len(item.extra['textChunks'])):
+        item, _ = store.outbox_item(item.id)
+        if item.state != 'sending':
+            return item
+        if item.extra['textChunks'][index]['state'] == 'sent':
+            continue
+        text, marker = _chunk_text(item, index), _chunk_marker(item.id, index)
+        reply_to = item.extra.get('replyToExternalId') if index == 0 else None
+        result = _attempt(lambda: sender.send(thread, text, marker=marker, reply_to_external_id=reply_to),
+                          item.id)
+        item = _record_chunk(store, item.id, index, result)
+        deferral = _deferral(result)
+        if deferral is not None:
+            return _defer(store, item.id, *deferral)
+        if item.extra['textChunks'][index]['state'] != 'sent':
+            break  # refused: nothing after it goes; unknown: reconciled before anything after it
+
+    def settle(current):
+        if current.state != 'sending':
+            return None
+        chunks = current.extra['textChunks']
+        refused = next((chunk for chunk in chunks if chunk['state'] == 'failed'), None)
+        pending = next((chunk for chunk in chunks if chunk['state'] == 'pending'), None)
+        if refused is not None:
+            current.state, current.error = 'failed', refused['error']
+        elif pending is not None:
+            current.state, current.error = 'unknown', pending.get('error') or 'unknown'
+        else:
+            _chunks_sent(current)
+        return current
+    item = _transition(store, item.id, settle)
+    if item.state in ('failed', 'unknown'):
+        # Failed and unknown sends become Router Watchdog signals (docs/ROUTER.md R7).
+        from lib.router.watchdog.signals import report_outbox_fault
+        report_outbox_fault(store.owner, item)
+    return item
+
+
+def _reconcile_chunks(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
+    """Find the chunks not known to be sent in the thread history by marker or client ID; queue the rest."""
+    thread = ThreadKey.parse(item.thread)
+    try:
+        history = sender.history_since(thread, item.attempt_at_ms)
+    except Exception as error:
+        logger.warning('[Channels] outbox reconciliation read failed item=%s: %s; it stays %s',
+                       item.id, type(error).__name__, item.state)
+        return item
+    found: dict[int, ChannelEvent] = {}
+    for index, chunk in enumerate(item.extra['textChunks']):
+        if chunk['state'] != 'pending':
+            continue
+        marker = _chunk_marker(item.id, index)
+        event = next((event for event in history if event.outbox_marker == marker
+                      or (chunk.get('clientId') and event.client_id == chunk['clientId'])), None)
+        if event is not None:
+            found[index] = event
+
+    def change(current):
+        if current.state not in ('sending', 'unknown'):
+            return None
+        chunks = current.extra['textChunks']
+        for index, event in found.items():
+            if chunks[index]['state'] == 'pending':
+                chunks[index] = {**chunks[index], 'state': 'sent', 'externalId': event.external_id, 'error': None,
+                                 'clientId': chunks[index].get('clientId') or event.client_id or None}
+        if all(chunk['state'] == 'sent' for chunk in chunks):
+            _chunks_sent(current)
+        else:
+            current.state, current.queued_at_ms = 'queued', current.queued_at_ms or now_ms()
+        return current
+    item = _transition(store, item.id, change)
+    for index, event in found.items():
+        store.remember_echo(thread.channel, _chunk_marker(item.id, index), external_id=event.external_id,
+                            client_id=event.client_id or None)
     return item
 
 
@@ -454,14 +738,23 @@ def _reconcile(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> O
 # only once the thread shows it (its echo or the thread history): 大象 can
 # accept a file message and still not deliver it, so an accepted part waits
 # (``acked``) and is failed, never resent, when the history already holds a
-# later message but not it. A part whose send outcome is unknown is looked up
-# by its marker and sent again when absent, like an unknown text item.
+# later message but not it. The pass after the one that sent it is its
+# confirmation point: if that pass cannot confirm it, it stays pending with a
+# typed reason. The reason is ``history_failed`` when the read failed (no
+# evidence, channel protocol P4), or ``needs_owner_confirmation`` when the
+# history answered without the part or any later message. The item reports
+# that once (R7), never holds its thread, and every later pass reads again.
+# A part whose send outcome is unknown is looked up by its marker and sent
+# again when absent, like an unknown text item.
 
 _TEXT = -1
 _PART_SEPARATOR = DX_ATTACHMENTS['partMarker'].split('{item}', 1)[1].split('{part}', 1)[0]
 _NOT_SENT = 'not_sent'
 _NOT_DELIVERED = 'not_delivered'
 _AWAITING = 'awaiting_confirmation'
+_HISTORY_FAILED = 'history_failed'
+_NEEDS_OWNER = 'needs_owner_confirmation'
+_UNCONFIRMED = (_NEEDS_OWNER, _HISTORY_FAILED)
 
 
 def part_marker(item_id: str, index: int) -> str:
@@ -500,8 +793,9 @@ def _outcome(item: OutboxItem) -> tuple[str, str | None]:
     unsent = [part for part in parts if _unsent(part)]
     if unsent:
         return 'unknown', str(unsent[0].get('error') or 'unknown')
-    if any(part.get('state') == 'pending' for part in parts):
-        return 'unknown', _AWAITING
+    waiting = {part.get('error') for part in parts if part.get('state') == 'pending'}
+    if waiting:
+        return 'unknown', next((reason for reason in _UNCONFIRMED if reason in waiting), _AWAITING)
     text = parts[0]
     if text.get('state') == 'failed':
         return 'failed', str(text.get('error') or 'failed')
@@ -511,18 +805,27 @@ def _outcome(item: OutboxItem) -> tuple[str, str | None]:
 
 
 def _settle(store: ChannelStore, item_id: str) -> OutboxItem:
+    moved: list[bool] = []
+
     def change(current):
+        moved.clear()
         if current.state not in ('sending', 'unknown'):
             return None
         state, error = _outcome(current)
         if (state, error) == (current.state, current.error):
             return None
         current.state, current.error = state, error
+        moved.append(True)
         return current
     item = _transition(store, item_id, change)
-    if item.state == 'failed' or (item.state == 'unknown' and _blocks(item)):
-        # Failed and unknown sends become Router Watchdog signals (docs/ROUTER.md R7);
-        # an item that only awaits confirmation of accepted parts is not a fault yet.
+    unconfirmed = bool(moved) and item.state == 'unknown' and item.error in _UNCONFIRMED
+    if unconfirmed:
+        logger.warning('[Channels] outbox item=%s unconfirmed after its confirmation point: %s; reported, '
+                       'never resent, read again every pass', item.id, item.error)
+    if item.state == 'failed' or (item.state == 'unknown' and _blocks(item)) or unconfirmed:
+        # Failed and unknown sends become Router Watchdog signals (docs/ROUTER.md R7). An item
+        # that only awaits confirmation of accepted parts becomes one when its next pass cannot
+        # confirm them.
         from lib.router.watchdog.signals import report_outbox_fault
         report_outbox_fault(store.owner, item)
     return item
@@ -728,6 +1031,8 @@ def _record_result(store: ChannelStore, item_id: str, index: int, result: dict[s
             part.update({'state': 'sent'} if index == _TEXT else {'acked': True})
         elif code in DEFINITE_SEND_FAILURES:
             part.update(state='failed', error=code)
+        elif code in DEFERRED_SEND_CODES:
+            part.update(error=code)  # definitely not sent: the next attempt sends it, no lookup first
         else:
             part.update(attempted=True, clientId=client_id or part.get('clientId'), error=code or 'unknown')
         if index == _TEXT:
@@ -775,18 +1080,21 @@ def _history(sender: OutboxSender, item: OutboxItem) -> tuple[list[ChannelEvent]
 
 
 def _apply_history(store: ChannelStore, item_id: str, history: list[ChannelEvent],
-                   floor: int | None) -> OutboxItem:
+                   floor: int | None, *, confirming: bool = False) -> OutboxItem:
     """Mark the parts the thread history shows; fail accepted parts it proves missing.
 
     ``history`` holds every message of the thread from ID ``floor`` on (when
     not None), so an accepted part with an ID from ``floor`` on that is absent
-    while a later message is present was not delivered.
+    while a later message is present was not delivered. ``confirming`` marks a
+    pass after the one that sent the parts (their confirmation point, C10). An
+    accepted part that this history neither shows nor proves missing then
+    needs the owner's confirmation.
     """
-    if not history:
+    if not history and not confirming:
         return store.outbox_item(item_id)[0]
     thread = ThreadKey.parse(store.outbox_item(item_id)[0].thread)
     owner = owner_uid(store.account(thread.channel))
-    newest = max(int(event.external_id) for event in history)
+    newest = max((int(event.external_id) for event in history), default=None)
     found: dict[int, ChannelEvent] = {}
 
     def match(index: int, part: dict[str, Any]) -> ChannelEvent | None:
@@ -829,10 +1137,13 @@ def _apply_history(store: ChannelStore, item_id: str, history: list[ChannelEvent
                     'clientId': record.get('clientId') or event.client_id or None, 'error': None}
                 found[index] = event
                 changed = True
-            elif (record.get('acked') and floor is not None and str(record.get('externalId') or '').isdigit()
-                  and floor <= int(record['externalId']) < newest):
+            elif (record.get('acked') and floor is not None and newest is not None
+                  and str(record.get('externalId') or '').isdigit() and floor <= int(record['externalId']) < newest):
                 # Accepted, yet a later message is in the history and this one is not.
                 current.extra['attachments'][index] = {**record, 'state': 'failed', 'error': _NOT_DELIVERED}
+                changed = True
+            elif confirming and record.get('acked') and record.get('error') != _NEEDS_OWNER:
+                current.extra['attachments'][index] = {**record, 'error': _NEEDS_OWNER}
                 changed = True
         return current if changed else None
     item = _transition(store, item_id, change)
@@ -844,12 +1155,7 @@ def _apply_history(store: ChannelStore, item_id: str, history: list[ChannelEvent
 
 def _send_parts(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
     """Send an item's parts in order, each at most once unless its outcome is unknown."""
-    def claim(current):
-        if current.state != 'queued':
-            return None
-        current.state, current.attempt_at_ms = 'sending', now_ms()
-        return current
-    item = _transition(store, item.id, claim)
+    item = _transition(store, item.id, _claim)
     if item.state != 'sending':
         return item
     thread = ThreadKey.parse(item.thread)
@@ -867,6 +1173,9 @@ def _send_parts(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> 
                     thread, text, marker=item.id,
                     reply_to_external_id=item.extra.get('replyToExternalId')), item.id)
                 item = _record_result(store, item.id, _TEXT, result)
+                deferral = _deferral(result)
+                if deferral is not None:
+                    return _defer(store, item.id, *deferral)
                 part = item.extra.get('textPart') or {}
                 if part.get('state') == 'failed':
                     item = _abandon(store, item.id)
@@ -880,6 +1189,9 @@ def _send_parts(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> 
             result = _attempt(lambda: sender.send_attachment(
                 thread, files[index], kind=record['kind'], marker=part_marker(item.id, index)), item.id)
             item = _record_result(store, item.id, index, result)
+            deferral = _deferral(result)
+            if deferral is not None:
+                return _defer(store, item.id, *deferral)
             if _unsent(item.extra['attachments'][index]):
                 break  # unknown: reconcile before anything else of this item
         else:
@@ -893,9 +1205,36 @@ def _send_parts(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> 
     return _settle(store, item.id)
 
 
+def _confirmation_read_failed(store: ChannelStore, item_id: str) -> OutboxItem:
+    """The confirmation read failed, which proves nothing (P4): accepted parts stay pending as ``history_failed``.
+
+    Parts whose send outcome is unknown keep their own reason, and the item
+    holds only its own thread, as before.
+    """
+    marked: list[bool] = []
+
+    def change(current):
+        marked.clear()
+        if current.state not in ('sending', 'unknown'):
+            return None
+        for index, record in enumerate(current.extra['attachments']):
+            if record.get('state') == 'pending' and record.get('acked') and record.get('error') not in _UNCONFIRMED:
+                current.extra['attachments'][index] = {**record, 'error': _HISTORY_FAILED}
+                marked.append(True)
+        return current if marked else None
+    item = _transition(store, item_id, change)
+    return _settle(store, item_id) if marked else item
+
+
 def _reconcile_parts(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
     """Find an in-flight item's parts in the thread history; send again only what is absent."""
-    item = _apply_history(store, item.id, *_history(sender, item))
+    try:
+        history, floor = _history(sender, item)
+    except Exception as error:
+        logger.warning('[Channels] outbox reconciliation read failed item=%s: %s; it stays %s',
+                       item.id, type(error).__name__, item.state)
+        return _confirmation_read_failed(store, item.id)
+    item = _apply_history(store, item.id, history, floor, confirming=True)
 
     def change(current):
         if current.state not in ('sending', 'unknown') or not _blocks(current):
@@ -925,15 +1264,19 @@ def execute(owner: int, sender: OutboxSender, *, channel: str,
                     sent += 1
                     continue
             if item.state == 'queued':
+                if _held(item):
+                    break  # deferred: the thread waits for the time its platform named
                 item = _send(store, item, sender)
             if item.state == 'sent':
                 sent += 1
                 continue
+            if item.state == 'queued':
+                break  # deferred just now: nothing later in the thread overtakes it
             if item.state in ('sending', 'unknown') and _blocks(item):
                 break  # this thread waits for reconciliation; other threads continue
     return sent
 
 
-__all__ = ['DEFINITE_SEND_FAILURES', 'OutboxSender', 'ROBOT_ECHO', 'approve', 'confirm_echo', 'discard',
-           'enqueue', 'execute', 'kick', 'part_marker', 'record_robot_texts', 'register_executor',
-           'robot_echo', 'split_marker']
+__all__ = ['DEFERRED_SEND_CODES', 'DEFINITE_SEND_FAILURES', 'OutboxSender', 'ROBOT_ECHO', 'approve', 'confirm_echo',
+           'discard', 'enqueue', 'execute', 'kick', 'part_marker', 'record_robot_posted', 'record_robot_texts',
+           'register_executor', 'robot_echo', 'split_marker']

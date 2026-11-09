@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from lib.log import audit_log, get_logger, log_context
+from lib.log import audit_log, get_logger, log_context, task_log_tag
 from lib.scheduler._shared import evaluate_predicate, reconcile_and_decide
 
 logger = get_logger(__name__)
@@ -164,10 +164,10 @@ def poll_decision(
                 temperature=0,
                 capability='cheap',
                 owner_user_id=int(task['user_id']),
-                log_prefix=f'[Proactive:{task["id"][:8]}]',
+                log_prefix=f'[Proactive:{task_log_tag(task["id"])}]',
             )
     except Exception as e:
-        logger.error('[Proactive:%s] Poll LLM call failed: %s', task['id'][:8], e, exc_info=True)
+        logger.error('[Proactive:%s] Poll LLM call failed: %s', task_log_tag(task['id']), e, exc_info=True)
         return False, f'LLM error: {e}', 0
 
     tokens_used = 0
@@ -180,7 +180,7 @@ def poll_decision(
         should_act, reason = parse_json_decision(content, key='act')
     except (json.JSONDecodeError, TypeError, AttributeError) as e:
         logger.warning('[Proactive:%s] Failed to parse poll response: %s — raw: %.500s',
-                       task['id'][:8], e, content)
+                       task_log_tag(task['id']), e, content)
         should_act = False
         reason = f'Parse error: {(content or "")[:100]}'
 
@@ -234,7 +234,7 @@ def _count_trailing_ambiguous_code_polls(
                 'limit': lookback})
     except Exception as e:
         logger.warning('[Proactive:%s] Failed to reconstruct ambiguity streak: %s',
-                       task_id[:8], e, exc_info=True)
+                       task_log_tag(task_id), e, exc_info=True)
         return 0
     streak = 0
     for r in rows:
@@ -251,7 +251,7 @@ def evaluate_condition_predicate(task: dict[str, Any]):
     :class:`lib.scheduler._shared.PredicateResult`."""
     return evaluate_predicate(task.get('condition_command', '') or '',
                               task.get('condition_regex', '') or '',
-                              log_id=task['id'][:8])
+                              log_id=task['id'])
 
 
 def predicate_status(result) -> str:
@@ -311,16 +311,16 @@ def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
                       predicate=task.get('condition_command', '')[:200],
                       streak=outcome.new_streak)
             logger.info('[Proactive:%s] Predicate promoted to code (streak=%d)',
-                        task_id[:8], outcome.new_streak)
+                        task_log_tag(task_id), outcome.new_streak)
         elif outcome.demoted:
             audit_log('proactive_predicate_demoted', task_id=task_id,
                       predicate=task.get('condition_command', '')[:200],
                       reason=outcome.note[:200])
             logger.warning('[Proactive:%s] Predicate demoted to hybrid: %s',
-                           task_id[:8], outcome.note)
+                           task_log_tag(task_id), outcome.note)
     except Exception as e:
         logger.error('[Proactive:%s] Failed to persist reconcile transition: %s',
-                     task_id[:8], e, exc_info=True)
+                     task_log_tag(task_id), e, exc_info=True)
     return outcome
 
 
@@ -356,11 +356,11 @@ def execute_proactive_task(task: dict[str, Any]) -> str | None:
     """
     from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
 
-    task_id_short = task['id'][:8]
+    task_tag = task_log_tag(task['id'])
     target_conv = task.get('target_conv_id', '')
     instruction = task.get('command', '')
     poll_count = task.get('poll_count', 0)
-    log_prefix = f'[Proactive:{task_id_short}]'
+    log_prefix = f'[Proactive:{task_tag}]'
 
     if not target_conv:
         logger.error('%s No target_conv_id — cannot execute', log_prefix)
@@ -371,7 +371,7 @@ def execute_proactive_task(task: dict[str, Any]) -> str | None:
         return None
 
     logger.info('%s 🚀 Executing agent task in conv=%s (poll #%d triggered)',
-                log_prefix, target_conv[:12], poll_count)
+                log_prefix, target_conv, poll_count)
 
     # Build the proactive-specific user message
     user_message = {
@@ -431,7 +431,7 @@ def should_auto_disable(task: dict[str, Any]) -> bool:
     max_exec = task.get('max_executions', 0)
     if max_exec > 0 and task.get('execution_count', 0) >= max_exec:
         logger.info('[Proactive:%s] Auto-disabling: max_executions=%d reached',
-                    task['id'][:8], max_exec)
+                    task_log_tag(task['id']), max_exec)
         return True
 
     # Expired
@@ -442,7 +442,7 @@ def should_auto_disable(task: dict[str, Any]) -> bool:
             # datetime.now(tz=None) is naive, so this stays comparable for both
             # naive and timezone-aware expires_at values.
             if datetime.now(exp.tzinfo) >= exp:
-                logger.info('[Proactive:%s] Auto-disabling: expired at %s', task['id'][:8], expires_at)
+                logger.info('[Proactive:%s] Auto-disabling: expired at %s', task_log_tag(task['id']), expires_at)
                 return True
         except (ValueError, TypeError) as e:
             logger.debug('[Proactive] expires_at parse error: %s', e)

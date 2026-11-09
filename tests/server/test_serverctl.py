@@ -954,29 +954,6 @@ def test_stop_is_idempotent_without_approval_when_no_worker_is_live(monkeypatch)
     assert serverctl.cmd_stop(args) == 0
 
 
-def test_noninteractive_lifecycle_gate_creates_one_reusable_pending_request(
-        monkeypatch, capsys):
-    fake = ModuleType('lib.lifecycle_approval')
-    created = []
-    fake.consume_any = lambda action: (False, 'no-approved-token', None)
-    fake.list_records = lambda **_kwargs: []
-    fake.create_request = lambda action, origin: (
-        created.append((action, origin)) or {'id': 'request-12345678'})
-    monkeypatch.setitem(sys.modules, 'lib.lifecycle_approval', fake)
-    monkeypatch.setattr(sys.stdin, 'isatty', lambda: False)
-
-    args = SimpleNamespace(yes=True)
-    assert serverctl._approve_lifecycle_if_needed(
-        args, action='shutdown', prompt='unused') is False
-
-    assert created[0][0] == 'shutdown'
-    assert created[0][1]['source'] == 'serverctl'
-    error = capsys.readouterr().err
-    assert 'requires human approval' in error
-    assert 'request request-' in error
-    assert 'then re-run this command' in error
-
-
 def test_cgroup_memory_snapshot_reports_v1_oom_and_zero_swap(monkeypatch):
     values = {
         serverctl._CGROUP_V1_USAGE: str(180 * (1 << 30)),

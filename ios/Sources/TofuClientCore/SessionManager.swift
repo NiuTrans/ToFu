@@ -123,18 +123,52 @@ public final class SessionManager: Sendable {
         return await login(current)
     }
 
-    public func updateUrlAndReauth(_ profile: Profile, newUrl: String) async -> ReauthResult {
+    public func updateUrlAndReauth(
+        _ profile: Profile, newUrl: String,
+        onPersisted: @Sendable (Profile) -> Bool = { _ in true }
+    ) async -> ReauthResult {
         guard let newServer = ServerUrl.parse(newUrl), !Task.isCancelled else {
             return ReauthResult(login: .error(message: "Invalid server URL or cancelled edit"), persisted: profile)
         }
         if let old = ServerUrl.parse(profile.baseUrl), old.origin != newServer.origin {
             await cookies.purgeOrigin(old.origin, appURL: profile.baseUrl)
         }
-        guard !Task.isCancelled else { return ReauthResult(login: .error(message: "Edit cancelled"), persisted: profile) }
         var updated = profile
         updated.baseUrl = newUrl; updated.instanceUuid = newServer.instanceUuid ?? profile.instanceUuid; updated.cookieHost = nil
+        return await persistEditAndLogin(updated, previous: profile, onPersisted: onPersisted)
+    }
+
+    /// The edit persistence phase owns the only pre-login credential hook.
+    /// Nonthrowing UPDATE is not a commit acknowledgement: read back the
+    /// intended configuration before touching its alias-keyed vault entries.
+    /// Once committed, run reconciliation even if Cancel arrived during the
+    /// write; cancellation still prevents the subsequent sign-in.
+    func persistEditAndLogin(
+        _ updated: Profile, previous: Profile,
+        onPersisted: @Sendable (Profile) -> Bool
+    ) async -> ReauthResult {
+        guard !Task.isCancelled else {
+            return ReauthResult(login: .error(message: "Edit cancelled"), persisted: await store.getById(previous.id) ?? previous)
+        }
+        if let owner = await store.getByAlias(updated.alias), owner.id != updated.id {
+            return ReauthResult(login: .error(message: "A server with this name already exists"), persisted: await store.getById(previous.id) ?? previous)
+        }
+        guard !Task.isCancelled else {
+            return ReauthResult(login: .error(message: "Edit cancelled"), persisted: await store.getById(previous.id) ?? previous)
+        }
         await store.update(updated)
-        return ReauthResult(login: await login(updated), persisted: updated)
+        let stored = await store.getById(updated.id)
+        guard let persisted = stored, persisted.alias == updated.alias, persisted.baseUrl == updated.baseUrl,
+              persisted.authType == updated.authType, persisted.projectPath == updated.projectPath else {
+            return ReauthResult(login: .error(message: "This server changed or was deleted before the edit was saved"), persisted: stored ?? previous)
+        }
+        guard onPersisted(persisted) else {
+            return ReauthResult(login: .error(message: "Profile saved, but its password could not be reconciled. Review it before signing in."), persisted: persisted)
+        }
+        guard !Task.isCancelled else {
+            return ReauthResult(login: .error(message: "Save cancelled after persistence"), persisted: persisted)
+        }
+        return ReauthResult(login: await login(persisted), persisted: persisted)
     }
 
     private func interactive(_ profile: Profile) -> LoginResult { .needsInteractiveSso(url: profile.baseUrl) }

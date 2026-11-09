@@ -138,8 +138,8 @@
     "modelDisplayFolding": "frontend/src/core/model-display-fold.ts",
     "recentModels": "frontend/src/core/recent-models.ts",
     "skillPackageInstaller": "frontend/src/features/skills/package-installer.ts",
-    "myDayTaskActions": "frontend/src/features/myday/task-actions.ts",
-    "myDayQuickActionLauncher": "frontend/src/features/myday/quick-action-launcher.ts",
+    "myDayGoalBoard": "frontend/src/features/myday/goal-board.ts",
+    "myDayGoalModel": "frontend/src/features/myday/goal-model.ts",
     "myDayReportCache": "frontend/src/features/myday/report-cache.ts",
     "myDayBackgroundLifecycle": "frontend/src/features/myday/background-controller.ts",
     "paperPanelComposition": "frontend/src/features/paper/panel-owners.ts",
@@ -306,6 +306,16 @@
       "maximum": 0,
       "target": 0,
       "remedy": "Use the owner-scoped typed report repository and disposable idle-background lifecycle."
+    },
+    {
+      "id": "retired-myday-report-presentation",
+      "metric": "regex_count",
+      "roots": ["frontend/src/runtime/sections/myday.js"],
+      "suffixes": [".js"],
+      "pattern": "(?:_mydayTriggerGenerate|_mydayStartPolling|_mydayRenderTasks|_mydayRenderReport|MyDayTaskPresentation|\\.innerHTML\\s*=\\s*[^;]*\\b(?:goal|item)s?\\b)",
+      "maximum": 0,
+      "target": 0,
+      "remedy": "My Day's main column is the typed goal board (frontend/src/features/myday/goal-board.ts); the retained panel keeps only the shell, date navigation and calendar."
     },
     {
       "id": "mutable-message-document-writes",

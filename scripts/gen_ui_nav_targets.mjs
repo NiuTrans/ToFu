@@ -232,6 +232,13 @@ function tabLabel(shell, tabId, catalogs) {
   return localize([button], catalogs);
 }
 
+// A chat platform is a collapsible section of the 消息平台 panel; its summary names it.
+function platformLabel(panel, platform, catalogs) {
+  const name = only([...panel.querySelectorAll('[data-platform] .msg-platform-name')]
+    .filter((el) => el.closest('[data-platform]').dataset.platform === platform), `messaging platform ${platform}`);
+  return localize([name], catalogs);
+}
+
 const zhCatalog = JSON.parse(readRepo('frontend/src/i18n/locales/zh.json'));
 const enCatalog = JSON.parse(readRepo('frontend/src/i18n/locales/en.json'));
 
@@ -265,6 +272,10 @@ function buildTargets() {
     try {
       if (target.elementId) {
         Object.assign(entry, settingLabel(readPanel(target.tab), target.elementId, catalogs));
+      } else if (target.platform) {
+        entry.tabLevel = true;
+        entry.platform = target.platform;
+        entry.name = platformLabel(readPanel(target.tab), target.platform, catalogs);
       } else {
         entry.tabLevel = true;
         entry.name = tabLabel(shell, target.tab, catalogs);

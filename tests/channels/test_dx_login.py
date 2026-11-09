@@ -76,6 +76,26 @@ def test_without_a_chosen_mis_or_shared_session_there_is_nothing_to_log_in_with(
     assert session.mis is None and session.environment == {'PATH': '/bin'}
 
 
+@pytest.mark.parametrize('configured, explicit, expected', [
+    ('/opt/tofu-node/bin/node', None, '/opt/tofu-node/bin/node'),
+    ('/opt/tofu-node/bin/node', '/srv/other-node/bin/node', '/srv/other-node/bin/node'),
+    (None, None, None),
+])
+def test_the_sso_step_runs_on_the_configured_node(monkeypatch, data, configured, explicit, expected):
+    # Without a hand-off the SSO adapter scans PATH for any Node; the bridge already runs on TOFU_NODE.
+    from lib.channels.dx.adapter import launcher_session
+    seen = shared(monkeypatch, 'owner')
+    for name, value in (('TOFU_NODE', configured), ('MTSSO_NODE_EXECUTABLE', explicit)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    session = launcher_session(OWNER, 'owner')
+    assert session.environment.get('MTSSO_NODE_EXECUTABLE') == expected
+    # The adapter's own question (which MIS the shared session holds) runs on the same Node.
+    assert seen[-1].get('MTSSO_NODE_EXECUTABLE') == expected
+
+
 class Adapter:
     """The SSO adapter child process: records each run and answers with a scripted stdout/exit."""
 

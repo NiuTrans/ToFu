@@ -361,10 +361,15 @@ def _convert_body_to_anthropic(body: dict) -> dict:
                               or body.get('model') or ''))
     system_blocks = []
     messages = []
-    for msg in body.get('messages', []):
+    from lib.llm_sanitize.lineage import ProjectionLineage
+    lineage = ProjectionLineage(body, 'anthropic_projection')
+    for index, msg in enumerate(body.get('messages', [])):
         role = msg.get('role')
         if role in ('system', 'developer'):
-            system_blocks.extend(_convert_content_blocks(msg.get('content') or ''))
+            blocks = _convert_content_blocks(msg.get('content') or '')
+            lineage.emit(index, msg.get('content'), blocks,
+                         region='system', part_offset=len(system_blocks))
+            system_blocks.extend(blocks)
         elif role == 'tool':
             _tool_content = (msg.get('content') if isinstance(msg.get('content'), str)
                              else (_convert_content_blocks(msg.get('content')) or ''))
@@ -411,6 +416,7 @@ def _convert_body_to_anthropic(body: dict) -> dict:
                                '(upstream healer bypassed)')
                 blocks = [{'type': 'text', 'text': '[empty response]'}]
             messages.append({'role': 'assistant', 'content': blocks})
+            lineage.emit(index, msg.get('content'), blocks, message=len(messages) - 1)
         elif role == 'user':
             blocks = _convert_content_blocks(msg.get('content') or '')
             if not blocks:
@@ -421,6 +427,7 @@ def _convert_body_to_anthropic(body: dict) -> dict:
                                '(upstream healer bypassed)')
                 blocks = [{'type': 'text', 'text': '[empty message]'}]
             messages.append({'role': 'user', 'content': blocks})
+            lineage.emit(index, msg.get('content'), blocks, message=len(messages) - 1)
 
     if system_blocks:
         # A single plain-text system block can stay a string; keep the block
@@ -434,4 +441,5 @@ def _convert_body_to_anthropic(body: dict) -> dict:
     if report:
         out['_conversion_report'] = report
     out['messages'] = messages
+    lineage.finish(out)
     return out

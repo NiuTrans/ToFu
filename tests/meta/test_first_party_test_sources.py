@@ -94,6 +94,11 @@ def synthetic_checkout(tmp_path):
     tests.mkdir(parents=True)
     shutil.copyfile(Path(__file__).parents[1] / 'conftest.py', tests / 'conftest.py')
     (tests / '__init__.py').write_text('', encoding='utf-8')
+    # The bootstrap first imports its real priority owner (stdlib and psutil).
+    (tests / 'support').mkdir()
+    for name in ('__init__.py', 'process_priority.py'):
+        shutil.copyfile(Path(__file__).parents[1] / 'support' / name,
+                        tests / 'support' / name)
     # Bootstrap's unrelated PDF policy must not import any real host source.
     (checkout / 'runtime_guards.py').write_text(
         'def install_pymupdf_classic_policy():\n    pass\n', encoding='utf-8')

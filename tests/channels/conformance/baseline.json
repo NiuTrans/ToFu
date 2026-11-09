@@ -1,0 +1,565 @@
+{
+ "description": "Conformance baseline of docs/CHANNEL_PROTOCOL.md: per adapter and case, pass, xfail (fails today: cause with file:line at anchorsAt, and whether the core or the adapter owns the fix) or n/a (the platform offers nothing to exercise). Strict: a case that starts passing fails the run until this file is updated.",
+ "anchorsAt": "the commit that last changed this file (git log -1 -- tests/channels/conformance/baseline.json): every file:line in a cause is re-anchored whenever this file changes",
+ "cases": {
+  "duplicate_delivery": "At-least-once delivery: recorded and routed once.",
+  "out_of_order": "An older message reaching the core after a newer one is still recorded and routed.",
+  "edit": "An edit is recorded as a revision of the original event.",
+  "recall": "A recall marks the event recalled and removes its text.",
+  "auth_expiry": "A refused credential is auth_required with an owner remedy; the supervisor stops restarting.",
+  "displaced_stays_down": "Another login taking the session is displaced: no reconnect, across a restart, until restored.",
+  "rate_limited": "A rate-limited send is not attempted again inside the window, then goes out once.",
+  "partial_history_failure": "A failed history read keeps the connection and live delivery; the gap is replayed later.",
+  "degraded_is_typed": "A failed history read is reported as degraded/history_failed.",
+  "runtime_fault_is_typed": "The adapter runtime refusing is runtime_missing, not auth_required.",
+  "network_fault_is_typed": "A network failure is disconnected with a network or transport code.",
+  "restart_mid_send": "After a crash between platform acceptance and receipt, no second copy.",
+  "reconciliation_read_failure": "A failed reconciliation read is no evidence of absence: the item stays unknown, nothing is re-sent, the next complete read settles it once.",
+  "stalled_thread_isolation": "An unknown item whose reconciliation read keeps failing holds only its own thread; another thread's item goes out in the same pass.",
+  "accepted_confirmation": "A file the platform accepted is never left waiting silently: once the next pass cannot confirm it, it is held as history_failed or needs_owner_confirmation with one outbox fault, never sent again, holding no other thread, and settled by the first read that shows it.",
+  "unknown_keeps_its_identity": "A bot send whose answer was lost is reconciled under the bot, never repeated as the owner.",
+  "unknown_reconciliation": "A delivered send whose answer was lost is reconciled, never re-sent blindly.",
+  "attachment_degradation": "A file the platform cannot carry is degraded to a note, never refused or dropped.",
+  "echo_loop": "Our own send coming back is never input.",
+  "other_bots": "Another bot's message is never a command or a review candidate.",
+  "self_send_outside_outbox": "A message this account sent through another Tofu path (Tofu's marker, no outbox item), live or replayed by backfill, is never owner input."
+ },
+ "results": {
+  "reference": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "pass"
+   },
+   "recall": {
+    "status": "pass"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "pass"
+   },
+   "rate_limited": {
+    "status": "pass"
+   },
+   "partial_history_failure": {
+    "status": "pass"
+   },
+   "degraded_is_typed": {
+    "status": "pass"
+   },
+   "runtime_fault_is_typed": {
+    "status": "pass"
+   },
+   "network_fault_is_typed": {
+    "status": "pass"
+   },
+   "restart_mid_send": {
+    "status": "pass"
+   },
+   "reconciliation_read_failure": {
+    "status": "pass"
+   },
+   "stalled_thread_isolation": {
+    "status": "pass"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: self)"
+   },
+   "unknown_reconciliation": {
+    "status": "pass"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "pass"
+   },
+   "other_bots": {
+    "status": "pass"
+   },
+   "self_send_outside_outbox": {
+    "status": "pass"
+   }
+  },
+  "reference-stdio": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "pass"
+   },
+   "recall": {
+    "status": "pass"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "pass"
+   },
+   "rate_limited": {
+    "status": "pass"
+   },
+   "partial_history_failure": {
+    "status": "pass"
+   },
+   "degraded_is_typed": {
+    "status": "pass"
+   },
+   "runtime_fault_is_typed": {
+    "status": "pass"
+   },
+   "network_fault_is_typed": {
+    "status": "pass"
+   },
+   "restart_mid_send": {
+    "status": "n/a",
+    "reason": "the stdio reference platform lives in the adapter process"
+   },
+   "reconciliation_read_failure": {
+    "status": "pass"
+   },
+   "stalled_thread_isolation": {
+    "status": "pass"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: self)"
+   },
+   "unknown_reconciliation": {
+    "status": "pass"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "pass"
+   },
+   "other_bots": {
+    "status": "pass"
+   },
+   "self_send_outside_outbox": {
+    "status": "pass"
+   }
+  },
+  "dx": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "n/a",
+    "reason": "大象 has no message edits (no edit API or event in dx-engine)"
+   },
+   "recall": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "the adapter drops a recalled message (`lib/channels/dx/adapter.py:431` live, `lib/channels/dx/adapter.py:459` history: isCancel returns None) instead of reporting a recall event, so the recorded text stays; the core records recalls (`lib/channels/store.py:288`)"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "pass"
+   },
+   "rate_limited": {
+    "status": "n/a",
+    "reason": "大象 documents no rate limit for the owner's own session; the robot's shared 5/s limit falls back to the owner at once (C6, test_dx_robot_shared.py)"
+   },
+   "partial_history_failure": {
+    "status": "pass"
+   },
+   "degraded_is_typed": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a failed catch-up is reported as connected with free-text detail (`lib/channels/dx/adapter.py:959`), invisible to the Watchdog"
+   },
+   "runtime_fault_is_typed": {
+    "status": "pass"
+   },
+   "network_fault_is_typed": {
+    "status": "pass"
+   },
+   "restart_mid_send": {
+    "status": "pass"
+   },
+   "reconciliation_read_failure": {
+    "status": "pass"
+   },
+   "stalled_thread_isolation": {
+    "status": "pass"
+   },
+   "accepted_confirmation": {
+    "status": "pass"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "pass"
+   },
+   "unknown_reconciliation": {
+    "status": "pass"
+   },
+   "attachment_degradation": {
+    "status": "n/a",
+    "reason": "大象 carries the files natively (x-dxAttachments)"
+   },
+   "echo_loop": {
+    "status": "pass"
+   },
+   "other_bots": {
+    "status": "pass"
+   },
+   "self_send_outside_outbox": {
+    "status": "pass"
+   }
+  },
+  "github": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a comment visible after its window is never read: each list resumes at the newest updated_at it saw (`lib/channels/github/adapter.py:382`, `lib/channels/github/adapter.py:364`; C8 Limits)"
+   },
+   "edit": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "an edited comment keeps its event ID (`lib/channels/github/normalize.py:123`, from created_at) and reaches the core as a new message, which ingress drops as a duplicate (`lib/channels/ingress.py:158`); the core records edit events as revisions (`lib/channels/store.py:288`), so the adapter must report one"
+   },
+   "recall": {
+    "status": "n/a",
+    "reason": "GitHub REST lists show no deletions, and C8 reads no events API"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "n/a",
+    "reason": "the platform documents no event for another login taking the session"
+   },
+   "rate_limited": {
+    "status": "pass"
+   },
+   "partial_history_failure": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "one failed list read ends the whole session (`lib/channels/github/adapter.py:202`), so no thread progresses until the next tick"
+   },
+   "degraded_is_typed": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a failed list read is reported as disconnected (`lib/channels/github/adapter.py:202`), not degraded"
+   },
+   "runtime_fault_is_typed": {
+    "status": "n/a",
+    "reason": "the adapter has no runtime of its own beside the server"
+   },
+   "network_fault_is_typed": {
+    "status": "pass"
+   },
+   "restart_mid_send": {
+    "status": "pass"
+   },
+   "reconciliation_read_failure": {
+    "status": "pass"
+   },
+   "stalled_thread_isolation": {
+    "status": "pass"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: self)"
+   },
+   "unknown_reconciliation": {
+    "status": "pass"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "pass"
+   },
+   "other_bots": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "the adapter drops GitHub's user type Bot (`lib/channels/github/normalize.py:83`), so the comment reaches the core with sender kind user and is a candidate in watch threads; the core keeps a bot's message to context (`lib/channels/policy.py:87`)"
+   },
+   "self_send_outside_outbox": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "the marker pattern accepts only outbox item IDs (`lib/channels/github/normalize.py:28`), so a comment carrying another Tofu marker reaches the core without it and the owner's comment in a watched thread becomes a candidate (`lib/channels/policy.py:100`); the core treats any other marker value as an echo (x-selfEcho origin_marker)"
+   }
+  },
+  "wecom": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "n/a",
+    "reason": "企业微信 智能机器人 callbacks carry no edits or recalls"
+   },
+   "recall": {
+    "status": "n/a",
+    "reason": "企业微信 智能机器人 callbacks carry no edits or recalls"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "pass"
+   },
+   "rate_limited": {
+    "status": "pass"
+   },
+   "partial_history_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "degraded_is_typed": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "runtime_fault_is_typed": {
+    "status": "n/a",
+    "reason": "the adapter has no runtime of its own beside the server"
+   },
+   "network_fault_is_typed": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a connection-setup failure ends the session as error (`lib/channels/bots/session.py:163`, every exception), shown as 需要处理 and a channel_error signal, not disconnected/network_unreachable"
+   },
+   "restart_mid_send": {
+    "status": "xfail",
+    "owner": "core",
+    "cause": "the platform keeps no history and no idempotency record: the sender port answers no history (`lib/channels/bots/session.py:81`), so the outbox requeues the unknown item (`lib/channels/outbox.py:541`) and sends a second copy; the protocol holds it instead (P4)"
+   },
+   "reconciliation_read_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "stalled_thread_isolation": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: bot)"
+   },
+   "unknown_reconciliation": {
+    "status": "xfail",
+    "owner": "core",
+    "cause": "the platform keeps no history and no idempotency record: the sender port answers no history (`lib/channels/bots/session.py:81`), so the outbox requeues the unknown item (`lib/channels/outbox.py:541`) and sends a second copy; the protocol holds it instead (P4)"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "n/a",
+    "reason": "the platform does not deliver this account's own sends back"
+   },
+   "other_bots": {
+    "status": "n/a",
+    "reason": "the platform delivers no messages of other bots"
+   },
+   "self_send_outside_outbox": {
+    "status": "n/a",
+    "reason": "the platform does not deliver this account's own sends back"
+   }
+  },
+  "qq": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "n/a",
+    "reason": "QQ group and C2C events carry no edits or recalls"
+   },
+   "recall": {
+    "status": "n/a",
+    "reason": "QQ group and C2C events carry no edits or recalls"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "n/a",
+    "reason": "the platform documents no event for another login taking the session"
+   },
+   "rate_limited": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "QQ's refusal (40034100, `lib/channels/qq/transport.py:50`) names no retry time and QQ documents no rate-limit window (x-adapters qq: rateLimits []), so the core holds the deferred item only until its next pass, which the case runs inside the window; the fix is a documented window in x-qq and the descriptor"
+   },
+   "partial_history_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "degraded_is_typed": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "runtime_fault_is_typed": {
+    "status": "n/a",
+    "reason": "the adapter has no runtime of its own beside the server"
+   },
+   "network_fault_is_typed": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a connection-setup failure ends the session as error (`lib/channels/bots/session.py:163`, every exception), shown as 需要处理 and a channel_error signal, not disconnected/network_unreachable"
+   },
+   "restart_mid_send": {
+    "status": "pass"
+   },
+   "reconciliation_read_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "stalled_thread_isolation": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: bot)"
+   },
+   "unknown_reconciliation": {
+    "status": "pass"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "n/a",
+    "reason": "the platform does not deliver this account's own sends back"
+   },
+   "other_bots": {
+    "status": "pass"
+   },
+   "self_send_outside_outbox": {
+    "status": "n/a",
+    "reason": "the platform does not deliver this account's own sends back"
+   }
+  },
+  "wechat": {
+   "duplicate_delivery": {
+    "status": "pass"
+   },
+   "out_of_order": {
+    "status": "pass"
+   },
+   "edit": {
+    "status": "n/a",
+    "reason": "iLink documents no edit or recall flow (update_time_ms/delete_time_ms are type surface only)"
+   },
+   "recall": {
+    "status": "n/a",
+    "reason": "iLink documents no edit or recall flow (update_time_ms/delete_time_ms are type surface only)"
+   },
+   "auth_expiry": {
+    "status": "pass"
+   },
+   "displaced_stays_down": {
+    "status": "n/a",
+    "reason": "the platform documents no event for another login taking the session"
+   },
+   "rate_limited": {
+    "status": "n/a",
+    "reason": "iLink documents no rate-limit refusal"
+   },
+   "partial_history_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "degraded_is_typed": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history (x-adapters: history.read false)"
+   },
+   "runtime_fault_is_typed": {
+    "status": "n/a",
+    "reason": "the adapter has no runtime of its own beside the server"
+   },
+   "network_fault_is_typed": {
+    "status": "xfail",
+    "owner": "adapter",
+    "cause": "a connection-setup failure ends the session as error (`lib/channels/bots/session.py:163`, every exception), shown as 需要处理 and a channel_error signal, not disconnected/network_unreachable"
+   },
+   "restart_mid_send": {
+    "status": "xfail",
+    "owner": "core",
+    "cause": "the platform keeps no history and no idempotency record: the sender port answers no history (`lib/channels/bots/session.py:81`), so the outbox requeues the unknown item (`lib/channels/outbox.py:541`) and sends a second copy; the protocol holds it instead (P4)"
+   },
+   "reconciliation_read_failure": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "stalled_thread_isolation": {
+    "status": "n/a",
+    "reason": "the platform keeps no thread history and answers no lookup (x-adapters: history.read and outbound.lookup false): nothing could prove a send missing"
+   },
+   "accepted_confirmation": {
+    "status": "n/a",
+    "reason": "the platform carries no files natively: a file becomes a note in the text (attachment_degradation)"
+   },
+   "unknown_keeps_its_identity": {
+    "status": "n/a",
+    "reason": "one outbound identity (x-adapters identities: bot)"
+   },
+   "unknown_reconciliation": {
+    "status": "xfail",
+    "owner": "core",
+    "cause": "the platform keeps no history and no idempotency record: the sender port answers no history (`lib/channels/bots/session.py:81`), so the outbox requeues the unknown item (`lib/channels/outbox.py:541`) and sends a second copy; the protocol holds it instead (P4)"
+   },
+   "attachment_degradation": {
+    "status": "pass"
+   },
+   "echo_loop": {
+    "status": "pass"
+   },
+   "other_bots": {
+    "status": "n/a",
+    "reason": "the platform delivers no messages of other bots"
+   },
+   "self_send_outside_outbox": {
+    "status": "pass"
+   }
+  }
+ }
+}

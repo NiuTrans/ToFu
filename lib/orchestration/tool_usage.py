@@ -85,7 +85,9 @@ def _failed_receipt(meta: Mapping[str, Any]) -> bool:
 
 
 def _nontrivial_edit(edit: Mapping[str, Any], *, tool: str) -> bool:
-    operation = edit.get('operation') if tool == 'edit_file' else (
+    # Stored edit_file rounds may still carry a retired insert operation;
+    # current ones carry none and always replace.
+    operation = edit.get('operation', 'replace') if tool == 'edit_file' else (
         'replace' if tool in ('apply_diff', 'apply_diffs') else 'insert_after')
     anchor = edit.get('anchor') if tool == 'edit_file' else edit.get(
         'search' if operation == 'replace' else 'anchor')

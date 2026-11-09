@@ -108,9 +108,74 @@ Serial-call observations remain diagnostic, not grounds for model intervention. 
 
 **Alternatives rejected:** client prefix repairs (the prefix was already byte-stable); a session-affinity header, tool reordering or salted leading bytes (measured no effect on this edge); ranking pins above built-ins as `tools.schemaBudgetTokens` does (R61 would hide ten built-ins to keep eight auto-preselected MCP schemas instead of hiding five long names); a budget on every route or every model on the face (Kimi on the same face reads 98% with the same surface, and other providers showed no such edge); aliasing long names (model-visible names are shared by guidance, search results and execution authority); waiting for a gateway fix (every root round pays a full rewrite meanwhile). The mechanism is inside the gateway, which looks consistent with a ~512-byte key built from the joined names; report it to the gateway owner and re-measure the edge before raising the budget.
 
-**Explicit Tool Search `off` (2026-10-28):** `tools.toolSearch=off` resolves to the `full` backend, which keeps every tool direct with no `search_tools`/`execute_tools`, so hiding has no discovery path. **Decision:** the setting is honored; such a request goes out over budget and logs the WARNING above (`no search_tools/execute_tools discovery path, Tool Search backend=full`) on every request, so the cost is visible per round and in the read-share split. The same applies to small or all-eager catalogs where `local` adds no gateway. No deployment default sets `off` (`tools.toolSearch` defaults to `local`). **Alternatives rejected:** forcing the discovery pair onto this route when over budget (it overrides an explicit setting for cost, not correctness: the request still succeeds); hiding tools without a discovery path (they would become unreachable); aliasing names (rejected above).
+**Explicit Tool Search `off` (2026-10-28):** `tools.toolSearch=off` resolves to the `full` backend, which keeps every tool direct with no `search_tools`/`execute_tools`, so hiding has no discovery path. **Decision:** the setting is honored; such a request goes out over budget and logs the WARNING above (`no search_tools/execute_tools discovery path, Tool Search backend=full`) on every request, so the cost is visible per round and in the read-share split. Under `local`, a small or all-eager catalog keeps its gateway whenever the budget would hide a name (Coordinator-role surfaces, below). No deployment default sets `off` (`tools.toolSearch` defaults to `local`). **Alternatives rejected:** forcing the discovery pair onto this route when over budget (it overrides an explicit setting for cost, not correctness: the request still succeeds); hiding tools without a discovery path (they would become unreachable); aliasing names (rejected above).
 
 **Detection (2026-10-28):** the lane split was in the 2026-10-23 logs (`cache_waste_report.py` printed root 0.03 against children 0.94) but nothing ran the report, and each cold round's own `upstream_identical`/`cache_write_unsettled` verdict pointed away from the request. **Decision:** `_health.read_share_monitor` folds every round record into a bounded per-minute window and warns while one request group on a model is cold and another warm; the cold side's break reports say so instead of attributing the miss upstream. The nightly optimizer streams the last 24 hours of rotated `app.log` files (personal deployments only, since process logs carry no owner), puts any split first in the proposer prompt with a rule to propose an investigation and never a TTL change, and keeps it in the run summary's `evidence_summary`. `scripts/cache_ab_probe.py --arm` is the manual single-variable A/B for the next quirk; the diagnosis order is in `lib/tasks_pkg/cache_tracking/AGENTS.md`. **Alternatives rejected:** duplicate, keep-alive or warm-up requests to raise reuse (they spend money to hide the signal); automatic probing from production (unbudgeted model calls outside execution accounting); a per-round verdict change (one round cannot know another group is warm, and the bucket stays the factual evidence class). Specifications: `tests/cache/test_cache_read_share_health.py`, `tests/cache/test_cache_record_lane.py`, `tests/optimizer/test_cache_read_share_evidence.py`, `tests/cache/test_cache_ab_probe.py`.
+
+**Over-budget attribution (2026-11-08):** Coordinator-role surfaces were all required-direct (`prepare_coordinator_tool_surface`), and an all-eager local surface carried no discovery pair, so the budget could not hide anything there. The Global Router's Claude rounds carried 35 tools / 687 name bytes, logged `tool-name budget 448 bytes NOT met` on every request and read back 1.2% of their prompt (56 rounds, 2026-11-07 20:57 to 11-08 16:46; 16 of 16 after the 16:55 restart), but each record said `upstream_identical` or `cache_write_unsettled`, so those misses were blamed on the gateway account pool. **Decision:** `_wire_tool_surface` relays the route's budget (`name_budget_bytes`), the record carries `wire_tool_name_budget_bytes`, and a confirmed break on a request sent over its route's budget is bucketed `tool_name_budget` (client-side; counted as recoverable by `scripts/cache_waste_report.py`) ahead of the boundary, write-visibility and upstream verdicts. Unlike the read-share split, the round itself knows it was sent over the measured budget, so this per-round verdict is a fact, not an inference. Spec: `tests/cache/test_cache_tool_name_budget_attribution.py`. **Alternatives rejected:** relying on the `[CacheHealth]` split (it qualifies only the text, needs 20 rounds in both groups, and still bucketed the Router upstream).
+
+**Coordinator-role surfaces (2026-11-08).** **Problem:** with every role tool required-direct and no discovery pair, the budget could not fit any Coordinator-family surface. Eager tool-name bytes per role (`wire_tool_name_bytes` of `[CacheRoundRecord]`, 2026-11-08 about 17:50 to 21:14): Global Router 35 tools / 687 bytes; Project Routers 18/355, 18/355 and 21/416; Watchdog 8/171. Only the Global Router was over 448. Its Claude rounds read 0.87% of 34.5M prompt tokens (97 rounds, 11-07 21:11 to 11-08 21:52), while its Kimi rounds read 58–74%.
+
+**Decision:** reuse the budget fit and the local discovery pair; add no selection mechanism.
+
+- `local_wire_tools(keep_discovery=True)` keeps `search_tools`/`execute_tools` on a small or all-eager surface when this route's budget will hide one of its names (`tool_wire._hides_a_name`), as an explicit schema budget already does. The longest-first fit then hides names on that route only.
+- The Global Router's required-direct set is `ROUTER_DIRECT_TOOLS` (`lib/router/policy.py`) instead of every admitted tool. All its role tools stay eager, so routes without a name budget still send the whole surface unchanged.
+- The core comes from the Router's recorded calls (2026-11-03 08:18 to 11-08 21:05, 132.8 h, 950 calls, `debug/inspect_conversation.py --json`), most-called first: `get_conversation` 249, `update_task_progress` 112, `route_to_project` 99, `list_conversations` 98, `get_project_workers` 48, `await_project_workers` 48, `channel_send` 37, `channel_outbox` 37, `report_to_user` 37, `get_conversation_status` 31, `get_router_projects` 28, `channel_read` 27, `cancel_project_work` 16, `get_project_assignment` 15, `todo_write` 15, `ask_human` 11, `router_instruction_list` 10, `delegate_project_work` 10, `send_project_message` 5, `router_instruction_create` 4, `review_project_work` 4, `restart_server` 4. That is 408 bytes, 435 with the discovery pair. The next tools by use (`channel_threads` 2, `finish_project_request` 2, `get_project_messages` 1) would push the core and pair past 448, so the budget ends the core, not a chosen count.
+- On Claude at `your-llm-gateway.example.com` the fit hides the 12 longest optional names: `get_project_messages`, `consider_project_message`, `control_conversation`, `create_conversation`, `dispatch_project_assignment`, `finish_project_request`, `router_instruction_cancel`, `channel_threads`, `channel_configure_thread`, `channel_subscribe`, `channel_unsubscribe`, `channel_outbox_approve`. The wire keeps 25 tools, 448 bytes. Hidden tools stay in the executable catalog: exact-name calls, `search_tools` and `execute_tools` reach them, and `coordinator_call_rejection` admits them inside the ceiling. This includes `control_conversation(owner_delegation=…)`; `restart_server` stays direct.
+- The Watchdog keeps every tool required-direct: its whole ceiling is 211 bytes. Project Coordinators keep their own core (below). A request whose names are all required gets no gateway and logs `NOT met … required direct tools alone exceed it`.
+
+**Evidence:**
+
+- Controlled replay of the archived Router request head (M-TraceId 471826bef57b484bb1e120cf96fdefaa; system and tools; run nonce in the first tool description; one key; one `Mt-Session-Id` per arm; 90 s apart; 2026-11-08 21:49 to 21:55; ¥4.56). With 687 bytes, all three sends wrote 22,600 tokens and the two resends read nothing. With 448 bytes, the first send wrote 18,583 tokens; of four resends, two read the full prefix (miss, hit, hit, miss).
+- That matches the read share of in-budget Claude conversation rounds at that spacing (46.0% at 80–160 s). Weighting the in-budget read share per gap (88.8% under 10 s, 27.5% at 160–300 s, 1.2% beyond) by the Router's own recorded gaps gives an expected 44% of its Claude prompt read, against 0.87% now. That is about ¥0.4–0.9K/day of write premium (¥506/day over the 24.7 h window).
+- Calls to the hidden tools on Claude rounds: 3 in 132.8 h (0.5/day; 0.9/day across models). At one extra in-turn round each (about ¥2), they cost under ¥2/day.
+
+Specs: `tests/router/test_router_tool_name_budget.py`, `tests/llm/test_tool_wire_name_budget.py`.
+
+**Alternatives rejected:**
+
+- Shorter tool names. Model-visible names are shared by role prompts, tool guidance, search results, execution authority, recorded Turns and every other route; renaming a dozen tools migrates all of them for one gateway's edge (aliasing is rejected above for the same reason).
+- Kimi as the Router's primary model. Kimi reads its cache with the whole surface, but the Router's model is the owner's choice (ROUTER.md R5) and changes Router quality; this fix removes the client-side cause and keeps the model.
+- Leaving it as is. Every Router Claude round re-writes its whole prompt (about ¥12.6 at 350K tokens); the attribution only names the loss.
+- Longest-first with no core. It hides `await_project_workers` (48 calls), `get_conversation_status` (31), `get_project_assignment` (15), `router_instruction_list` (10) and `router_instruction_create` (4), about 20 gateway calls a day, while keeping five never-called tools direct.
+- Marking non-core Router tools `searchable`. That defers them on every route, including Kimi, which reads its cache with the whole surface.
+- Pinning the tools the role prompts name. That is 20 tools, four never called, and it leaves out `list_conversations` (98 calls) and the channel tools.
+- A runtime core ranked by usage. That is a tuned top-k (principle 5) with per-owner state.
+
+**Project Coordinator core (2026-11-08).** **Problem:** STATUS-BOUND added `read_tool_artifact` and `search_tool_artifact` to `COORDINATOR_TOOLS`, so a Project Coordinator's human Turn assembles all 23 role tools, 456 bytes, every one required-direct. From the next restart each of its Claude rounds would go out over 448 bytes and re-write its prompt. Claude-route wire per surface on the current head, measured through `assemble_round_tools` and `project_tool_wire` (the Global Router with its channel tools and readers):
+
+| Surface | Role tools | Before | After |
+|---|---|---|---|
+| Project Coordinator, human Turn (includes `dispatch_project_assignment`) | 23 / 456 B | 23 / 456 B, no discovery pair | 23 / 435 B, hides `dispatch_project_assignment` and `create_conversation` |
+| Project Coordinator, Plan Mode | 10 / 196 B | 10 / 196 B | unchanged |
+| Project Coordinator, continuation grant | 18 / 355 B | 18 / 355 B | unchanged |
+| Global Router | 37 / 727 B | 25 / 448 B | unchanged |
+| Global Router, channel review Turn (`REVIEW_TOOLS`) | 6 / 102 B | 6 / 102 B | unchanged |
+| Watchdog | 10 / 211 B | 10 / 211 B | unchanged |
+
+**Decision:** the Router's mechanism, unchanged. `COORDINATOR_DIRECT_TOOLS` (`lib/tasks_pkg/coordinator_policy.py`) is the Project Coordinator's required-direct core. Its other role tools stay eager, and the fit hides the longest of them on that route only.
+
+- The core follows recorded use. The three Project Coordinators' recorded calls (`debug/inspect_conversation.py --json`: coordinator-1a390889 2026-10-16 09:07 to 11-08 21:55, coordinator-edae46bf 11-03 16:30 to 11-08 22:16, coordinator-2666b08e 11-06 11:26 to 11-08 19:38; 3,613 calls), most-called first: `await_project_workers` 1,046, `delegate_project_work` 451, `send_project_message` 325, `review_project_work` 298, `get_conversation` 226, `update_task_progress` 213, `get_project_workers` 185, `consider_project_message` 176, `cancel_project_work` 134, `report_to_user` 121, `get_conversation_status` 95, `get_project_assignment` 84, `get_project_messages` 73, `todo_write` 55, `list_conversations` 44, `ask_human` 36, `finish_project_request` 16, `control_conversation` 15, `dispatch_project_assignment` 4, `create_conversation` 2, `search_tool_artifact` 1 (refused), `read_tool_artifact` 0, `await_device` 0.
+- The readers' call counts are censored: this ceiling refused them until STATUS-BOUND. Their use is the partial results whose only recovery they are (PROJECT_COORDINATION.md, "Partial results are readable by every Coordinator role"). The record holds 222 such envelopes from the results STATUS-BOUND left unbounded (`get_conversation` 132, `get_project_assignment` 79, `await_project_workers` 7, `dispatch_project_assignment` 4), about 30 a day across the three in 11-04..08. That ranks the readers after `get_conversation`.
+- In that order the core is the first 18 tools (the continuation grant's whole set) and both readers: 20 tools, 395 bytes, 422 with the discovery pair. The next tool, `dispatch_project_assignment`, would bring it to 450, so the budget ends the core.
+- On Claude at `your-llm-gateway.example.com` the fit hides `dispatch_project_assignment` and `create_conversation`. The wire keeps 23 tools, 435 bytes; `await_device` (13 bytes) still fits. Other routes are unchanged. Continuation grants are unchanged too: their 18 tools fit and are all in the core, so they get no discovery pair.
+- Hidden tools stay reachable: `search_tools` finds them, and `execute_tools` and exact-name calls are admitted. Parsing admits any name in the executable catalog (`tool_dispatch._labels._known_tool_names`), and `coordinator_call_rejection` checks the ceiling. The partial-result recovery is direct here. The Router's Claude wire hides both readers; an exact-name call with the hint's arguments parses and is admitted there.
+- As for the Router, an explicit `tools.schemaBudgetTokens` (default 0) can also defer non-core role tools behind the discovery pair, and a narrower replayed initial visibility (set only by child policies) can leave them off the wire. They stay executable by exact name.
+
+**Evidence and effect:**
+
+- Project Coordinator Claude rounds from 2026-11-03 06:20 to 11-08 22:16 (5.66 days): 276 on human Turns (48.7/day, 60.3M prompt tokens, 39.6% read), 1,178 on continuations (28.5% read). At 456 bytes the human-Turn rounds would read nothing. Writing their 23.9M read tokens instead would cost about ¥830 over the window, ¥147/day (the records' ¥1.45/M read and ¥36.24/M write).
+- How Claude reaches a reader missing from its request: after three partial results (2026-11-04 and 11-05, all `claude-opus-5.5`) the Coordinator called `search_tool_artifact` four times, once by exact name and three times through `execute_tools`, each looking up one field (`checkpointSha`, `grantRevision`). None went through `search_tools` first. Without the schema, two of the four were malformed (no arguments; `tool` for `name`), each costing a retry round. All four were refused, since the ceiling lacked the readers.
+- Hidden-tool use: `dispatch_project_assignment` 4 calls (11-03 and 11-06, three on Claude), `create_conversation` none since 10-16 (four that day, all on Kimi). That is under one extra round a day at about ¥1–2 each.
+
+Specs: `tests/tasks_pkg/test_coordinator_tool_name_budget.py` covers every Coordinator-family surface on the Claude route, through its real assembly or the role policy over its whole ceiling; it fails first at 456 bytes. Also `tests/project_mod/test_coordinator_continuation.py::test_continuation_surface_goes_whole_on_the_claude_name_budget_route`.
+
+**Alternatives rejected:**
+
+- Ranking by recorded calls alone. It hides both readers to keep `dispatch_project_assignment` (4 calls) and `create_conversation` (2) direct, yet about 30 partial results a day name the readers as their recovery. Calls to a reader without its schema were malformed half the time above.
+- Pinning only `read_tool_artifact`, the reader the continuation marker names. That keeps `dispatch_project_assignment` (4 calls) direct and hides `search_tool_artifact`, yet every reader call in the record was `search_tool_artifact` (4 calls), two of them malformed without its schema.
+- Dropping `dispatch_project_assignment` or `create_conversation` from the ceiling. That changes the role's authority to save bytes.
+- Dropping the readers from the ceiling. Partial results would be unreadable again, the problem STATUS-BOUND fixed.
 
 ### 7. Cache affinity carriers
 
@@ -125,17 +190,59 @@ Serial-call observations remain diagnostic, not grounds for model intervention. 
 - **Lineage key.** `cache_affinity_key` is a UUID-shaped SHA-256 digest of the request lineage. The lineage is the child invocation for a child (`invocation_affinity_id`, the scope Tofu's own key stickiness already uses), else the conversation, else the L2 summary series' own id, else the task. Round requests and rebuilt fallback attempts carry it in `_cache_affinity_scope`. The digest equals what Responses `prompt_cache_key` and the Codex session headers already sent, so live keys did not rotate. One key per lineage keeps each key at the pace of one agent loop.
 - **Carriers.** Each carrier is a provider contract, declared per route as a closed-world route feature `cache_affinity_<carrier>` (`lib/llm/route_features.py`) and bound to its header in `CACHE_AFFINITY_HEADER_CARRIERS`.
 - **Where headers are added.** Both outbound header assemblies (`_sse_core.prepare_request` and non-streaming `chat.py`) call `merge_cache_affinity_headers`. An owner-configured header of the same name wins.
-- **YourProvider declaration.** The template declares `cache_affinity_mt_session_id` on its `anthropic` and `kunlun` faces, and template supply converges it onto installed face Connections. The owner-territory default chat face does not carry it.
+- **YourProvider declaration.** The template declares `cache_affinity_mt_session_id` for native chat and its `anthropic` and `kunlun` faces. Fresh installs inherit it on every face. Template supply converges declared face Connections; already-installed default chat Connections remain owner-managed and need an explicit owner-scoped configuration update. The TB evaluation Connection declares the same carrier and its relay passes it through for all clients and retries without synthesizing absent identities.
 - **Feature merge.** Feature maps now resolve per feature across model, offering, connection and deployment, so a face's binding no longer erases model-level features.
 - **Evidence.** The routing fingerprint carries `affinity` (the carrier slots plus a short digest of the key), so a lineage whose key or carrier changes shows as `<ns>affinity`. `[CacheRoundRecord]` records `affinity`, and the read-source table of `scripts/cache_waste_report.py` splits by it. An `older` read on a lineage that carried a key means a hop ignored it; report it to the provider with the M-TraceIds.
 - **Adding a provider.** Add one carrier entry with its source, register the feature (a gateway header in `_GATEWAY_FEATURES`; a body field gets its own protocol binding and serializer, like `responses_prompt_cache`), declare the feature on the template face, and add a test.
 
-Specs: `tests/llm/test_cache_affinity.py`, `tests/model_routing/test_template_supply_sync.py::test_cache_affinity_carrier_converges_onto_installed_claude_face`, `tests/model_routing/test_route_inference_contract.py::test_route_features_resolve_per_feature_across_entities`, `tests/cache/test_cache_waste_report.py`.
+Specs: `tests/llm/test_cache_affinity.py`, `tests/providers/test_yourprovider_cache_affinity.py`, `tests/evaluations/test_terminal_bench_cache_affinity.py`, `tests/model_routing/test_template_supply_sync.py::test_cache_affinity_carrier_converges_onto_installed_claude_face`, `tests/model_routing/test_route_inference_contract.py::test_route_features_resolve_per_feature_across_entities`, `tests/cache/test_cache_waste_report.py`.
 
 **Verification:** the effect is measured on ordinary traffic after deployment with that read-source table: rows with `Mt-Session-Id` should read `older` close to 0%. No warm-up or duplicate request is sent (owner decision 1). Result on 2026-11-03 (`--model claude-opus-5.5 --since '2026-11-03 09:14:32' --until '2026-11-03 10:57:49'`): not met. Claude follow-up rounds read their predecessor in 72–75% of rounds (30–42% before the carrier) and `older` in 5–7%, while Kimi on the same gateway and carrier read 98–100% with no `older` rows. `upstream_identical` and `cache_write_unsettled` were 96% of the ¥1,369 recoverable in those 1.7 hours. The Claude hops are synchronized across independent lineages (a miss made a miss in another lineage sent within ±5 s 2.8× likelier), 21% of misses returned to an older round's exact entry on the next round, and three inspected A→B→A hops kept the same SSE format: account moves inside one vendor, which FRIDAY's hash-modulo affinity (§5.1) produces for nearly every session whenever its account set changes. Thinking parameters stayed constant inside every lineage, and one `cache_namespace_switch` remained after the 2026-11-03 account-status fix. Tofu cannot see the serving account: the gateway forwards no workspace header and does not deliver the request `diagnostics` object to the API (a two-request synthetic check with a changed system prompt returned `null`, which [cache diagnostics](https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics) rules out once the object arrives). Open with the gateway owner, with M-TraceIds: consistent or rendezvous hashing so a membership change moves only the affected account's sessions, and forwarding `diagnostics` plus an opaque account label.
 
+**Controlled replay (2026-11-08):** with `Mt-Session-Id` on every round (3,238/3,238 Claude rounds 11-07 20:57 to 11-08 09:10), Claude still read only 62-69% of its prompt while Kimi on the same face read 90-99%. Of the lost Claude reuse 11-07 20:57 to 11-08 16:46 (97% of Claude write tokens re-wrote an already-sent prefix), 87% came from in-TTL rounds whose sealed per-message bytes, system/tools/controls region and routing (key, beta, endpoint, carrier digest) all matched the previous round; per-minute miss rates across independent lineages are over-dispersed (dispersion index 5.3: some minutes miss 90-100% of all rounds, others 4%). Eight synthetic requests through one key, the production header set and one `Mt-Session-Id` (identical body SHA, ~11K-token prefix, 5m markers) gave: cold write; identical resend right after the response MISS; +30 s MISS; +90 s hit; append-only growth hit; two parallel identical sends both wrote, a third read. Byte-identical bytes plus a controlled miss place this class upstream; it is not the visibility window `cache_write_unsettled` assumes either (the +30 s resend missed). The Global Router's misses were the exception: they were client-side (`tool_name_budget`, section 6).
+
+**Per-request upstream routing (2026-11-08, second replay):** the misses are per-request server routing, not a delay before a write becomes readable. Nineteen synthetic sends and one metadata probe (key 0, production headers, one `Mt-Session-Id` per session, 6.2K–11.4K-token prefixes, ¥4.8 in total):
+
+| test | sends | result |
+|---|---|---|
+| one write, identical resend at +150 s | 3 sessions | 0/3 read |
+| one write, three identical resends back-to-back | 1 session | miss, miss, read |
+| one 1h write, identical resend at +390 s | 2 sessions | 0/2 read |
+| prefix P, then P + 30 one-block messages with a marker at P's end | 2 | read 11,080 (all of P), wrote 321; one send missed outright |
+| control: same, no marker at P's end (30 blocks back) | 2 | read 6,142 (tools and system), wrote 5,259 |
+
+- **No visibility delay.** A delay shorter than 150 s predicts three reads at +150 s; a longer one cannot produce the back-to-back read. In production, after a cold write the next round read it less often the longer it waited (see section 11). Amazon Bedrock's [prompt-caching guide](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html) states the mechanism: a cache entry is stored on the server that processed the request, and a request served by a different server, or sent before an identical request has started its response, writes a new entry.
+- **No upstream identifier.** Response headers are `Server`, `Date`, `Content-Type`, `Connection`, `M-TraceId` and `Vary`. Message IDs are time-ordered `msg_011Cgq…`, `diagnostics` is `null`, and usage reports `inference_geo: "global"`, which [lets inference run in any available geography](https://platform.claude.com/docs/en/manage-claude/data-residency). `"us"` costs 1.1× on every token category, and FRIDAY's support for it is unverified.
+- **Tofu sends one stable key.** The header is a digest of the lineage (`invocation_affinity_id`: the conversation, or the child invocation for a sub-agent), and so does not change across rounds, turns, retries, key rotation, fallback or restarts. All 4,532 post-restart Claude records (16:55 to 21:25) had an empty `routing_diff`. No Claude round changed key or retried, and the 13 key rebinds were all on Kimi. Of the post-restart Worker re-write premium (¥127.8K/day at that burst's rate), 87% was in-TTL identical-bytes rounds and 11% a round whose reported prompt was shorter than its predecessor's. Those followed a missed round 85% of the time, and where inspected Tofu's own `promptAdmission` count kept growing. The remaining 2% was gaps over 5 min (1.6%) and first rounds (0.4%). Detector-confirmed byte changes (L1 tool-result stubs, four compactions, rebuilt first rounds) were under 1%, inside those classes.
+- **Older breakpoints.** A marker at an older boundary reads that entry while the request appends (rows 4–5). Older-entry reads in production stop at nine requests back, the tail marker's lookback. Extrapolating their geometric decay, about 70 such reads per 19.8 h (before the restart) and 47 per 4.5 h (after) were lost beyond it. That is at most ¥0.9K/day and ¥2.6K/day at those rates, even if a marker caught every one. The free marker would have to come from the system pair, and the 2026-07-20 mid-anchor A/B (`lib/llm/cache.py`) found a trailing anchor net-negative. Layout unchanged.
+- **A 1h write before a long wait.** Per role, consecutive Claude requests in one lane more than 5 and at most 60 minutes apart were 70/58/31/38/25/14 (chats, Workers, Project Routers, chat sub-agents, Watchdog, Global Router) of 1,862/3,831/167/4,315/79/42 requests before the restart. Writing 1h exactly before those gaps nets ¥+0.06K, +0.09K, −0.08K, +0.04K, −0.16K and −0.10K a day at a 31% read after the wait, the in-TTL rate at 160–300 s. The replay read 0/2. No request precedes a declared wait: the wait arrives in the response, and a warm-up request is excluded by owner decision 1. A role-wide 1h rule loses on every role, by up to ¥8.8K/day. Re-writes after 5–60 min gaps were 9.2% (before) and 2.5% (after) of Claude write tokens, under the 40% merge condition of the held uniform 1h tail. A read cuts provider TTFT on prompts of 300K tokens and up from 18.7 s to 9.7 s (median).
+- **Concurrent sibling starts.** Swarm siblings that start within seconds of each other each write their ~25K-token first prompt: 21 extra starts in 19.8 h, about ¥18/day. Staggering them would add the first sibling's TTFT to every swarm; not changed.
+
+**Long-context Workers (2026-11-09).** **Problem:** the Terminal-Bench 2.1 Opus comparison found no Tofu-caused misses, but its prompts were 18–30K tokens and it never compacted. After the 2026-11-08 restart, Workers sent most Claude spend at 200K–779K tokens. **Evidence:** every Worker Claude round from 11-08 16:55:56 to 11-09 06:35:46 (13.7 h), chained per conversation. A miss is a round whose read fell more than 2,048 tokens short of what its predecessor left cached; its premium is the re-written tokens × (1.25 − 0.10) × input. Per day at that window's rate:
+
+| prompt | requests | hit | misses | miss premium | identical bytes (gateway) | idle > 5 min | Tofu change |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 200–500K | 4,864 | 60.3% | 51% | ¥39.5K | 97.8% | 1.8% | 0.4% |
+| ≥ 500K | 2,615 | 42.7% | 67% | ¥53.2K | 96.8% | 3.2% | 0 |
+
+- "Identical bytes" means the detector compared every previously sent message, the system and tool regions, the cache controls and the routing (key, beta, endpoint, `Mt-Session-Id` digest), found them unchanged, and the round came inside the TTL. The archived request bodies confirm it independently. In 349 of 349 consecutive pairs (41 Workers, ≥ 200K tokens), each request's block stream in cache order begins with the previous request's, byte for byte. The controls are unchanged, and the tail marker sits 2–8 blocks after the previous one, inside the 20-block lookback. 220 of those rounds missed. Kimi Workers on the same gateway read 97%.
+- One in fifteen identical-bytes misses reported a smaller prompt for a longer body (in one pair 16,551 fewer tokens for 9 KB more): the serving upstream counted differently.
+- The only Tofu-side divergences were the ten route-window compactions. Each took the prompt from about 776K tokens to 258–474K (L1 tool-result clearing plus an L2 summary) and re-wrote it once for ¥8–16, ¥177/day in total. Before the restart (19.8 h, 2,146 requests ≥ 200K) the shares were 92.9% identical bytes and 6.9% idle > 5 min.
+- Misses did not follow Tofu's concurrency (50–60% at 0–2 to 10+ Claude requests in flight) or its credential (54–59% on each of three). After the restart they rose with prompt size: at an idle under 10 s the next round read everything 57%, 50% and 35% of the time below 200K, at 200–500K and at ≥ 500K (58%, 65% and 64% before the restart).
+
+**Decision:** no Tofu change. The ¥90K/day identical-bytes residual is FRIDAY's routing (above). **Alternatives rejected:**
+
+- Compacting on a stable cache boundary. Each compaction already keeps the system+tools head and starts re-writing at wire message 2–4, because the cold tool results it clears start there. A later boundary leaves less to compact, and the most any boundary could recover is the ¥177/day the compactions cost, at the roughly even chance that the next round lands on the same account.
+- Another credential or a concurrency limit: no dependence (above).
+- A 1h TTL against the idle share: every account hop re-writes at 2.0× ([section 9](#9-stable-head-cache-ttl)).
+
+**Native chat evidence (2026-11-07):** a paired GLM-5.3-Flash replay of ten conversation histories (264 requests per arm) read 82.8% of input tokens without the carrier and 95.6% with it, keeping system prompts fixed. Of 254 follow-up requests per arm, 197 versus 2 read at least 64 tokens less than their predecessor's input. This measures incomplete prefix reuse, not zero cache hits: only one baseline follow-up read zero. The replay generated 16 tokens per request and used user-message nonces to isolate histories; it is mechanism evidence, not a full-task or production performance measurement. Prefix placement and sharing changed reuse, but neither a fixed 10K-token routing boundary nor a particular serving replica is established. Gateway affinity remains best-effort.
+
+**Read-source chain identity (2026-11-07):** the table chains rounds by the log `[rid:]` plus the record's `conv`. Durable tasks all log `[rid:conversa]`, and `conv` held only the first 8 characters, so concurrent `worker-<hex>`/`coordinator-<hex>` conversations merged: in the 2026-11-07 20:41–22:13 logs ten 8-character keys each named 2–10 conversations (joined to whole IDs by `trace_id`/`M-TraceId`), and the merged chains dropped 214 of 1,350 classifiable `claude-opus-5.5` follow-up rounds while shifting `unmatched` from 3.5% to 6.0%. Records now carry the whole conversation ID; earlier logs keep the truncated key, so read their tables with that bias.
+
 **Alternatives rejected:**
 
+- A session marker in system messages or tool definitions. It changes model-visible context and cross-session prefix sharing to influence undocumented routing, while the header carries the identity separately.
 - Keep-alive, duplicate or warm-up requests (owner decision 1).
 - Concurrency gates or launch staggering: previous-entry reads did not depend on concurrency.
 - One conversation-wide key for every child. It concentrates a swarm on one upstream account, and on OpenAI it exceeds the documented per-key overflow rate.
@@ -212,6 +319,20 @@ Specs: `tests/cache/test_cache_break_prefix_baseline.py`, `tests/tasks_pkg/test_
 - Ignoring `<ns>key` on every route that carries a lineage key. `prompt_cache_key` and the Codex session headers are read by providers whose cache follows the credential's organization or account.
 
 **Measured residual (same window):** 77% of Claude cached-input spend was re-written prefix, about ¥572 in 53 minutes, all of it on byte-identical bodies. Head-only and older-entry reads followed a Claude 429 ("This request would exceed your account's rate limit") in the preceding 90 s in 57% and 76% of cases, against 12% for clean hits. That fits §7's hash-modulo affinity re-mapping sessions whenever an upstream account saturates. The gateway owner's fix (consistent or rendezvous hashing) remains the only lever.
+
+**Write-visibility verdict (2026-11-08).** **Problem:** a read collapse with identical bytes and routing that came within the settle gate's cold window (18 s) of the previous round's cold write was filed `cache_write_unsettled`: "a CLIENT-side timing race … the cache-settle gate is meant to hold the next send". After the 16:55 restart that was 227 Claude rounds in 4.5 h and 9.8% of the Worker re-write premium. The premise did not hold:
+
+- An entry is readable once its own request has started its response (Bedrock [prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html), §7). Tofu sends the next round only after the previous response ended.
+- After a cold write, the next round read the new entry in 51–54% of rounds at 5–10 s, 39–43% at 10–18 s, 25–31% at 18–30 s and 17–28% at 60–300 s. That is in-TTL Claude-after-Claude rounds, 11-07 20:57 to 11-08 21:25, excluding the Global Router. The rate falls with the wait instead of recovering after a window; after a warm round it falls from 84% to 53–60%.
+- Single writes re-sent identically at +150 s read 0/3 (§7, second replay).
+
+**Decision:** the detector no longer names `cache_write_unsettled`; these rounds get the byte-identical upstream verdict (`upstream_identical`). The bucket and its legacy rendering stay for records written earlier. The opt-in settle gate (`TOFU_CACHE_SETTLE`, default off) is unchanged, and its module header records that its premise failed here. Spec: `tests/cache/test_cache_sequential_cold_write_attribution.py`.
+
+**Alternatives rejected:**
+
+- A shorter window. No window fits, because reads fall with time.
+- Enabling the gate. It holds the next round up to 18 s after every cold write and cannot change which server serves it.
+- Keeping the label as a hypothesis. It counts upstream misses as a Tofu timing cause and points at a fix with no effect.
 
 ## Claude effort and prompt cache
 
@@ -399,6 +520,47 @@ this channel has enough coverage and a semantic-quality evaluator.
 
 ## Context-efficiency controls
 
+**Static-context decision (2026-11-07).** Problem: the full prompt repeats
+comment-writing, parallel-call and output-style guidance, while every large
+local tool surface preloads a result-recovery tool whose normal completion
+updates already contain the result. Decision: consolidate those prose rules
+without changing block IDs, safety/authority rules or profile selection, and
+defer `get_agent_result` through the existing registry/search/execution path.
+The direct `spawn_agents` description points to search when recovery is needed;
+launch and background controls remain direct. Small catalogs and Tool Search
+`off` retain the recovery schema. An explicit named tool choice restores only
+the current authorized schema through the shared direct-wire mechanism.
+
+Offline measurement against the captured 20-tool TB surface at
+`3cab0434d126b3788821b7def69e9ef3a34eeb93`, using canonical swarm schemas,
+`tool_schema_tokens` for sorted compact JSON and `count_text` for the joined
+`build_static_blocks` output (`glm-5.3-flash`, code context, Tool Search present,
+environment/date omitted):
+
+| Component | Before | After |
+| --- | ---: | ---: |
+| Direct tool schemas | 7,139 | 6,760 |
+| Platform static prompt | 3,412 | 3,147 |
+| Combined local token estimate | 10,551 | 9,907 |
+
+This is a 644-token (6.1%) reduction in those two components, not provider
+billed usage, total conversation context, or a quality/latency result. The
+recovery path can add a discovery round when used. Production routing and the
+TB CLI are distinct: production defaults to `tools.nativeExposure=routed`,
+whereas the CLI defaults to `full` for reproducible evaluation exposure; both
+still apply declared-searchable deferral through local Tool Search.
+
+Alternatives: deferring the launch tool conflicts with the current direct
+multi-agent policy; hiding file/lifecycle tools adds discovery to routine work;
+switching GLM to the lean prompt is a behavioral experiment requiring paired
+task-quality evidence. Existing deferred specialist families already cover
+slides, image generation and browser operations. No prompt nonce, context-size
+cutoff or new tuning setting is introduced, and these savings do not establish
+a gateway routing boundary. Specs: `tests/tools/test_tool_registry.py`,
+`tests/context/test_full_prompt_integrity.py`,
+`tests/tasks_pkg/test_prompt_profile_adoption.py`, and the named-tool-choice
+contract in `tests/tasks_pkg/test_unified_tool_gateway.py`.
+
 Request-local switches support single-factor ablation without process-global
 state. Every tool-capable request defers the declared-searchable residual
 catalog behind the local Tool Search gateway; eager tools stay direct:
@@ -461,7 +623,8 @@ catalog behind the local Tool Search gateway; eager tools stay direct:
 - L2 always uses the source-derived continuity packet in
   [CONTEXT_COMPACTION.md](CONTEXT_COMPACTION.md), independently of model prose.
   Selected source observations use the existing request budget without a
-  newest-N prefilter. The exact checklist and folded execution observations are
+  newest-N prefilter; only a packet that cannot fit beside the smallest tail
+  folds its oldest observations into the narrative. The exact checklist and folded execution observations are
   appended by the runtime and digest-verified on reuse; receipt retention is
   computed from that accepted packet, not substring matches in model output.
 - `compaction.evidenceLedger=true` additionally persists exact L1 cold tool

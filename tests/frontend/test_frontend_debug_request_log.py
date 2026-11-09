@@ -6,7 +6,7 @@ the previous round. The legacy ``_debugCache`` single-slot render source is
 untouched. kind='state' snapshots are NOT LLM requests and route to ``.states``;
 a missing kind (legacy event) defaults to 'request'.
 
-Loads the REAL shipped static/js/core/debug_panel.js under jsdom and drives
+Loads the REAL retained core/debug_panel.js under jsdom and drives
 ``showMessagesInDebug`` with the new 7th ``meta`` param (the envelope the SSE
 handler now forwards: kind / model / params / roundNum / taskId).
 
@@ -22,13 +22,14 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_sections_dir
+from tests._jsdom import require_node_modules
+from tests._runtime_sections import runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-JS_DIR = runtime_sections_dir()
+DEBUG_PANEL = runtime_section_path('core/debug_panel.js')
 
 
 _HARNESS = r"""
@@ -142,13 +143,14 @@ def _run(src_path=None, expect_fail=None):
     ``expect_fail``: when set (a probe name), the run MUST report that probe
     as FAIL (negative-control mode for the neutered copy).
     """
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_debug_request_log_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
             ['node', harness,
-             src_path or os.path.join(JS_DIR, 'core', 'debug_panel.js'),
+             src_path or DEBUG_PANEL,
              ROOT],
             capture_output=True, text=True, timeout=60,
         )
@@ -176,7 +178,7 @@ def test_request_log_appends_per_round():
 def test_neuter_recording_stripped_flips_red():
     """Negative control: disable the recording block in a COPY → the
     'two_rounds_retained' probe MUST fail. Proves the log is load-bearing."""
-    shipped = os.path.join(JS_DIR, 'core', 'debug_panel.js')
+    shipped = DEBUG_PANEL
     with open(shipped, encoding='utf-8') as f:
         src = f.read()
     anchor = 'if (meta && typeof meta === "object") {'

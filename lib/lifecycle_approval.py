@@ -91,6 +91,11 @@ gate accepts names its provenance:
     the audit record commit together. There is no token, environment
     variable or pending request on this path, and no grant means a typed
     :class:`DelegationRefused` (audited, nothing pending).
+  * ``restartNotices``: every restart this gate accepts (a delegated
+    ``restart_server`` or a Settings approval) opens one restart-complete
+    notice in the same transaction, before the old server stops;
+    :func:`observed_restart` derives its outcome and
+    ``lib.server.restart_notice`` delivers it once (docs/ROUTER.md R9).
   * ``serverctl.py`` keeps the operator paths (an interactive terminal's
     typed confirmation, and the ``TOFU_LIFECYCLE_GATE_PASSED`` /
     ``TOFU_RESTART_GATE_PASSED`` handoff of a caller that already passed
@@ -728,12 +733,16 @@ def _mirror_restart_rollback() -> None:
         logger.warning('[Lifecycle] cooldown mirror rollback failed: %s', error)
 
 
-def consume_restart(approval_id: str, *, now: float | None = None) -> tuple:
+def consume_restart(approval_id: str, *, now: float | None = None,
+                    notice: dict | None = None) -> tuple:
     """Atomically accept one restart token and start the global cooldown.
 
     Returns ``(ok, why, cooldown_remaining)``. Exactly one transaction owns
     both decisions, so two concurrently approved tokens cannot both pass a
-    stale zero-cooldown read and schedule two process re-execs.
+    stale zero-cooldown read and schedule two process re-execs. ``notice``
+    (``owner``, ``interrupted``, ``oldCode``, ``preparation``) opens the
+    restart's notice for the owner's Global Router in the same transaction:
+    a Settings restart has no requesting conversation.
     """
     now = _now() if now is None else now
     legacy_last = _read_legacy_restart_stamp()
@@ -760,6 +769,12 @@ def consume_restart(approval_id: str, *, now: float | None = None) -> tuple:
                 rec['status'] = 'consumed'
                 rec['consumed_at'] = now
                 _apply_restart_stamp(document, now)
+                if notice is not None:
+                    _open_restart_notice(
+                        document, restart_id=approval_id, owner=notice['owner'], source='settings',
+                        recipient=None, now=now, accepted_at=now,
+                        interrupted=notice.get('interrupted') or (), old_code=notice.get('oldCode'),
+                        preparation=notice.get('preparation'))
                 outcome.update(ok=True, why='', remaining=0)
                 return document
             outcome.update(
@@ -1001,21 +1016,92 @@ def delegated_action_id(owner, requester: dict, scope: str, key: str) -> str:
         ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
 
 
-def _observed(record: dict) -> dict:
-    """A restart handed to the server manager reads as completed once a newer server answers.
+def _manager_project() -> str:
+    return os.environ.get('TOFU_PROJECT_PATH') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    The manager reports no outcome back. Every accepted restart replaces the
-    serving worker, so a process that booted after the handover proves the
-    restart; until then the record stays ``restarting`` (handed over). A
-    refusal inside the manager (logs/server-manager.log) leaves it there.
+
+def manager_restart_outcome(accepted: float) -> dict:
+    """The server manager's record of the restart handed over at ``accepted``, or ``{}``.
+
+    The manager keeps only its latest restart (``lastRestart``); it belongs to
+    this handover when it settled, or for one still in progress started, at or
+    after ``accepted``.
+    """
+    from server_manager import read_restart_outcome
+    outcome = read_restart_outcome(_manager_project())
+    stamp = outcome.get('settledAt') if _valid_timestamp(outcome.get('settledAt')) else outcome.get('startedAt')
+    return outcome if _valid_timestamp(stamp) and stamp >= accepted else {}
+
+
+def _manager_worker_served_since(moment: float) -> bool:
+    """Whether the manager saw its current worker ready at or after ``moment``."""
+    from server_manager import MANAGER_STATE_FILE
+    try:
+        state = read_json(os.path.join(_manager_project(), 'data', MANAGER_STATE_FILE), default=None,
+                          strict=True)
+    except JsonStoreReadError:
+        return False
+    ready = state.get('workerReadyLoggedAt') if isinstance(state, dict) else None
+    return _valid_timestamp(ready) and ready >= moment
+
+
+def observed_restart(accepted: float) -> dict | None:
+    """The terminal outcome of the restart handed over at ``accepted``, or ``None`` while it runs.
+
+    A refusal or an exhausted retry budget the manager recorded for this
+    handover settles it as failed (a refusal is decided before the old server
+    stops, which keeps serving); a replacement still retrying or deferred is in
+    progress. Otherwise a process that booted after the handover proves the
+    restart, since every restart replaces the serving worker, and so does the
+    manager's replacement worker serving for a host the restart kept (an API-only
+    restart keeps an unchanged execution host). Every resident host replaced
+    after an unclean close is named. Returns ``{'status', 'code', 'detail'}``.
     """
     from lib import boot_identity
+    if not _valid_timestamp(accepted):
+        return None
+    outcome = manager_restart_outcome(accepted)
+    kind = outcome.get('outcome')
+    if kind == 'refused':
+        return {'status': 'failed', 'code': 'restart_refused_by_manager',
+                'detail': ('The server manager refused the restart before stopping the server, '
+                           f'which keeps serving: {outcome.get("message")}'
+                           + (f' (stage: {outcome["stage"]})' if outcome.get('stage') else ''))}
+    if kind == 'paused':
+        return {'status': 'failed', 'code': 'restart_recovery_paused',
+                'detail': ('The old server stopped, but its replacement failed to start repeatedly and the '
+                           f'server manager paused recovery; an explicit restart is needed: '
+                           f'{outcome.get("message")}')}
+    if kind in ('started', 'retrying', 'deferred'):
+        return None
+    unclean = ''.join(f' It replaced the {close.get("service")} host after an unclean close '
+                      f'({close.get("detail")}); the successor recovered it as after a crash.'
+                      for close in outcome.get('uncleanCloses') or ())
+    if boot_identity.BOOT_TS > accepted:
+        return {'status': 'completed', 'code': None,
+                'detail': f'The server restarted: generation {boot_identity.BOOT_ID} booted after the handover.'
+                          + unclean}
+    if kind == 'spawned' and _manager_worker_served_since(outcome['settledAt']):
+        return {'status': 'completed', 'code': None,
+                'detail': ('The server restarted: the manager\u2019s replacement worker '
+                           f'(pid {outcome.get("workerPid")}) serves; this host was kept running.'
+                           + unclean)}
+    return None
+
+
+def _observed(record: dict) -> dict:
+    """A restart handed to the server manager reads as its observed outcome (:func:`observed_restart`).
+
+    Until it is known the record stays ``restarting`` (handed over).
+    """
     accepted = record.get('acceptedAt')
-    if (record.get('status') != 'restarting' or not _valid_timestamp(accepted)
-            or boot_identity.BOOT_TS <= accepted):
+    if record.get('status') != 'restarting' or not _valid_timestamp(accepted):
         return record
-    return {**record, 'status': 'completed',
-            'detail': f'The server restarted: generation {boot_identity.BOOT_ID} booted after the handover.'}
+    outcome = observed_restart(accepted)
+    if outcome is None:
+        return record
+    return {**record, 'status': outcome['status'], 'code': outcome['code'] or record.get('code'),
+            'detail': outcome['detail']}
 
 
 def delegated_action(owner, action_id: str) -> dict | None:
@@ -1071,6 +1157,9 @@ def begin_delegated_action(owner, requester: dict, *, scope: str, key: str, reas
                                 target=target, grant=grant, now=now, status='accepted')
         actions.append(record)
         document['delegatedActions'] = _prune_actions(actions)
+        if scope == 'restart':
+            _open_restart_notice(document, restart_id=action_id, owner=int(owner_key),
+                                 source='owner_delegation', recipient=requester['conversationId'], now=now)
         outcome.update(record=dict(record), replayed=False)
         return document
 
@@ -1137,30 +1226,43 @@ def _update_action(owner, action_id: str, change) -> dict | None:
 
 
 def settle_delegated_action(owner, action_id: str, *, status: str, code: str | None = None,
-                            detail: str | None = None) -> dict | None:
-    """Record the outcome of an accepted delegated action."""
+                            detail: str | None = None, from_status: str | None = None) -> dict | None:
+    """Record the outcome of an accepted delegated action.
+
+    With ``from_status`` only a record still in that status changes (a restart
+    observed complete settles its ``restarting`` record once).
+    """
     if status not in _ACTION_STATUSES:
         raise ValueError(f'unknown delegated action status: {status!r}')
     now = _now()
+    changed: dict = {}
 
     def change(_document, record):
+        if from_status is not None and record.get('status') != from_status:
+            return False
         record.update(status=status, code=code, detail=(detail or None) and detail[:2000], updatedAt=now)
+        changed['yes'] = True
 
     record = _update_action(owner, action_id, change)
+    if not changed:
+        return record
     audit_log('owner_delegation_action_settled', action_id=action_id, status=status, code=code or '',
               detail=(detail or '')[:300])
     return record
 
 
 def accept_delegated_restart(owner, action_id: str, requester: dict, *,
-                             interrupted: list | tuple = ()) -> dict:
+                             interrupted: list | tuple = (), old_code: dict | None = None,
+                             preparation: dict | None = None) -> dict:
     """The delegation branch of restart acceptance: the grant, cooldown and stamp commit together.
 
     Called after preparation succeeded and immediately before the old server
     is handed to its lifecycle owner. A grant revoked meanwhile, or another
     accepted restart inside the cooldown, refuses here. ``interrupted`` names
-    the conversations the owner accepted interrupting. Returns the action
-    record; ``status == 'restarting'`` is the only acceptance.
+    the conversations the owner accepted interrupting; with ``old_code`` (the
+    accepting process's code fingerprint) and ``preparation`` it completes the
+    restart's notice in the same transaction. Returns the action record;
+    ``status == 'restarting'`` is the only acceptance.
     """
     owner_key = _owner_key(owner)
     requester = _router_identity(requester, _REQUESTER_FIELDS, 'requester')
@@ -1185,6 +1287,8 @@ def accept_delegated_restart(owner, action_id: str, requester: dict, *,
         _apply_restart_stamp(document, now)
         record.update(status='restarting', acceptedAt=now, updatedAt=now,
                       interrupted=[str(item) for item in interrupted])
+        _note_restart_notice(document, action_id, acceptedAt=now, interrupted=record['interrupted'],
+                             oldCode=old_code, preparation=preparation, updatedAt=now)
         accepted['ok'] = True
         return True
 
@@ -1200,6 +1304,145 @@ def accept_delegated_restart(owner, action_id: str, requester: dict, *,
     else:
         audit_log('owner_delegation_restart_refused', action_id=action_id, owner=int(owner_key),
                   code=record.get('code') or '', status=record.get('status'))
+    return record
+
+
+# ── restart-complete notices (docs/ROUTER.md R9) ──────────────────────
+#
+# One notice per accepted restart, opened in the gate transaction that records
+# the restart (begin_delegated_action, consume_restart), so it exists before
+# the old server stops. lib.server.restart_notice observes its outcome and
+# delivers it once; this store only owns the record and its transitions:
+# pending -> delivering (outcome and words fixed) -> delivered | failed, or
+# pending -> undeliverable when nobody can receive it.
+
+_OPEN_NOTICE_STATES = ('pending', 'delivering')
+_FINISHED_NOTICE_STATES = ('delivered', 'failed', 'undeliverable')
+_NOTICE_FACTS = frozenset({'acceptedAt', 'interrupted', 'oldCode', 'preparation', 'failure', 'updatedAt'})
+
+
+def _restart_notices(document: dict) -> list:
+    notices = document.setdefault('restartNotices', [])
+    if not isinstance(notices, list) or any(not isinstance(item, dict) for item in notices):
+        raise JsonStoreReadError('lifecycle restart notice store has invalid shape')
+    return notices
+
+
+def _open_restart_notice(document: dict, *, restart_id: str, owner: int, source: str,
+                         recipient: str | None, now: float, accepted_at: float | None = None,
+                         interrupted=(), old_code: dict | None = None,
+                         preparation: dict | None = None) -> None:
+    """Open the restart's one notice; a replayed restart changes nothing."""
+    notices = _restart_notices(document)
+    if any(item.get('restartId') == restart_id for item in notices):
+        return
+    notices.append({'restartId': restart_id, 'owner': int(owner), 'source': source,
+                    'recipient': recipient, 'requestedAt': now, 'acceptedAt': accepted_at,
+                    'interrupted': [str(item) for item in interrupted], 'oldCode': old_code,
+                    'preparation': preparation, 'failure': None, 'state': 'pending',
+                    'outcome': None, 'text': None, 'conversationId': None, 'commandId': None,
+                    'disposition': None, 'deliveredAt': None, 'updatedAt': now})
+    if len(notices) > _KEEP_RECORDS:
+        # The approval records' retention bound; open notices are kept first.
+        notices.sort(key=lambda item: (item.get('state') in _OPEN_NOTICE_STATES,
+                                       item.get('requestedAt', 0)), reverse=True)
+        del notices[_KEEP_RECORDS:]
+
+
+def _note_restart_notice(document: dict, restart_id: str, **facts) -> dict | None:
+    for item in _restart_notices(document):
+        if item.get('restartId') == restart_id:
+            if item.get('state') == 'pending':
+                item.update({key: value for key, value in facts.items() if key in _NOTICE_FACTS})
+            return item
+    return None
+
+
+def restart_notices(*, states: tuple = _OPEN_NOTICE_STATES) -> list:
+    """Retained restart notices in ``states``, oldest first, for every owner.
+
+    TODO(enterprise): deployment-wide like the restart itself; delivery is
+    owner-scoped by each notice's ``owner``.
+    """
+    try:
+        document = _document(read_json(_APPROVALS_FILE, default=None, strict=True))
+        notices = [dict(item) for item in _restart_notices(document) if item.get('state') in states]
+    except JsonStoreReadError as error:
+        logger.warning('[Lifecycle] restart notice store read failed: %s', error)
+        return []
+    return sorted(notices, key=lambda item: item.get('requestedAt', 0))
+
+
+def note_restart_notice(restart_id: str, **facts) -> dict | None:
+    """Record what the restart learned before its outcome (preparation, an in-process failure)."""
+    outcome: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        record = _note_restart_notice(document, restart_id, **facts, updatedAt=_now())
+        outcome['record'] = dict(record) if record is not None else None
+        return document if record is not None else None
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    return outcome.get('record')
+
+
+def claim_restart_notice(restart_id: str, *, outcome: dict, text: str, conversation_id: str,
+                         command_id: str) -> dict | None:
+    """Fix the notice's outcome and words before its delivery (``pending`` -> ``delivering``).
+
+    A notice already claimed or finished is returned unchanged, so every retry
+    in any process delivers the same words under the same command id.
+    """
+    result: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        for item in _restart_notices(document):
+            if item.get('restartId') != restart_id:
+                continue
+            changed = item.get('state') == 'pending'
+            if changed:
+                item.update(state='delivering', outcome=dict(outcome), text=text,
+                            conversationId=conversation_id, commandId=command_id, updatedAt=_now())
+            result['record'] = dict(item)
+            return document if changed else None
+        return None
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    return result.get('record')
+
+
+def finish_restart_notice(restart_id: str, *, state: str, disposition: str | None = None,
+                          outcome: dict | None = None) -> dict | None:
+    """Record how the notice's delivery ended; a finished notice is returned unchanged."""
+    if state not in _FINISHED_NOTICE_STATES:
+        raise ValueError(f'unknown restart notice state: {state!r}')
+    result: dict = {}
+
+    def _mut(cur):
+        document = _document(cur)
+        for item in _restart_notices(document):
+            if item.get('restartId') != restart_id:
+                continue
+            changed = item.get('state') in _OPEN_NOTICE_STATES
+            if changed:
+                now = _now()
+                item.update(state=state, disposition=disposition, updatedAt=now,
+                            deliveredAt=now if state == 'delivered' else None)
+                if outcome is not None and item.get('outcome') is None:
+                    item['outcome'] = dict(outcome)
+            result.update(record=dict(item), changed=changed)
+            return document if changed else None
+        return None
+
+    update_json_atomic(_APPROVALS_FILE, _mut, default=None, strict=True)
+    record = result.get('record')
+    if result.get('changed'):
+        audit_log('restart_notice_finished', restart_id=restart_id, state=state,
+                  disposition=disposition or '', owner=record.get('owner'),
+                  conversation=record.get('conversationId') or '',
+                  outcome=(record.get('outcome') or {}).get('status') or '')
     return record
 
 
@@ -1292,4 +1535,6 @@ __all__ = [
     'delegation', 'set_delegation', 'check_delegation', 'delegated_action_id', 'delegated_action',
     'delegated_actions', 'begin_delegated_action', 'record_delegated_refusal',
     'settle_delegated_action', 'accept_delegated_restart',
+    'manager_restart_outcome', 'observed_restart',
+    'restart_notices', 'note_restart_notice', 'claim_restart_notice', 'finish_restart_notice',
 ]

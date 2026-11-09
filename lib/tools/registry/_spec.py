@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 if TYPE_CHECKING:
     from lib.tools.environment_capabilities import EnvironmentSnapshot
@@ -152,8 +152,8 @@ class ToolContext:
 
     @property
     def tid(self) -> str:
-        """Short task-id prefix for log lines."""
-        return (self.task_id or '')[:8]
+        """The task id as log text (``lib.log.task_log_tag``)."""
+        return task_log_tag(self.task_id)
 
     def plugin_allowed(self, plugin_name: str) -> bool:
         """Whether a ``source='plugin'`` spec named *plugin_name* is visible.

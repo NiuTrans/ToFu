@@ -43,7 +43,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.agent_core.events import EventType, build_event
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.assistant_messages import append_assistant_prose_message
 from lib.tasks_pkg.failure_attribution import attach_failure_attribution
 from lib.tasks_pkg.manager import (
@@ -214,52 +214,68 @@ def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool =
     non-Exception ``BaseException`` handler lives in
     :func:`handle_task_base_exception` below (slice 34).
     """
-    _tid8 = (task.get('id', '?') or '?')[:8]
+    _tid = (task.get('id', '?') or '?')
     from lib.llm.llm_errors import (
         AbortedError, AdmissionRefused, ModelAdmissionRefused,
     )
-    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled, EventDeliveryRevoked
     from lib.turn_verdict import (
         DISPATCH_AUTHORITY_ABORT_REASONS, TurnStatus, derive_task_verdict,
-        dispatch_authority_stop_detail,
+        dispatch_authority_stop_detail, system_abort_label,
     )
     # An admission refusal halts work through the abort lane, but the turn
     # failed for a stated reason; it must not settle as a silent user Stop.
     _admission_refused = isinstance(e, AdmissionRefused)
     _cancelled_delivery = (isinstance(e, (AbortedError, EventDeliveryCancelled))
                            and not _admission_refused)
+    # A revoked delivery is interrupted only when its stale fence stamped who
+    # settled the attempt: restart recovery (resumable) or a Stop elsewhere.
+    _stamped_revocation = isinstance(e, EventDeliveryRevoked) and bool(task.get('aborted'))
 
     if _cancelled_delivery and task.get('_chat_terminal_stamped'):
         # Late cancelled observers cannot replace an acknowledged candidate;
         # existing terminal debt/retry retains ownership of its publication.
         return True
-    _interrupted = _cancelled_delivery and derive_task_verdict(
+    _interrupted = (_cancelled_delivery or _stamped_revocation) and derive_task_verdict(
         task, {'type': 'aborted', 'finishReason': 'aborted'}
     ).status is TurnStatus.INTERRUPTED
     _terminal_status = 'aborted' if _interrupted else 'error'
     _terminal_finish = 'aborted' if _interrupted else 'error'
     if _interrupted:
-        logger.info('[Orchestrator] event delivery cancelled task=%s', _tid8)
+        logger.info('[Orchestrator] event delivery cancelled task=%s', _tid)
     else:
-        logger.error('[Orchestrator] run_task FATAL error task=%s', _tid8, exc_info=True)
+        logger.error('[Orchestrator] run_task FATAL error task=%s', _tid, exc_info=True)
 
     # Prefer the user-friendly message attached by _llm_call_with_fallback;
     # otherwise format the raw exception here so the frontend error-block
     # always tells the user how to recover.
-    from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
+    from lib.tasks_pkg.event_delivery import EventDeliveryError
     _delivery_failure = isinstance(e, (EventDeliveryError, EventDeliveryRevoked))
     _user_err = None if _delivery_failure else (
         task.get('error') if task.get('_invocationStopReason') in {'stalled', 'deadline'}
         else getattr(e, '_user_message', None))
-    if _delivery_failure:
-        from lib.error_envelope import from_exception
-        _user_err = from_exception(
-            e, context='task-fatal', source='task-event-delivery')
     # A dispatch authority stop is stamped where the authority failed; it
     # names the turn's cause whichever exception carried the halt here.
     _authority_stop = str(task.get('_abort_reason') or '')
     if _authority_stop not in DISPATCH_AUTHORITY_ABORT_REASONS:
         _authority_stop = ''
+    if _delivery_failure and not _authority_stop:
+        # The exception class alone reads as a person's Stop ('aborted'). A
+        # stamped system cause or a revoked publication authority is not one.
+        _system_stop = system_abort_label(task.get('_abort_reason'))
+        if _system_stop or isinstance(e, EventDeliveryRevoked):
+            from lib.error_envelope import make_envelope as _make_env
+            _user_err = _make_env(
+                'storage_fence',
+                detail=(f'The {_system_stop or "server"} stopped this attempt\'s event '
+                        f'publication; this was not a user Stop. {e}'),
+                model=task.get('config', {}).get('model', ''),
+                context='task-fatal', source='task-event-delivery',
+                raw=f'abort_reason={task.get("_abort_reason") or ""} {e}')
+        else:
+            from lib.error_envelope import from_exception
+            _user_err = from_exception(
+                e, context='task-fatal', source='task-event-delivery')
     if not _user_err and not _authority_stop and isinstance(e, ModelAdmissionRefused):
         from lib.error_envelope import make_envelope as _make_env
         _user_err = _make_env(
@@ -369,7 +385,7 @@ def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool =
         # The terminal lane may be the very lane that failed. Its later
         # publication error is secondary, never the task's original cause.
         logger.error('[Orchestrator] fatal terminal delivery failed task=%s: %s',
-                     _tid8, type(terminal_error).__name__, exc_info=True)
+                     _tid, type(terminal_error).__name__, exc_info=True)
     try:
         if is_child_invocation(task):
             from lib.agent_core.terminal_delivery import deliver_terminal
@@ -387,7 +403,7 @@ def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool =
             persist_task_result(task)
     except Exception as persistence_error:
         logger.error('[Orchestrator] fatal result persistence failed task=%s: %s',
-                     _tid8, type(persistence_error).__name__, exc_info=True)
+                     _tid, type(persistence_error).__name__, exc_info=True)
     return False
 
 
@@ -401,7 +417,7 @@ def _settle_fatal_tool_rounds(task: dict[str, Any]) -> None:
         _finalize_dangling_tool_rounds(task)
     except Exception as error:
         logger.warning('[%s] fatal tool-round sweep failed: %s',
-                       str(task.get('id', '?'))[:8], type(error).__name__,
+                       task_log_tag(task.get('id', '?')), type(error).__name__,
                        exc_info=True)
 
 
@@ -432,7 +448,7 @@ def handle_task_base_exception(task: dict[str, Any], be: BaseException) -> None:
     except Exception as exc:
         logger.warning('[Usage] cancelled compaction settlement failed: %s', exc)
     logger.error('[Orchestrator] run_task FATAL BaseException task=%s: %s',
-                 task.get('id', '?')[:8], type(be).__name__, exc_info=True)
+                 task_log_tag(task.get('id', '?')), type(be).__name__, exc_info=True)
     try:
         from lib.error_envelope import make_envelope as _make_env
         task['error'] = attach_failure_attribution(
@@ -452,7 +468,7 @@ def handle_task_base_exception(task: dict[str, Any], be: BaseException) -> None:
                 persist_task_result(task)
     except Exception as _fin_err:
         logger.error('[Orchestrator] BaseException terminal-finalize failed '
-                     'task=%s: %s', task.get('id', '?')[:8], _fin_err,
+                     'task=%s: %s', task_log_tag(task.get('id', '?')), _fin_err,
                      exc_info=True)
     raise be
 

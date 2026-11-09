@@ -198,6 +198,8 @@ the slim shape, like a frame overflow. A refused batch chunk of one entry takes
 the per-event path; barrier frames still fail to their producer. The Turn
 projection keeps its last accepted revision, while attempt replay keeps every
 row. The SQL authority has no such reserve and never sends this verdict.
+[Paged Turn storage](STORAGE.md#paged-turn-storage) removes this ceiling in
+its final stage; until that stage lands, this section is current.
 Alternatives rejected: retrying the frame re-wedges the lane; dropping it loses
 evidence; acknowledging it without a durable row breaks commit before push; a
 slim retry of non-terminal frames is still refused once the stored Turn is
@@ -740,8 +742,14 @@ outcome. A transient failure or lost acknowledgement retries exactly that run
 with the same entry objects, so `record_task_events` reconciles the exact rows
 and never applies a committed entry twice; arrivals meanwhile form the next
 run. A permanent failure retains the run and the push-withheld marker, and
-repair retries it before anything behind it. `revoke()` refuses while a run is
-entered; revocation releases every member. For barrier cost a run is one
+repair retries it before anything behind it. `revoke()` never releases an
+entered run: requested during one, it refuses later submissions at once and
+the run's pump completes the revocation when the run returns. Revocation
+releases every member. Problem (2026-11-07): the earlier bare refusal left
+callers nothing to act on, so a worker takeover that revoked a superseded
+claim's lane mid-run kept that unpersistable lane alive. Alternative
+rejected: waiting for the run inside the revoking owner blocks it on a
+storage call it does not own. For barrier cost a run is one
 batch: the head's timing record carries its persist calls, storage time and
 FIFO-head wait while the members' records stay empty, so `BarrierCost` counts
 the run's storage calls once.

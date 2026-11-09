@@ -10,7 +10,9 @@ Sub-modules:
   _to_responses    — ``openai_body_to_responses(body, profile, stream)``
                      (+ ``RESPONSES_PROFILES``: ``default`` for generic
                      providers like DeepSeek, ``codex`` for the ChatGPT
-                     subscription backend)
+                     subscription backend) and
+                     ``responses_reasoning_replay(body, profile)``, the one
+                     decision both directions bind for encrypted reasoning
   _sse             — ``ResponsesSSETranslator`` (plugs into SSEAccumulator)
   _from_responses  — ``responses_response_to_openai(data)`` (non-stream)
 
@@ -27,6 +29,7 @@ from lib.llm.responses_outbound._to_responses import (
     RESPONSES_PROFILES,
     openai_body_to_responses,
     openai_body_to_responses_checked,
+    responses_reasoning_replay,
 )
 from lib.llm.responses_outbound._url import responses_url
 
@@ -35,6 +38,7 @@ __all__ = [
     'ResponsesSSETranslator',
     'openai_body_to_responses',
     'openai_body_to_responses_checked',
+    'responses_reasoning_replay',
     'responses_response_to_openai',
     'responses_url',
 ]

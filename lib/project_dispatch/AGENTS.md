@@ -21,7 +21,9 @@ coordination repository. Prerequisite evidence, the delegation source and the
 publication result read Turn metadata only; the human source keeps its body read.
 `_check_record` skips a stored row's schema walk only for the exact canonical
 digest last validated under that definition and row identity; it caches no row or
-authority, and caller-supplied input is always walked.
+authority, and caller-supplied input is always walked. `scope.validate_profile`
+likewise skips its walk only for a profile content digest it already proved valid
+(a pure function of the value), returns a fresh copy, and never remembers a failure.
 `clock` and budget deadlines are Unix seconds; grant `createdAt` uses that clock.
 
 Authorization replay preserves evidence, never renews a revoked/expired grant.
@@ -29,10 +31,13 @@ Authorization replay preserves evidence, never renews a revoked/expired grant.
 recipient metadata, current coordinator binding and genuine human source
 projection revision. Caller API identity cannot promote synthetic input.
 Initial execution binding is immutable; a restart-paused or background-completion
-continuation advances only from its exact settled, unreviewed predecessor through
-`continue_execution`, preserving one deterministic workspace task identity (the
-work id). A durable-worker claim names each attempt's physical task;
-`bind_account` stamps the work id on it, which keys the checkout and the ledger root.
+continuation, or a Coordinator follow-up Turn (`TrustedDispatch(follows=...)` pins
+the association it read), advances only from its exact settled, unreviewed
+predecessor through `continue_execution`, preserving one deterministic workspace
+task identity (the work id). A follow-up's accepted config names that predecessor
+(`FOLLOW_UP_KEY`), the witness `bind_account` checks before continuing the account.
+A durable-worker claim names each attempt's physical task; `bind_account` stamps
+the work id on it, which keys the checkout and the ledger root.
 `revoke(id, expected_revision)` returns
 that association (or `None`) for caller-owned existing cancellation.
 `record_review` fences the grant revision and records an immutable decision
@@ -97,13 +102,23 @@ fold/replay idempotency, restart and startup rollback.
 pins the first-party handler before plugin/MCP routing. `admission.py` resolves
 exact bound physical task and registered workspace, never cwd or sibling tasks.
 One admission validates once: `validated_dispatch` hands the validated row to that
-same decision only, never to a later admission or request.
+same decision only, never to a later admission or request. A tool batch is one
+admission: its `DispatchAdmission` reaches its calls' executors and, through
+`admitted_call`, their nested gates, which recheck only the in-memory task. Each
+call's tool intent stays a live effect fence (intent CAS revocation check plus
+one validation); `bind_account` pins the immutable role `coordinator_scope`
+returns, so request building reads no dispatch storage. Verify
+`test_project_dispatch_admission_once.py`.
 Its `requires_isolated_workspace` resolves the validated file profile before
 ordinary direct-mode selection; it grants no task or file execution authority.
 `require_isolated_worker_root` refuses delegation for roots no Worker can be
 isolated from; tool admission refusals raise `ToolAdmissionRefused` (failed,
 never a user Stop), while argument-shape refusals are `ToolContractError` and
-reject only that call. The root contract lives in PROJECT_COORDINATION.md.
+reject only that call. `WorkerWorkspaceUnavailable` carries the refusal's typed
+`code`, its `details` (the owner's question and candidates for
+`ambiguous_project_root`) and a recovery matched to that code; the Coordinator
+tool renders both, so a refusal prepared on another host reaches it unchanged.
+The root contract lives in PROJECT_COORDINATION.md.
 Authority failures stop the task through `stop_on_authority_failure`, naming
 `dispatch_grant_revoked` or `dispatch_authority_lost`; an earlier Stop keeps its
 cause. Verify `test_project_dispatch_abort_cause.py` and its settlement specs.

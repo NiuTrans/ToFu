@@ -117,13 +117,15 @@ def resolve_prior_receipt(
 def compose_summary_input(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str, ports: SummaryInputPorts,
-    prior_receipt: str | None = None,
+    prior_receipt: str | None = None, continuity_fold: frozenset = frozenset(),
 ) -> SummaryInput:
     """Compose the summary request without clipping user messages or receipts.
 
     Pure apart from the archive receipt read: no logging and no task writes, so
     a preflight quote can price the request that dispatch later builds. An
     explicit ``prior_receipt`` (a rolling pass's predecessor) replaces lookup.
+    ``continuity_fold`` names the observations the planned packet no longer
+    carries; they follow it as evidence the narrative must carry instead.
     """
     _char_budget = ports.input_char_budget(task)
     receipt_messages = (source_messages if source_messages is not None
@@ -133,13 +135,20 @@ def compose_summary_input(
         prior_receipt, prior_receipt_archived = resolve_prior_receipt(
             messages, task=task, source_messages=source_messages, ports=ports)
     latest_assistant = ports.latest_assistant(receipt_messages)
-    from lib.tasks_pkg.compaction._continuity import build_continuity, render_continuity
-    state = build_continuity(messages, task)
+    from lib.tasks_pkg.compaction._continuity import (
+        build_continuity, fold_continuity, observation_key, render_continuity,
+        render_folded_observations)
+    full_state = build_continuity(messages, task)
+    state = fold_continuity(full_state, continuity_fold)
     ledger = {'version': 1, 'entries': state['observations'],
               'evidenceIds': [row['id'] for row in state['observations']],
               'truncated': False}
     ledger_error = None
     formatted_ledger = render_continuity(state)
+    folded_rows = [row for row in full_state['observations']
+                   if observation_key(row) in continuity_fold]
+    if folded_rows:
+        formatted_ledger += '\n\n' + render_folded_observations(folded_rows)
 
     # MESSAGE-AWARE elision: pass the budget INTO the formatter so it trims by
     # dropping middle ASSISTANT/context content while keeping EVERY real user
@@ -189,6 +198,7 @@ def next_summary_pass(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str, ports: SummaryInputPorts,
     prior_receipt: str, capacity_tokens: int, estimate: Callable,
+    continuity_fold: frozenset = frozenset(),
 ) -> tuple[list, list] | None:
     """Split off the longest leading slice whose one request fits capacity.
 
@@ -201,7 +211,8 @@ def next_summary_pass(
     def fits(candidate: list) -> bool:
         composed = compose_summary_input(
             candidate, current_query, task=task, source_messages=source_messages,
-            anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt)
+            anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt,
+            continuity_fold=continuity_fold)
         return estimate(composed.prompt) <= capacity_tokens
 
     if fits(messages):
@@ -256,11 +267,13 @@ def build_summary_input(
     messages: list, current_query: str, *, task: dict | None,
     source_messages: list | None, anchor_text: str, log_prefix: str,
     ports: SummaryInputPorts, prior_receipt: str | None = None,
+    continuity_fold: frozenset = frozenset(),
 ) -> list:
     """Compose the dispatched request, then report it without mutating task state."""
     composed = compose_summary_input(
         messages, current_query, task=task, source_messages=source_messages,
-        anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt)
+        anchor_text=anchor_text, ports=ports, prior_receipt=prior_receipt,
+        continuity_fold=continuity_fold)
     if composed.prior_receipt_archived:
         logger.info('%s Prior receipt recovered from compaction archive',
                     log_prefix)

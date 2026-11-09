@@ -461,43 +461,78 @@ validated source and artifact identity do not prove live activation or a
 
 ## Full-catalog history promotion and write-delivery anchors
 
-History routing retirement is incremental. Problem: bounding promotion to a
-few source segments still merged every routing run and rewrote all retained
-locations while the same physical publication lane prevented WAL rotation.
-Large retained histories could therefore exhaust the active WAL window and
-return `database_busy` despite responsive health probes.
+History routing retirement is lazy (2026-11-08). Problem: bounding promotion
+to a few source segments still merged every routing run, and the incremental
+replacement that followed (`RoutingRoot::remove_locations`, which rewrote only
+the pages holding retired locations) still rewrote nearly every page: block
+IDs are hash ordered, so every routing page interleaves every source. Live on
+2026-11-08 one automatic slice retired 8 of 167,184 retained sources (about
+7,300 locations) from 2,781 pages and rewrote an expected 2,580 of them, about
+10.8 GB, to drop under 1 MB of entries. Routing pages were 78% of the bytes the
+authority wrote as loose blocks (about 63 GB/h), slices took minutes, and
+retained history grew from 32K to 167K segments in six days against a policy
+of 64.
 
-Decision: after validating and durably promoting each retired SegmentIndex,
-collect its exact `(payload ID, source ID)` locations. `RoutingRoot::remove_locations`
-uses their key ranges to read only candidate pages, removes only matching
-locations, and reuses unaffected immutable pages at their existing levels.
-Candidate pages retain ordinary hash, range and offset validation. A payload
-also present in another source keeps that location; captured old roots remain
-readable. CONTROL/WAL ordering, promotion durability and GC ownership are
-unchanged. Explicit whole-history `Engine::compact_history` retains its
-streaming bulk rewrite, so it never collects all retired locations in memory.
-The automatic path's temporary location set scales with its existing source
-slice. Metadata traversal still scales with routing page references; I/O and
-new page writes depend on candidate/changed pages. Retired hashes spread
-throughout the index can still touch many pages; this is not a constant-time
-claim. No durable table, worker, retry budget or admission limit is added.
+Decision: an automatic slice publishes the unchanged routing root with the
+shorter manifest. Routing lookups go through `history_payload::Catalog`, which
+answers only locations whose source the manifest still names; the ordinary,
+sync-staging and recovery lookups all use it, so a retired source is never an
+answer. Retired locations leave routing when a rotation's append merges their
+run anyway: `RoutingRoot::append` takes the manifest's retained sources and
+every merge drops the locations of the others, so routing stays bounded by
+retained history at no extra I/O. An append refuses a new location whose
+source its manifest does not retain. Explicit whole-history
+`Engine::compact_history` keeps its streaming rewrite.
 
-Alternatives rejected: enlarging WAL/retry windows postpones the same rewrite;
-dropping stale source checks can lose readable payloads; merging all runs just
-to remove a few locations recreates the publication stall. Verify
-`history_payload::tests::pruning_*`, indexed compaction and publication crash
-fault matrices, and the existing generation/rotation tests.
+Downgrade boundary: engines before 2026-11-08 read a routing location outside
+the manifest as an integrity error ("history payload source is outside the
+published manifest"). A root that may hold such locations is therefore encoded
+as routing-root version 2, which those engines refuse at open instead of
+failing reads later; the first lazy slice re-encodes a version-1 root (the root
+block only, no page). Only a full rewrite with the retained locations alone
+writes version 1 again: explicit `compact_history`, or the downgrade converter
+`tofu-db rewrite-history-routing --execute` (`Engine::rewrite_history_routing`),
+which publishes such a rewrite through the same history publication path with
+no source retired. It runs offline on a stopped authority with the new binary;
+the operator procedure is [engine rollback](STORAGE_OPERATIONS.md#engine-rollback-across-routing-root-version-2).
 
-Measurement: the deterministic zero-cache regression retires one location
-from fixtures with 4, 64 and 512 retained routing pages. Each performs one
-source read and one immutable page write; unaffected pages and old-root reads
-survive, and the resulting root round-trips and accepts a subsequent append.
-The pre-change implementation fails the unaffected-page regression. This
-isolates routing retirement I/O; it does not certify live latency or eliminate
-time spent promoting payloads, publishing CONTROL or waiting on the filesystem.
-The publication fault fixture retires carried payloads from a mixed routing
-page and covers 118 error, short-write and lost-sync cases across 87 operations,
-requiring retired, retained and concurrently acknowledged bytes after recovery.
+The full rewrite (`RoutingRoot::retain_sources`) is one k-way pass over every
+run in which the lowest level holding a retained location of an ID answers,
+as `Catalog` lookups do. Problem: it merged the runs pairwise from the oldest
+level down and then copied the result again, writing one complete run per
+extra level; the live root of 2026-11-08 (6 runs, 153.1M entries, about
+11.6 GB) would have written five intermediate full-size runs for one
+conversion. Decision: stream all runs at once through one page writer; the
+output run is identical (same pages) and the only one written. Alternatives
+rejected: keeping the pairwise merge for operator compaction (two
+implementations of one rewrite); converting by re-tagging the root version
+without rewriting pages (older engines would then fail reads on retired
+locations instead of refusing the open). Verify
+`history_payload::tests::retain_sources_writes_one_run_with_the_answers_of_a_pairwise_merge`
+(fails before: two runs written for a three-run root) and
+`engine::tests::history_retirement::{routing_rewrite_publishes_a_root_engines_before_lazy_retirement_open,
+every_routing_rewrite_fault_recovers_the_lazy_or_the_rewritten_root}`.
+
+Alternatives rejected: the incremental `remove_locations` (above, measured);
+routing pages clustered by source, which give up the one candidate page per
+level that point lookups rely on; merging all runs to remove a few locations,
+which recreates the publication stall; enlarging WAL/retry windows, which
+postpones the same rewrite. Verify `engine::tests::history_retirement`
+(fails before: the slice changed the routing root),
+`history_payload::tests::{merges_drop_retired_sources_and_keep_retained_duplicates,
+catalog_lookups_skip_locations_of_retired_sources,
+appends_refuse_locations_their_manifest_does_not_retain,
+routing_merges_overlapping_runs_and_drop_retired_sources}`, indexed compaction
+and publication crash fault matrices, and the generation/rotation tests.
+
+Measurement: a slice now writes no routing page, so its cost no longer grows
+with retained history; the routing it leaves behind shrinks when the next
+carry reaches its run. This does not remove the time spent promoting payloads
+(on a full payload catalog a slice rewrites the smallest fitting segment),
+publishing CONTROL or waiting on the filesystem. The publication fault fixture
+retires carried payloads from a mixed routing page and covers error,
+short-write and lost-sync cases, requiring retired, retained and concurrently
+acknowledged bytes after recovery.
 
 Problem: history pruning at the payload catalog ceiling fell back to a durable
 loose file per carried block even when existing segments had packing room.
@@ -644,7 +679,7 @@ Decision: reject runtime selection. Client-profiled ABBA stream P99 4,218/6,297/
 
 Problem: per-record physical WAL writes still occur while holding the foreground writer, even though Strict callers already wait outside it for the existing shared barrier. Small requests amplify the number of FUSE write operations. Moving the write must preserve the actual byte-prefix witness rather than acknowledge queued memory.
 
-Decision: the existing barrier worker owns framed copies, combines only contiguous offsets, physically writes them and syncs before advancing its captured prefix. Later enqueues do not enlarge that captured ACK. The actual authority VFS must opt in to independent handles; encryption and custom stateful wrappers keep original physical appends. Normal durability is unchanged. CONTROL publication, rotation, recovery reads, truncation and close drain the original generation first; failed write/sync stays latched and prevents an inline retry. Close refuses new enqueues, drains and joins before reclaiming frame copies. Poisoned/unknown buffer state keeps the failed barrier and refuses detach, source recovery reads, truncation and inline physical retry; it is never treated as a disabled buffer. Driver close still joins before returning an unknown-drain error.
+Decision: the existing barrier worker owns framed copies, combines only contiguous offsets, physically writes them and syncs before advancing its captured prefix. Later enqueues do not enlarge that captured ACK. The actual authority VFS must opt in to independent handles; encryption and custom stateful wrappers keep original physical appends. Normal durability later adopted the same buffer ([Normal-tier WAL writes off the authority](#normal-tier-wal-writes-off-the-authority)). CONTROL publication, rotation, recovery reads, truncation and close drain the original generation first; failed write/sync stays latched and prevents an inline retry. Close refuses new enqueues, drains and joins before reclaiming frame copies. Poisoned/unknown buffer state keeps the failed barrier and refuses detach, source recovery reads, truncation and inline physical retry; it is never treated as a disabled buffer. Driver close still joins before returning an unknown-drain error.
 
 The canonical `walWriteBuffer` contract in `contracts/storage_v2.json` derives reuse bytes from the existing startup memory-headroom probe. Unknown probe falls back lean; zero available budget disables copying; budget or allocation exhaustion uses the original write path and never rejects an otherwise legal request. Retained/peak bytes include queued and inflight frames through deallocation, excluding allocator/queue metadata. Metrics separate logical accepted WAL traffic from successful physical worker writes and write-time attempts; neither gives durability credit. Request-local VFS write totals exclude the worker and must be read with its separate counters. No additional worker, authority, persistent format or durability mode is introduced.
 
@@ -1105,24 +1140,99 @@ handoff and cleared the wedge signal; that is fixed
 **Decision.** No hold-path change for `turn.event.record` here: its prepared
 hold is already constant in Turn size.
 
-**Proposed, not implemented: Normal-tier WAL writes off the authority.** Queue
-the frame in the existing write buffer under Normal durability as Strict does,
-and respond once the barrier worker's physical write covers it (a written-prefix
-witness waited outside the authority). By the figures above the DolphinFS
-`turn.event.record` hold would fall from about 0.65 ms toward the 0.15 ms Strict
-figure, and a DolphinFS write stall would delay the waiting responses instead
-of every writer, until the buffer fills (overflow writes synchronously). It
-crosses recorded contracts: `walWriteBuffer.durability` acknowledges only after
-physical write and sync,
-[the worker-write decision](#physical-wal-writes-on-the-existing-barrier-worker)
-keeps Normal durability unchanged, and a later commit could publish before an
-earlier frame reaches the kernel. It
-needs an explicit durability decision and the WAL crash and torn-write matrix
-first.
+The `journal` phase later left the authority:
+[Normal-tier WAL writes off the authority](#normal-tier-wal-writes-off-the-authority).
 
 **Alternatives rejected.** Strict durability on network volumes moves the write
 out but adds an fsync wait to every commit (17-58 ms per record on this host).
 Batching several frames per in-hold write adds a window knob. Re-preparing a
 refused commit instead of executing on the writer adds a retry count.
+
+## Normal-tier WAL writes off the authority
+
+**Problem.** Production runs the native authority on DolphinFS at Normal
+durability, and every commit wrote its WAL frame while holding the single
+authority mutex: `ActiveLog::append` handed frames to the write buffer only
+under Strict, and the Normal daemon started an unbuffered flusher and gave the
+listener no barrier. One stalled volume write therefore stalled every client.
+In the 11 h after the 2026-11-08 06:36 restart, 233 holds of at least 1 s cost
+1,012 s of authority time, 37% of it in the in-hold `journal` phase (`vfs_write`
+326 s, up to 24.7 s in one hold). Lease renewals and claims queued behind those
+holds, the authority watch reported a wedge after 10 s, the supervisor's
+liveness probe failed, and on 2026-11-07 twelve durable workers lost their
+leases and were fenced.
+
+**Decision.** Both tiers queue frames in the existing write buffer, so no
+authority holder performs a physical WAL write. The barrier tracks a written
+frontier beside the synced one. A command's response waits outside the
+authority through `WalBarrier::wait_acknowledged`: the synced frontier under
+Strict, the written frontier under Normal, which is where Normal already
+acknowledged. Durable dependents (CONTROL publication, checkpoints, the search
+projection, native checkpoints) keep `wait_witness` and the synced frontier.
+Under Normal a `tofu-db-wal-writer` thread performs the writes and the
+`tofu-db-wal-barrier` thread fdatasyncs only the written prefix through its own
+descriptor, so a slow fsync never delays an acknowledgement. The daemon owns one
+buffered driver for both tiers (`daemon.rs`); `walWriteBuffer.acknowledgement`
+in `contracts/storage_v2.json` records the split.
+
+Acknowledged commits keep their guarantees: a Normal acknowledgement still means
+the frame reached the kernel, and power loss still loses at most the unsynced
+suffix. A commit is visible to published reads before its frame is written, as
+under Strict since the write buffer; a process crash before the write loses only
+commits that were never acknowledged, which their command receipts replay.
+Frames beyond the buffer's existing headroom-derived capacity are written
+inline, as before.
+
+**Alternatives rejected.** Strict durability on network volumes would move the
+write out but add an fsync wait (17-58 ms on DolphinFS, seconds under memory
+pressure) to every acknowledgement. One worker that writes then syncs, as
+Strict uses, makes every Normal response wait for an fsync. Acknowledging a
+queued frame acknowledges bytes no file holds. Publishing CONTROL against the
+written frontier would let recovery lose acknowledged state. Per-frame writes
+instead of one vectored write per batch add syscalls without a measured need:
+batches averaged 1.01-1.05 frames under bulk load.
+
+**Verification.** `server::tests::stalled_wal_write_never_holds_the_authority_against_renewals_claims_or_reads`
+(a deterministic gate on the next WAL write) and
+`tests/tofudb/test_wal_stall_liveness.py` (a real Normal daemon under an
+`LD_PRELOAD` shim that blocks `.wal` writes; its bound is the worker lease
+contract's 40 s renewal window) fail on `bbb20ee8b3` and pass here.
+`wal::buffer_tests` covers queued Normal frames, the unsynced power-loss
+window, torn writer batches, inline overflow behind queued frames, Strict still
+waiting for the sync, a stalled sync not delaying acknowledgement, close drain
+and writer failure.
+
+**Measurement** (2026-11-08, isolated daemons on `/tmp`, an XFS RAID0 of two
+HDDs whose WAL fsyncs took 1.3-3.8 s on average under this load; base is the
+production build, source `e899376a`; candidate source `4a2dd35e`):
+
+- Stalled volume: every `.wal` write blocked for 15-20 s while two clients
+  write 512 KiB records back to back. Base: renewal and claim commits wait out
+  the whole stall (visible after 14.8-20.0 s, every run) and `system.health`
+  reports not-ready for 18-38 of 60-80 samples. Candidate: renewals and claims
+  commit in 2.8-3.5 ms and health stays ready. Reads answer in 0.2 ms on both.
+  Responses still wait for the stalled write on both.
+- The same bulk load without a stall (5 base and 6 candidate runs): renewal
+  commit-visibility p99 49-440 ms against 12-17 ms; mean `authority_wait`
+  6.2 ms against 0.4-2.2 ms. Response p99 is dominated by the HDD's fsync
+  interference on both (base 16-438 ms, candidate 77-2,380 ms; median of the
+  per-run p99s 265 ms against 267 ms): a response still waits for its own
+  write.
+- Production-shaped mix (`scripts/tofudb_load_test.py`, Normal, 120 s per
+  scale, one run each, 0 errors): at 3x, heartbeat p50/p99 48/211 to
+  21/164 ms, `worker_job.claim_next` 205/308 to 57/122 ms,
+  `worker_job.complete` 209/358 to 61/91 ms, `record.get` p99 38 to 21 ms,
+  mean `authority_wait` 13.6 to 0.86 ms. At 1x claims fall from 89 to 11 ms
+  p50. At 5x both arms saturate in the single client process; claims still fall
+  from 464 to 108 ms p50 and `authority_wait` from 41.6 to 7.3 ms.
+
+**Remaining in-hold waits.** A CONTROL publication made under the authority
+(`Engine::publish_control`, reached from online-GC holds through
+`stabilize_control_slots`, catalog publication, and rotation seal and install)
+still waits there for the synced frontier, which now includes frames the writer
+has not written; a volume stall that outlasts the gap between such publications
+still reaches the authority, later than before. Exclusive execution and
+commit-time validation reads (`execute` 26% and `read` 22% of the same
+1,012 s) are unchanged.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

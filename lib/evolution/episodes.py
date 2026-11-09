@@ -27,7 +27,7 @@ import time
 import uuid
 
 from lib.identity import require_user_id
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 from .contracts import EvolutionStateError, validate_episode, validate_goal
 from .goals import get_goal, get_plan

@@ -15,7 +15,7 @@ def is_blank_text_block(block) -> bool:
     return isinstance(text, str) and not text.strip()
 
 
-def normalize_text_blocks(blocks: list) -> list:
+def normalize_text_blocks(blocks: list, *, positions=None) -> list:
     """Return valid blocks, preserving exact whitespace beside compatible text.
 
     Compatibility requires exactly ``type`` and ``text`` keys with string
@@ -35,7 +35,7 @@ def normalize_text_blocks(blocks: list) -> list:
             out[-1] = {**block, 'text': block['text'] + ''.join(pending)}
         pending.clear()
 
-    for block in blocks:
+    for index, block in enumerate(blocks):
         plain = (isinstance(block, dict) and block.get('type') == 'text'
                  and block.keys() == {'type', 'text'}
                  and isinstance(block['text'], str))
@@ -43,6 +43,8 @@ def normalize_text_blocks(blocks: list) -> list:
             fold_left()
             previous_plain_text = False
             if not is_blank_text_block(block):
+                if positions is not None:
+                    positions[index] = (len(out), 0)
                 out.append(block)
             continue
 
@@ -52,11 +54,16 @@ def normalize_text_blocks(blocks: list) -> list:
                 pending.append(text)
             continue
 
+        offset = 0
         if previous_plain_text:
             fold_left()
         elif pending:
-            block = {**block, 'text': ''.join(pending) + text}
+            prefix = ''.join(pending)
+            offset = len(prefix)
+            block = {**block, 'text': prefix + text}
             pending.clear()
+        if positions is not None:
+            positions[index] = (len(out), offset)
         out.append(block)
         previous_plain_text = True
 

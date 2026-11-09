@@ -126,7 +126,7 @@ def notify_terminal_listeners(task: dict) -> None:
             registration.listener(task)
         except Exception as exc:
             logger.warning('[Task %s] terminal observer failed: %s',
-                           str(task.get('id') or '')[:8], type(exc).__name__)
+                           str(task.get('id') or ''), type(exc).__name__)
         finally:
             _TERMINAL_CALLBACK_CONTEXT.depth -= 1
             if not _TERMINAL_CALLBACK_CONTEXT.depth:
@@ -160,14 +160,14 @@ def stamp_chat_task_terminal(
     if current in _TERMINAL_STATUSES and current != status:
         logger.warning(
             '[Task %s] rejected terminal rewrite %s -> %s',
-            (task.get('id') or '?')[:8], current, status,
+            (task.get('id') or '?'), current, status,
         )
         return False
     first = not stamped
     if stamped and task.get('finishReason') not in (None, '', finish_reason):
         logger.warning(
             '[Task %s] rejected finish-reason rewrite %s -> %s',
-            (task.get('id') or '?')[:8], task.get('finishReason'), finish_reason,
+            (task.get('id') or '?'), task.get('finishReason'), finish_reason,
         )
         return False
     task['status'] = status
@@ -193,7 +193,7 @@ def _publish_terminal_projections(
     except Exception as exc:
         logger.error(
             '[Task %s] %s event failed: %s',
-            (task.get('id') or '?')[:8], log_context, exc, exc_info=True,
+            (task.get('id') or '?'), log_context, exc, exc_info=True,
         )
     try:
         persisted = persist_task_result_fn(task)
@@ -205,14 +205,14 @@ def _publish_terminal_projections(
         task['_terminalPersistenceRetryReady'] = True
         logger.error(
             '[Task %s] %s persistence failed: %s',
-            (task.get('id') or '?')[:8], log_context, exc, exc_info=True,
+            (task.get('id') or '?'), log_context, exc, exc_info=True,
         )
     try:
         notify_terminal_fn(task)
     except Exception as exc:
         logger.debug(
             '[Task %s] %s busy projection failed: %s',
-            (task.get('id') or '?')[:8],
+            (task.get('id') or '?'),
             busy_context, exc,
         )
     return event
@@ -343,7 +343,7 @@ def reject_unstarted_chat_task(
         session.request_cancel('unstarted_rejection_after_dispatch')
         logger.error(
             '[Task %s] refused pre-spawn rejection after dispatch started',
-            (task.get('id') or '?')[:8],
+            (task.get('id') or '?'),
         )
         return None
     if session is not None:
@@ -380,7 +380,7 @@ def reject_unstarted_chat_task(
         task['_terminalPersistenceRetryReady'] = True
         logger.error(
             '[Task %s] rejected task retained: terminal persistence pending',
-            (task.get('id') or '?')[:8],
+            (task.get('id') or '?'),
         )
     return event
 

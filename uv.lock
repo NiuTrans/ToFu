@@ -3273,7 +3273,7 @@ wheels = [
 
 [[package]]
 name = "tofu-agent"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -3577,7 +3577,7 @@ provides-extras = ["full", "storage", "release", "app", "test", "dev", "worker",
 
 [[package]]
 name = "tofu-search"
-version = "0.12.26"
+version = "0.12.28"
 source = { editable = "packages/tofu-search" }
 dependencies = [
     { name = "beautifulsoup4" },

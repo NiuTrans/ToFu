@@ -30,7 +30,7 @@ from lib.compat.openai_projection import (
     openai_completion_chunk, openai_finish_reason, project_completion_usage,
 )
 from lib.error_envelope import BadRequest
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
@@ -305,7 +305,7 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
                 yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[compat:openai] stream client disconnected task=%s',
-                    task_id[:8])
+                    task_log_tag(task_id))
         raise
     finally:
         unregister_waiter(task_id)

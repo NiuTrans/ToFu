@@ -555,17 +555,19 @@ def _turn_recover(session: Session, payload: Mapping[str, Any]) -> Any:
         # honest tool-checkpoint resume the user could have continued from.
         from lib.turn_lifecycle import _settlement as _compute_settlement
 
+        # The attempt died with its server: the restart cause, not a Stop, is
+        # the verdict's evidence (cause server_restart, evidence system_recovery).
         _, settlement = _compute_settlement(
             {
                 "model": (_load(row["config_json"]) or {}).get("model", ""),
                 "content": projection.get("content", ""),
                 "thinking": projection.get("thinking", ""),
                 "toolRounds": projection.get("toolRounds", []),
+                "_abort_reason": "server_shutdown",
             },
             {"type": "aborted", "finishReason": "interrupted"},
             projection,
         )
-        settlement["cause"] = "server_restart"
         old_revision = int(row["projection_revision"])
         new_revision = old_revision + 1
         changed = session.execute(

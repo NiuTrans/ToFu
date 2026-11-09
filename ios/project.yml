@@ -23,6 +23,10 @@ targets:
         CFBundleDisplayName: Tofu
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.tofu.client.connect
+            CFBundleURLSchemes:
+              - tofu
         UILaunchScreen: {}
         # getUserMedia in the hosted SPA (voice input / photo attach).
         NSMicrophoneUsageDescription: Tofu uses the microphone for voice input in conversations.

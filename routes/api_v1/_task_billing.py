@@ -35,10 +35,12 @@ def prepare_task_billing(
     except InsufficientFunds as e:
         reject_unstarted_chat_task(
             task, e, cause='billing_reservation_refused', conv_id=conversation_id)
+        from lib.error_envelope import make_envelope
         return api_error(
-            f'Insufficient credits. '
-            f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
-            f'balance {e.balance_micro / 1_000_000:.4f}.',
+            make_envelope('budget_exceeded',
+                          detail=(f'Insufficient credits. Estimated cost '
+                                  f'{e.needed_micro / 1_000_000:.4f} credits, '
+                                  f'balance {e.balance_micro / 1_000_000:.4f}.')),
             status=402, error_kind='insufficient_funds',
             balance_micro=e.balance_micro, needed_micro=e.needed_micro)
     except Exception as exc:

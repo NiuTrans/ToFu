@@ -123,6 +123,27 @@ def test_other_quiesce_reasons_keep_admission_open():
     assert not task_admission_closed()
 
 
+def test_shutdown_quiesce_records_the_turns_it_pauses_for_the_next_generation(monkeypatch):
+    """docs/RUN_CONTINUITY.md, restart-paused conversations: the next server
+    generation resumes exactly the Turns this stopping process paused,
+    including one registered after the snapshot."""
+    from lib.conversations import restart_resume
+    from lib.tasks_pkg.manager import quiesce_running_tasks
+    recorded = []
+    monkeypatch.setattr(restart_resume, 'record_quiesced_conversations',
+                        lambda tasks: recorded.append([task['id'] for task in tasks]))
+    quiesce_running_tasks(reason='maintenance')
+    assert recorded == [], 'only a server shutdown pauses Turns for the next generation'
+    running = _mk_running('cv-q-paused')
+    try:
+        quiesce_running_tasks(reason='server_shutdown')
+        assert any(running['id'] in batch for batch in recorded)
+        late = _mk_running('cv-q-paused-late')
+        assert recorded[-1] == [late['id']]
+    finally:
+        _cleanup(running['id'], late['id'])
+
+
 def test_turn_commands_defer_after_shutdown_quiesce():
     """2026-11-06: killed background commands woke their conversations during
     shutdown and started turns the teardown then failed."""

@@ -17,7 +17,7 @@ import time
 import uuid
 from typing import Optional
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -121,7 +121,7 @@ def register_waiter(task_id: str) -> None:
         # Not on a loop (sync caller / tests without a running loop) —
         # the waiter is a no-op; callers fall back to status polling.
         logger.debug('[Admission] register_waiter(%s) with no running loop',
-                     task_id[:8])
+                     task_log_tag(task_id))
         return
     with _waiters_lock:
         _waiters[task_id] = _Waiter(loop)
@@ -156,7 +156,7 @@ def notify_task(task_id: str, *, terminal: bool = False) -> None:
         except RuntimeError as e:
             # Loop closed between registration and signal — harmless.
             logger.debug('[Admission] notify_task(%s) loop signal failed: %s',
-                         task_id[:8], e)
+                         task_log_tag(task_id), e)
     if terminal:
         # Disposal/cleanup callbacks fire once the task is genuinely done —
         # independent of whether an async handler registered a waiter (a
@@ -233,7 +233,7 @@ def fire_terminal_callbacks(task_id: str) -> None:
             fn(task_id)
         except Exception as e:
             logger.error('[Admission] terminal callback for task=%s failed: %s',
-                         task_id[:8], e, exc_info=True)
+                         task_log_tag(task_id), e, exc_info=True)
 
 
 async def await_terminal(task: dict, *, timeout_s: float) -> bool:

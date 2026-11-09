@@ -444,6 +444,7 @@
     "fallbackCapacityBytes": 262144,
     "worker": "existing-wal-barrier-worker",
     "durability": "exact-captured-prefix-after-physical-write-and-sync",
+    "acknowledgement": "both-tiers-queue-frames-so-no-authority-holder-performs-the-physical-write; strict-responds-after-the-worker-sync; normal-responds-after-the-worker-physical-write-and-the-sync-stays-the-interval-backstop",
     "overflow": "synchronous-original-write-path-no-admission",
     "vfs": "explicit-independent-handle-capability-stateful-wrappers-default-disabled",
     "accounting": "queued-and-inflight-exact-frame-bytes-through-deallocation-excludes-queue-and-allocator-metadata",

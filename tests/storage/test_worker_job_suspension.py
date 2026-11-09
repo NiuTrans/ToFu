@@ -245,7 +245,7 @@ def test_canonical_runner_suspends_and_resumes_one_job(semantic_authority):
         semantic_authority, handler=handler
     )
     assert runner.run_once().state == "suspended"
-    heartbeat_name = f'durable-worker-heartbeat:{task[:32]}'
+    heartbeat_name = f'durable-worker-heartbeat:{task}'
     assert all(thread.name != heartbeat_name for thread in threading.enumerate())
     assert (
         factory().query("worker_job.get", {"task_id": task, "user_id": owner})["status"]

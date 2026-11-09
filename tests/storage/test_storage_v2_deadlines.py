@@ -5,13 +5,19 @@ import time
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage.v2_client import StorageV2Client, _SessionPool
+from lib.storage.v2_client import _BUSY_COMMAND_ATTEMPTS, StorageV2Client, _SessionPool
 
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize('recovers', [True, False])
-def test_busy_rotation_uses_existing_deadline_and_preserves_command_identity(monkeypatch, recovers):
+@pytest.mark.parametrize('supervised', [True, False])
+def test_busy_rotation_preserves_command_identity_without_a_time_window(monkeypatch, supervised):
+    """A rotation can outlast sixteen fast retries and any former window.
+
+    A supervised client rides it while its authority is alive; a standalone
+    client has no liveness witness and keeps its attempt bound. Neither one
+    consults an aggregate deadline, and every replay keeps its receipt.
+    """
     clock = [100.0]
     identities = []
     client = StorageV2Client('127.0.0.1', 1, b's' * 48, owner_id=1, tenant_id=1)
@@ -20,18 +26,26 @@ def test_busy_rotation_uses_existing_deadline_and_preserves_command_identity(mon
     monkeypatch.setattr('lib.storage.v2_client.random.uniform', lambda *_: 0)
     def attempt(_operation, _payload, **kwargs):
         identities.append(kwargs['command_id'])
-        if recovers and len(identities) > 20:
+        assert kwargs['timeout'] == 2
+        clock[0] += kwargs['timeout']
+        if len(identities) > 40:
             return {'recovered': 8}
         raise StorageError('database_busy', 'rotation is draining', True, 50)
+    def alive(pause):
+        clock[0] += pause
+        return client
     monkeypatch.setattr(client, '_attempt', attempt)
+    if supervised:
+        client.bind_runtime_recovery(alive)
     try:
-        if recovers:
+        if supervised:
             assert client.command('turn.recover', {}, 'recovery-chunk', deadline=2) == {'recovered': 8}
-            assert len(identities) == 21
+            assert len(identities) == 41
+            assert clock[0] - 100.0 > 45.0  # longer than the former command window
         else:
             with pytest.raises(StorageError, match='rotation is draining'):
                 client.command('turn.recover', {}, 'recovery-chunk', deadline=2)
-            assert clock[0] <= 145.001  # existing 45 s command aggregate budget
+            assert len(identities) == _BUSY_COMMAND_ATTEMPTS
         assert set(identities) == {'recovery-chunk'}
     finally:
         client.close()

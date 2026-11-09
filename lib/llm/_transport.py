@@ -206,7 +206,8 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
         RequestUploadTimeoutError, ResponseReadTimeoutError,
         SubscriptionConnectionError,
     )
-    from lib.http_transport.client import SubscriptionRoutesExhausted
+    from lib.http_transport.connection_setup import RoutesExhausted
+    from lib.http_transport.outbound import NetworkRequestCancelled
     from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
 
     pending, chain, seen = [exc], [], set()
@@ -217,7 +218,7 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
         seen.add(id(item))
         chain.append(item)
         pending.extend(a for a in item.args if isinstance(a, BaseException))
-        pending.extend([item.__cause__, item.__context__, getattr(item, 'reason', None)])
+        pending.extend([item.__cause__, getattr(item, 'reason', None)])
     try:
         prepared = getattr(exc, 'request', None)
     except RuntimeError:
@@ -234,7 +235,9 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
     cause_type = type(chain[-1]).__name__
     if isinstance(exc, RequestTransportError):
         return exc
-    if isinstance(exc, SubscriptionRoutesExhausted):
+    if isinstance(exc, NetworkRequestCancelled):
+        return AbortedError('User aborted before request delivery')
+    if isinstance(exc, RoutesExhausted):
         return SubscriptionConnectionError(base_url=base_url)
     typed_upload_timeout = any(isinstance(e, httpx.WriteTimeout) for e in chain)
     # CONNECT can time out writing to a TLS proxy. Typed phase evidence wins
@@ -273,6 +276,10 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
     if isinstance(exc, (requests.exceptions.Timeout, httpx.TimeoutException)):
         return RequestTransportError(failure_stage='connection', reason='timeout',
                                      base_url=base_url, cause_type=cause_type)
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return RequestTransportError(failure_stage='connection',
+                                     reason='delivery_ambiguous', base_url=base_url,
+                                     cause_type=cause_type)
     return RequestTransportError(failure_stage='connection',
                                  reason='connection_error', base_url=base_url,
                                  cause_type=cause_type)
@@ -341,6 +348,8 @@ except (ValueError, TypeError) as e:
 #
 # A wedged request is already bounded without this window:
 #   * user Stop — the abort poll closes the read socket;
+#   * the silent-stream deadline below, from the request's send through its
+#     response headers and on through the body;
 #   * ``attempt_timeout`` — the caller's per-attempt wall deadline;
 #   * ``first_byte_timeout`` — the caller's response-header deadline;
 #   * the HTTP error-body read deadline in provider_error_body.
@@ -419,6 +428,9 @@ def stream_idle_timeout_seconds() -> float:
 #
 # The liveness contract is fixed in docs/modules/llm_io.md, not a tuning knob.
 # Any transport byte renews it; expiry raises a typed retryable read timeout.
+# The clock starts when the request is sent, not at response headers: a
+# gateway that buffers headers until its upstream speaks hides the same
+# upstream silence in the header wait.
 SILENT_STREAM_DEADLINE_SECONDS = 900.0
 SILENT_STREAM_DEADLINE_CAUSE = 'stream_silence'
 
@@ -1184,7 +1196,10 @@ def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None,
     def _run_post():
         resp = None
         try:
-            resp = post_fn()
+            from lib.http_transport.outbound import network_cancellation
+            with network_cancellation(lambda: abandoned.is_set() or bool(
+                    is_aborted and is_aborted())):
+                resp = post_fn()
             outcome.set_result(resp)
         except BaseException as error:  # re-raised in the caller thread below
             outcome.set_exception(error)
@@ -1342,7 +1357,6 @@ def get_sync_session() -> "requests.Session":
     if _sync_session is None:
         with _sync_session_lock:
             if _sync_session is None:
-                _sync_session = requests.Session()
                 from lib.llm._sync_http import model_http_adapter
                 adapter = model_http_adapter(
                     write_timeout=WRITE_TIMEOUT,
@@ -1354,8 +1368,8 @@ def get_sync_session() -> "requests.Session":
                     # the surplus sockets simply are not kept after use.
                     pool_block=False,
                 )
-                _sync_session.mount('http://', adapter)
-                _sync_session.mount('https://', adapter)
+                from lib.http_transport.outbound import managed_session
+                _sync_session = managed_session(adapter=adapter)
                 logger.debug('[Transport] Created shared requests.Session')
     return _sync_session
 
@@ -1372,7 +1386,7 @@ _async_clients: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _async_clients_lock = threading.Lock()
 
 
-def get_async_client(proxy_url) -> "httpx.AsyncClient":
+def get_async_client(proxy_url=None, *, automatic=False) -> "httpx.AsyncClient":
     """Return a keep-alive ``httpx.AsyncClient`` for *proxy_url* on this loop.
 
     Args:
@@ -1389,16 +1403,17 @@ def get_async_client(proxy_url) -> "httpx.AsyncClient":
         if by_proxy is None:
             by_proxy = {}
             _async_clients[loop] = by_proxy
-        client = by_proxy.get(proxy_url)
+        key = (proxy_url, automatic)
+        client = by_proxy.get(key)
         if client is None or client.is_closed:
-            client = httpx.AsyncClient(
-                proxy=proxy_url,
+            from lib.http_transport.outbound_async import managed_async_client
+            client = managed_async_client(
+                proxy=proxy_url, automatic=automatic,
                 # ``proxy=None`` means an EXPLICIT direct route.  httpx would
                 # otherwise re-read HTTP(S)_PROXY from the environment and
                 # silently turn that direct candidate back into the env route.
                 # async_proxy_for/subscription_routes already resolve the env
                 # proxy to an explicit URL when it is wanted.
-                trust_env=False,
                 # Generation and connection entry have no local timeout or
                 # count queue. Connect/upload failures retain their own bounds;
                 # owner Stop remains the stream watchdog's responsibility.
@@ -1414,7 +1429,7 @@ def get_async_client(proxy_url) -> "httpx.AsyncClient":
                 # and can rewrite POST to GET, so fail visibly instead.
                 follow_redirects=False,
             )
-            by_proxy[proxy_url] = client
+            by_proxy[key] = client
             # proxy_url may contain vault-injected userinfo. Never put it in a
             # log record, including DEBUG/error aggregation sinks.
             logger.debug('[Transport] Created shared httpx.AsyncClient route=%s',

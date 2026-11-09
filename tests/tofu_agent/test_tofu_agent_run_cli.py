@@ -156,6 +156,37 @@ def test_run_task_file_wins_and_forwards_config(runtime_slot, tmp_path, capsys):
     assert kwargs['timeout_s'] == 30.0
 
 
+def test_run_forwards_the_native_thinking_depth(runtime_slot, tmp_path, capsys):
+    """--thinking max is the official TB protocol effort, through the public alias."""
+    from tofu_agent.cli import main
+
+    _slot, install = runtime_slot
+    fake = _FakeRuntime(result=_result())
+    install(fake)
+
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'think hard', '--thinking', 'max'])
+    assert rc == 0
+    _messages, kwargs = fake.calls[0]
+    assert kwargs['config']['thinking'] == 'max'
+    from lib.agent_core.run_contract import build_agent_config
+    resolved = build_agent_config('glm-5.3-flash', kwargs['config'])
+    assert resolved['thinkingDepth'] == 'max' and resolved['thinkingEnabled'] is True
+
+
+def test_run_without_thinking_keeps_the_deployment_default(runtime_slot, tmp_path, capsys, monkeypatch):
+    from tofu_agent.cli import main
+
+    monkeypatch.delenv('TOFU_AGENT_RUN_THINKING', raising=False)
+    _slot, install = runtime_slot
+    fake = _FakeRuntime(result=_result())
+    install(fake)
+    rc = main(['--env-file', str(tmp_path / 'absent.env'), 'run', '--task', 'solve it'])
+    assert rc == 0
+    _messages, kwargs = fake.calls[0]
+    assert 'thinking' not in kwargs['config']
+
+
 def test_run_writes_output_file(runtime_slot, tmp_path, capsys):
     from tofu_agent.cli import main
 

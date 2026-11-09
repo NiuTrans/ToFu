@@ -14,6 +14,7 @@ import uuid
 
 
 from lib.storage.errors import StorageError
+from lib.storage.turn_projection_pages import TurnProjectionRevisionMoved, read_paged_turn
 from lib.agent_core.model_context_limits import (
     MAX_ENTRY_BYTES, MAX_JSON_SAFE_INTEGER, MAX_MESSAGES, MAX_TURN_WITNESSES,
 )
@@ -179,7 +180,10 @@ class ModelContinuationStore:
         payload = {'user_id': user_id, 'conversation_id': conversation_id,
                    'turn_id': turn_id, 'replay': replay}
         first = self.client.query('turn.context.read', payload, deadline=5.0)
-        if not isinstance(first, dict) or not first.get('supported') or not first.get('nextTurnId'):
+        if not isinstance(first, dict) or not first.get('supported'):
+            return first
+        first['turns'] = self._whole_turns(payload, first['turns'])
+        if not first.get('nextTurnId'):
             return first
         turns = list(first['turns'])
         proof = first['historyProof']
@@ -204,16 +208,49 @@ class ModelContinuationStore:
             if (not isinstance(page, dict) or not page.get('supported')
                     or page.get('historyProof') != proof or page.get('covered') != covered
                     or page.get('continuation') != first.get('continuation')
-                    or not page.get('turns')
-                    or any(row['turnId'] in seen for row in page['turns'])):
+                    or not page.get('turns')):
                 raise _ContextPagingChanged()
-            seen.update(row['turnId'] for row in page['turns'])
-            turns.extend(page['turns'])
+            rows = self._whole_turns(payload, page['turns'])
+            if any(row['turnId'] in seen for row in rows):
+                raise _ContextPagingChanged()
+            seen.update(row['turnId'] for row in rows)
+            turns.extend(rows)
             first['proofEligible'] = first['proofEligible'] and page['proofEligible']
             cursor = page.get('nextTurnId')
         first['turns'] = turns
         first['nextTurnId'] = None
         return first
+
+    def _whole_turns(self, payload, rows):
+        """Replace each page-0 head with its Turn, read by page at the head's revision.
+
+        The authority sends a Turn with more than one ``turn.projection.page``
+        page as ``{'pagedTurn': head}`` (docs/STORAGE.md, "Paged Turn storage").
+        A Turn that moved, disappeared or changed its head since this snapshot
+        restarts the whole assembly under a fresh proof, so revisions are never
+        mixed.
+        """
+        turns = []
+        for row in rows:
+            head = row.get('pagedTurn')
+            if head is None:
+                turns.append(row)
+                continue
+            try:
+                turn = read_paged_turn(
+                    self.client, user_id=payload['user_id'],
+                    conversation_id=payload['conversation_id'], turn_id=head['turnId'],
+                    projection_revision=head['projectionRevision'], deadline=5.0)
+            except TurnProjectionRevisionMoved as exc:
+                raise _ContextPagingChanged() from exc
+            # Native execution-epoch presentation can change a public Turn
+            # without a projection revision; the pages must carry this head.
+            if turn is None or turn | {'projection': {
+                    key: value for key, value in turn['projection'].items()
+                    if key in head['projection']}} != head:
+                raise _ContextPagingChanged()
+            turns.append(turn)
+        return turns
 
     def get(self, *, user_id, conversation_id, lane_id):
         return self.client.query('model_continuation.get', {

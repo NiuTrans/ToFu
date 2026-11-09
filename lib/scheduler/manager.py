@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from collections.abc import Callable
 
 from lib.identity import PrincipalContext
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.scheduler.contract import DUE_CLAIM_INTERVAL_SECONDS
 from lib.scheduler.cron import cron_matches, describe_cron, next_cron_run
 from lib.scheduler.process_runner import run_bounded_process
@@ -821,6 +821,39 @@ class ScheduledTaskManager:
                 logger.exception("[Scheduler] Router Watchdog review failed")
                 return False, "Router Watchdog review failed (see logs)"
 
+        elif task_type == "proactive_digest":
+            # Daily proactive digest (docs/ROUTER.md R10): deterministic, no model call.
+            try:
+                from lib.router.proactive.digest import run_digest
+
+                return run_digest(task)
+            except Exception:
+                logger.exception("[Scheduler] Proactive digest failed")
+                return False, "Proactive digest failed (see logs)"
+
+        elif task_type == "proactive_quiet_release":
+            # Quiet-hours release (docs/ROUTER.md R10): deterministic, no model call.
+            try:
+                from lib.router.proactive.held import release_held
+
+                count, summary = release_held(int(task['user_id']))
+                return True, summary
+            except Exception:
+                logger.exception("[Scheduler] Quiet-hours release failed")
+                return False, "Quiet-hours release failed (see logs)"
+
+        elif task_type == "coordinator_commitment_due":
+            # A task-board commitment to the owner is due (docs/ROUTER.md R10).
+            # ``command`` is JSON {projectPath, coordinatorId, bindingRevision};
+            # the handler re-reads the board and wakes only open due commitments.
+            try:
+                from lib.conversations.coordinator_commitments import run_commitment_due
+
+                return run_commitment_due(task)
+            except Exception:
+                logger.exception("[Scheduler] Coordinator commitment-due wake failed")
+                return False, "Coordinator commitment-due wake failed (see logs)"
+
         elif task_type == "optimizer":
             # Daily Optimizer: runs lib.optimizer.run_once() in-process.
             # ``command`` is informational only (the handler ignores it so
@@ -973,7 +1006,7 @@ class ScheduledTaskManager:
 
             thread = threading.Thread(
                 target=run_until_no_rerun,
-                name=f'tofu-scheduled-{task_id[:24]}',
+                name=f'tofu-scheduled-{task_id}',
                 daemon=True,
             )
             self._run_threads[task_id] = thread
@@ -1122,7 +1155,7 @@ class ScheduledTaskManager:
         )
 
         task_id = task["id"]
-        pfx = f"[Proactive:{task_id[:8]}]"
+        pfx = f"[Proactive:{task_log_tag(task_id)}]"
 
         # ── Pre-checks ──
         if should_auto_disable(task):
@@ -1134,7 +1167,7 @@ class ScheduledTaskManager:
             logger.debug(
                 "%s Skipping poll — previous execution still running (task_id=%s)",
                 pfx,
-                task.get("last_execution_task_id", "?")[:8],
+                task.get("last_execution_task_id", "?"),
             )
             return
 
@@ -1260,7 +1293,7 @@ class ScheduledTaskManager:
                 user_id=int(task["user_id"]),
             )
             logger.info(
-                "%s 🚀 Execution started: agentic_task=%s", pfx, exec_task_id[:8]
+                "%s 🚀 Execution started: agentic_task=%s", pfx, task_log_tag(exec_task_id)
             )
         else:
             record_poll(
@@ -1399,6 +1432,28 @@ class ScheduledTaskManager:
                 '(will retry after schema ready): %s', e)
             return None
 
+    def _ensure_default_proactive_digest_task(self):
+        """Install the daily proactive digest (docs/ROUTER.md R10)."""
+        return self._ensure_default_task(
+            system_key='proactive-digest', name='Proactive Digest',
+            schedule='0 21 * * *', command='Deterministic daily digest for the owner',
+            task_type='proactive_digest',
+            description='Assembles open decisions, overdue commitments, faults and deliveries '
+                        'from durable records; no model request. Skipped when empty.',
+            max_runtime=300, enabled=True, reconcile_enabled=False,
+        )[0]
+
+    def _ensure_default_proactive_quiet_release_task(self):
+        """Install the quiet-hours release (docs/ROUTER.md R10)."""
+        return self._ensure_default_task(
+            system_key='proactive-quiet-release', name='Quiet-Hours Release',
+            schedule='0 8 * * *', command='Release relays held during quiet hours',
+            task_type='proactive_quiet_release',
+            description='Releases report and question relays held during quiet hours as one '
+                        'deterministic owner message and one Router notice.',
+            max_runtime=300, enabled=True, reconcile_enabled=False,
+        )[0]
+
     def _ensure_default_reserve_reclaim_task(self):
         """Idempotently register the billing reserve-reclaim cron task.
 
@@ -1513,6 +1568,22 @@ class ScheduledTaskManager:
                 except Exception as e:
                     logger.warning(
                         "[Scheduler] GitHub channel reconcile failed: %s", e)
+                # 企业微信, QQ and 微信 bot sessions follow the same tick (docs/CHANNELS.md C12).
+                try:
+                    from lib.channels.bots.supervisor import reconcile_bot_sessions
+                    reconcile_bot_sessions(self._process_principal)
+                except Exception as e:
+                    logger.warning(
+                        "[Scheduler] bot channel reconcile failed: %s", e)
+                # Restart-complete notices ride the same tick (docs/ROUTER.md
+                # R9): a manager refusal while this server serves on, a host
+                # the restart kept running, a delivery that failed.
+                try:
+                    from lib.server.restart_notice import deliver_restart_notices
+                    deliver_restart_notices()
+                except Exception as e:
+                    logger.warning(
+                        "[Scheduler] restart notice delivery failed: %s", e)
                 tick += 1
                 # Every ~2 minutes, re-scan durable active timers and adopt
                 # any whose watcher lease expired with its owner (crash
@@ -1627,6 +1698,8 @@ def start_scheduler_worker(*, principal: PrincipalContext):
                 '[Scheduler] Skipping application-managed database backup '
                 'tasks; the deployment platform owns PostgreSQL backup/PITR')
         bootstraps.append(mgr._ensure_default_reserve_reclaim_task)
+        bootstraps.append(mgr._ensure_default_proactive_digest_task)
+        bootstraps.append(mgr._ensure_default_proactive_quiet_release_task)
     else:
         logger.info(
             '[Scheduler] Distributed scheduler has no implicit owner; personal '

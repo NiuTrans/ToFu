@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
                               round_entry, cfg, project_path, project_enabled,
-                              all_tools=None):
+                              all_tools=None, dispatch_admission=None):
     """Stable callable boundary for parallel tool execution.
 
     Arms the tool's DECLARED timeout (``ToolSpec.timeout_ms_by_name``) when
@@ -35,8 +35,11 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     recovery instructions. The collector uses the larger of the ordinary pool
     ceiling and this declaration for each occurrence, bounding non-cooperative
     handlers without truncating a declared long wait; the ``_SERIAL_BLOCKING``
-    human-wait exemptions never arm a declared timeout.
+    human-wait exemptions never arm a declared timeout. ``dispatch_admission``
+    is the call's project-dispatch batch admission (``_execute_tool_one``).
     """
+    admitted = ({} if dispatch_admission is None
+                else {'dispatch_admission': dispatch_admission})
     timeout_ms = None
     if not _is_exempt_wait(fn_name, fn_args or {}):
         from lib.tools.registry import declared_tool_timeout_ms
@@ -45,7 +48,7 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     if timeout_ms is None:
         return _execute_tool_one(task, tc, fn_name, tc_id, fn_args, rn,
                                  round_entry, cfg, project_path,
-                                 project_enabled, all_tools=all_tools)
+                                 project_enabled, all_tools=all_tools, **admitted)
     fired = threading.Event()
 
     def _on_declared_timeout() -> None:
@@ -63,7 +66,7 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
                     context.request_resource_cancellation()
                 except Exception as exc:  # cancel is best-effort
                     logger.debug('[tool_timeout] cancel failed for %s '
-                                 '(tc_id=%s): %s', fn_name, tc_id[:8], exc)
+                                 '(tc_id=%s): %s', fn_name, tc_id, exc)
                 return
             time.sleep(0.05)
 
@@ -73,7 +76,7 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     try:
         result = _execute_tool_one(task, tc, fn_name, tc_id, fn_args, rn,
                                    round_entry, cfg, project_path,
-                                   project_enabled, all_tools=all_tools)
+                                   project_enabled, all_tools=all_tools, **admitted)
     finally:
         timer.cancel()
     if not fired.is_set() or task.get('aborted'):
@@ -83,7 +86,7 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     # ceiling keeps its separate pipeline-level replacement.
     logger.warning('[tool_timeout] %s (tc_id=%s) exceeded its declared '
                    'timeout of %d ms; replacing the late result',
-                   fn_name, tc_id[:8], timeout_ms)
+                   fn_name, tc_id, timeout_ms)
     if isinstance(round_entry, dict):
         round_entry['_declaredTimeoutMs'] = timeout_ms
         round_entry['status'] = 'error'

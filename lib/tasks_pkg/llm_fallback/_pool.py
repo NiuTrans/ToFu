@@ -6,7 +6,7 @@ receipts; does not decide whether the primary failure authorizes rescue."""
 from lib import log
 from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.llm import AbortedError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.event_delivery import EventDeliveryError, EventDeliveryRevoked
 from lib.tasks_pkg.manager import _events as task_events
 
@@ -37,7 +37,7 @@ def _attempt_pool_rescue(
     dispatch; the existing dispatch retry budget owns the attempt. Successful
     rescue preserves original-primary attribution and records the serving model.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     failed_models = {m for m in (failed_models or set()) if m}
     rescue_prefer_model = _retry._get_pool_rescue_model(failed_models)
 

@@ -76,3 +76,82 @@
 /* Delivery receipt: how a fired timer's continuation reached the conversation. */
 .timer-panel-item .tpi-decision.steered { background: var(--info-text); }
 .timer-panel-item .tpi-decision.queued { background: var(--warning-text); }
+/* Inside an open grouped tool panel a watch is one call of the card, like a
+ * parallel run or a tool search (23-reading-tool-panel.css): no frame, fill,
+ * radius or inset. The state label takes the intent edge; the copyable id
+ * (monospace: the exact identity) and the condition tier follow as quiet
+ * metadata; the caret closes the row after any outcome, inside the rows'
+ * --space-6 end lane; the checks hang from the title's edge to the card's
+ * side. Lines beneath the row hang on the same edge. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-block > .timer-watcher-header {
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--conversation-process-inset);
+  border-radius: var(--radius-sm);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+/* One row per call on phones too: the label wraps beside its metadata. An
+ * attention step still breaks its identity onto a line of its own. */
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) .timer-watcher-block > .timer-watcher-header {
+  flex-wrap: nowrap;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-icon {
+  order: -2;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--tool-row-glyph-ink);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-active .timer-watcher-icon {
+  color: var(--tool-row-glyph-ink-live);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] :is(.timer-watcher-orphaned, .timer-watcher-warn) .timer-watcher-icon {
+  color: var(--tool-row-glyph-ink-attention);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-watcher-label {
+  flex: 1 1 auto;
+  order: -1;
+  color: var(--tool-row-intent-ink);
+  font-weight: var(--weight-regular);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-active .timer-watcher-label {
+  color: var(--tool-row-intent-ink-live);
+  font-weight: var(--weight-medium);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > :is(.timer-id-chip, .timer-kind-badge) {
+  min-block-size: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--tool-row-meta-ink);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-id-chip:is(:hover, .copied) {
+  color: var(--text-primary);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-toggle {
+  order: 3;
+  width: var(--space-3);
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > .timer-toggle svg {
+  width: 100%;
+  height: auto;
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-header > :is(.ptool-error-reason, .conversation-tool-identity) {
+  margin-inline-start: calc(var(--space-4) + var(--space-2));
+}
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] .timer-watcher-body {
+  margin-inline-start: calc(var(--space-4) + var(--space-2));
+  padding: var(--space-1) 0 var(--space-2);
+}

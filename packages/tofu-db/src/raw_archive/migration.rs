@@ -117,6 +117,15 @@ fn verify_indexes(
     {
         return Err(invalid_data("raw archive snapshot age index differs"));
     }
+    let body_row = database.entity_get(tx, &identity.body_age_key(tx)?)?;
+    let expected_body_row = (doc.stored_bytes > 0)
+        .then(|| identity.encode())
+        .transpose()?;
+    if body_row != expected_body_row
+        && (body_row.is_some() || owner_body_age_index_complete(database, tx)?)
+    {
+        return Err(invalid_data("raw archive snapshot body age index differs"));
+    }
     if database.entity_get(tx, &claim_key(tx, &doc.archive_id)?)?
         != Some(tx.owner_user_id().to_be_bytes().to_vec())
     {
@@ -424,6 +433,28 @@ mod tests {
         db.entity_delete(&mut tx, key).unwrap();
         db.commit(tx).unwrap();
         assert!(call(&mut db, "get", json!({"archive_id":"a"})).is_err());
+    }
+    #[test]
+    fn restored_bodies_publish_and_verify_their_body_age_index_row() {
+        let (_, mut db) = prepared();
+        call(&mut db, "restore", snapshot("a")).unwrap();
+        let mut placeholder = snapshot("empty");
+        placeholder["request_blob_b64"] = json!("");
+        placeholder["stored_bytes"] = json!(0);
+        call(&mut db, "restore", placeholder.clone()).unwrap();
+        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(owner_body_age_index_complete(&db, &mut tx).unwrap());
+        let identity = |value: &Value| {
+            ArchiveIdentity::from_document(&serde_json::from_value(value.clone()).unwrap())
+        };
+        let empty_key = identity(&placeholder).body_age_key(&tx).unwrap();
+        assert!(db.entity_get(&mut tx, &empty_key).unwrap().is_none());
+        let body_key = identity(&snapshot("a")).body_age_key(&tx).unwrap();
+        assert!(db.entity_get(&mut tx, &body_key).unwrap().is_some());
+        db.entity_delete(&mut tx, body_key).unwrap();
+        db.commit(tx).unwrap();
+        assert!(call(&mut db, "get", json!({"archive_id":"a"})).is_err());
+        assert!(call(&mut db, "get", json!({"archive_id":"empty"})).is_ok());
     }
     #[test]
     fn malformed_snapshots_and_corrupt_covering_indexes_fail_closed() {

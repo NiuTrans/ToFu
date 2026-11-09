@@ -28,6 +28,49 @@ def task():
             'abort_event': threading.Event(), 'config': {}}
 
 
+@pytest.mark.parametrize('verdict', ['live', 'revoked', 'cancelled', 'stop', 'permanent'])
+def test_detached_model_claim_waits_for_storage_without_losing_control(monkeypatch, verdict):
+    from lib.durable_worker import StorageWorkerJobStore
+    from lib.llm.llm_errors import AbortedError, ModelAdmissionRefused
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg.worker_binding import admit_model_dispatch
+    owned, carrier = context(), task()
+    carrier.update(id='detached-child', _conversationWorkerContext=owned)
+    entries, probes = [], []
+
+    def settled_entry(*args, **kwargs):
+        entries.append(kwargs)
+        return None  # The root Turn settled; its held job still owns this child.
+
+    def claim_state(_store, claim, **kwargs):
+        probes.append(claim)
+        assert claim is owned.claim
+        if verdict == 'permanent':
+            raise StorageError('database_conflict', 'claim proof refused')
+        if len(probes) == 1:
+            if verdict == 'stop':
+                carrier['abort_event'].set()
+            raise StorageError('database_unavailable', 'claim proof temporarily unreachable')
+        return {'ok': verdict != 'revoked', 'replayCursor': 0,
+                'cancelSequence': int(verdict == 'cancelled'), 'cancelReason': 'Stop'}
+
+    monkeypatch.setattr('lib.turn_lifecycle.mark_task_started', settled_entry)
+    monkeypatch.setattr(StorageWorkerJobStore, 'claim_state', claim_state)
+    if verdict == 'live':
+        admit_model_dispatch(carrier, owned)
+    elif verdict in {'stop', 'cancelled'}:
+        with pytest.raises(AbortedError) as stopped:
+            admit_model_dispatch(carrier, owned)
+        assert not isinstance(stopped.value, ModelAdmissionRefused)
+    else:
+        with pytest.raises(ModelAdmissionRefused):
+            admit_model_dispatch(carrier, owned)
+    assert len(entries) == 1  # Retry only the read, never entry or a provider request.
+    assert len(probes) == (1 if verdict in {'stop', 'permanent'} else 2)
+    assert owned.authority_lost == (verdict == 'revoked')
+    assert not carrier.get('_storageWaits')
+
+
 def test_only_explicit_matching_context_can_supply_publication_authority():
     from lib.tasks_pkg.worker_binding import bind_conversation_worker, publication_arguments
     carrier = task()

@@ -20,6 +20,11 @@ const INDEX_MAGIC: &[u8; 8] = b"TDBHIP01";
 const PAGE_MAGIC: &[u8; 8] = b"TDBHLP01";
 const ROOT_MAGIC: &[u8; 8] = b"TDBHLR01";
 const VERSION: u32 = 1;
+/// A routing root that may still hold locations of sources its manifest
+/// retired (lazy retirement). Engines before 2026-11-08 read such a location
+/// as an integrity error, and they accept only `VERSION`: they refuse this
+/// root at open instead of failing reads later.
+const LAZY_ROOT_VERSION: u32 = 2;
 const INDEX_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4;
 const INDEX_ENTRY_BYTES: usize = 32 + 4 + 4;
 const PAGE_HEADER_BYTES: usize = 8 + 4 + 4;
@@ -216,10 +221,13 @@ pub(crate) struct RoutingRoot {
     // Weak witnesses are valid only for the exact verified byte allocation
     // still retained by BlockStore's bounded cache. New roots start fresh.
     verified_pages: Arc<Mutex<BTreeMap<BlockId, Weak<Vec<u8>>>>>,
+    /// Encoded as `LAZY_ROOT_VERSION`: some run may still hold locations of
+    /// retired sources. Only a full rewrite (`retain_sources`) clears it.
+    holds_retired: bool,
 }
 impl PartialEq for RoutingRoot {
     fn eq(&self, other: &Self) -> bool {
-        self.levels == other.levels
+        self.levels == other.levels && self.holds_retired == other.holds_retired
     }
 }
 impl Eq for RoutingRoot {}
@@ -227,6 +235,40 @@ impl Eq for RoutingRoot {}
 pub(crate) struct Catalog {
     pub root: RoutingRoot,
     pub sources: std::collections::BTreeSet<BlockId>,
+}
+
+/// Exact candidates for one exclusive recovery pass, in ordinary lookup order.
+/// Page failures are retained at their original position: a newer valid copy
+/// can still answer before an older broken page, while a needed I/O error is
+/// never consumed by preparation. No page bytes survive in this lookup.
+pub(crate) struct RecoveryLookup {
+    entries: BTreeMap<BlockId, Vec<RecoveryCandidate>>,
+}
+
+enum RecoveryCandidate {
+    Location(PayloadLocation),
+    PageError(Arc<io::Error>),
+}
+
+impl RecoveryLookup {
+    pub(crate) fn visit_locations(
+        &self, id: BlockId, visit: &mut dyn FnMut(PayloadLocation) -> io::Result<bool>,
+    ) -> Option<io::Result<()>> {
+        let entries = self.entries.get(&id)?;
+        Some((|| {
+            for entry in entries {
+                match entry {
+                    RecoveryCandidate::Location(location) => {
+                        if visit(*location)? { break; }
+                    }
+                    RecoveryCandidate::PageError(error) => {
+                        return Err(io::Error::new(error.kind(), Arc::clone(error)));
+                    }
+                }
+            }
+            Ok(())
+        })())
+    }
 }
 impl Catalog {
     pub(crate) fn new(manifest: &crate::history::HistoryManifest, root: RoutingRoot) -> Self {
@@ -239,6 +281,37 @@ impl Catalog {
                 .map(|reference| reference.block_id)
                 .collect(),
         }
+    }
+
+    /// Locations of `id` in the sources this manifest retains, in lookup
+    /// order. Retirement leaves routing pages untouched, so a retired
+    /// source's location stays in its run until a merge rewrites that run
+    /// (`RoutingRoot::append`); it is never an answer.
+    pub(crate) fn visit_locations(
+        &self,
+        blocks: &BlockStore,
+        id: BlockId,
+        visit: &mut dyn FnMut(PayloadLocation) -> io::Result<bool>,
+    ) -> io::Result<()> {
+        self.root.visit_locations(blocks, id, &mut |location| {
+            if self.sources.contains(&location.source) { visit(location) } else { Ok(false) }
+        })
+    }
+
+    pub(crate) fn lookup(&self, blocks: &BlockStore, id: BlockId) -> io::Result<Option<PayloadLocation>> {
+        let mut found = None;
+        self.visit_locations(blocks, id, &mut |location| {
+            found = Some(location);
+            Ok(true)
+        })?;
+        Ok(found)
+    }
+
+    pub(crate) fn prepare_recovery_lookup(
+        &self, blocks: &BlockStore, ids: impl Iterator<Item = BlockId>,
+        should_stop: &dyn Fn() -> bool,
+    ) -> io::Result<RecoveryLookup> {
+        self.root.prepare_recovery_lookup(blocks, ids, &self.sources, should_stop)
     }
 }
 
@@ -374,6 +447,15 @@ impl<'a> RunCursor<'a> {
             entries: Vec::new().into_iter(),
         }
     }
+    /// The next location whose source the publishing manifest retains.
+    fn next_retained(&mut self, retained: &BTreeSet<BlockId>) -> io::Result<Option<(BlockId, PayloadLocation)>> {
+        while let Some(entry) = self.next()? {
+            if retained.contains(&entry.1.source) {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
     fn next(&mut self) -> io::Result<Option<(BlockId, PayloadLocation)>> {
         if let Some(entry) = self.entries.next() {
             return Ok(Some(entry));
@@ -390,49 +472,130 @@ impl<'a> RunCursor<'a> {
         Ok(self.entries.next())
     }
 }
-fn merge_runs(blocks: &BlockStore, older: &Run, newer: &Run) -> io::Result<Run> {
+/// Merges two runs, dropping every location whose source `retained` no
+/// longer names. Both sides are filtered before duplicate IDs resolve: any
+/// retained location of a content-addressed block answers with its bytes.
+fn merge_runs(blocks: &BlockStore, older: &Run, newer: &Run, retained: &BTreeSet<BlockId>) -> io::Result<Run> {
     let mut old = RunCursor::new(blocks, older);
     let mut new = RunCursor::new(blocks, newer);
-    let mut a = old.next()?;
-    let mut b = new.next()?;
+    let mut a = old.next_retained(retained)?;
+    let mut b = new.next_retained(retained)?;
     let mut writer = RunWriter::new(blocks);
     while a.is_some() || b.is_some() {
         match (a, b) {
             (Some(left), Some(right)) if left.0 < right.0 => {
                 writer.push(left)?;
-                a = old.next()?;
+                a = old.next_retained(retained)?;
             }
             (Some(left), Some(right)) if left.0 == right.0 => {
                 writer.push(right)?;
-                a = old.next()?;
-                b = new.next()?;
+                a = old.next_retained(retained)?;
+                b = new.next_retained(retained)?;
             }
             (_, Some(right)) => {
                 writer.push(right)?;
-                b = new.next()?;
+                b = new.next_retained(retained)?;
             }
             (Some(left), None) => {
                 writer.push(left)?;
-                a = old.next()?;
+                a = old.next_retained(retained)?;
             }
             (None, None) => break,
         }
     }
     writer.finish()
 }
+fn lookup_page(bytes: &[u8], page: &PageReference, id: BlockId) -> Option<PayloadLocation> {
+    let mut low = 0;
+    let mut high = page.entries as usize;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let (candidate, location) = page_entry(bytes, middle);
+        match candidate.cmp(&id) {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => return Some(location),
+        }
+    }
+    None
+}
+
 fn size_level(entries: u64) -> usize {
     let quotient = (entries / BASE_LEVEL_ENTRIES).max(1);
     (63 - quotient.leading_zeros()) as usize
 }
 
 impl RoutingRoot {
+    /// Resolve only this open's selected IDs, reading each relevant page once
+    /// regardless of payload-cache capacity or WAL order. Errors stay attached
+    /// to affected IDs until replay actually needs that position in the run.
+    /// Locations in sources `retained` does not name are not candidates.
+    pub(crate) fn prepare_recovery_lookup(
+        &self, blocks: &BlockStore, ids: impl Iterator<Item = BlockId>,
+        retained: &BTreeSet<BlockId>, should_stop: &dyn Fn() -> bool,
+    ) -> io::Result<RecoveryLookup> {
+        let mut entries: BTreeMap<_, Vec<_>> = ids.map(|id| (id, Vec::new())).collect();
+        for run in self.levels.iter().flatten() {
+            for page in &run.pages {
+                if should_stop() {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "history recovery lookup cancelled"));
+                }
+                if entries.range(page.first..=page.last).next().is_none() { continue; }
+                let bytes = self.read_verified_page(blocks, page).map_err(Arc::new);
+                for (id, candidates) in entries.range_mut(page.first..=page.last) {
+                    if should_stop() {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "history recovery lookup cancelled"));
+                    }
+                    match &bytes {
+                        Ok(bytes) => {
+                            if let Some(location) = lookup_page(bytes, page, *id)
+                                .filter(|location| retained.contains(&location.source))
+                            {
+                                candidates.push(RecoveryCandidate::Location(location));
+                            }
+                        }
+                        Err(error) => candidates.push(RecoveryCandidate::PageError(Arc::clone(error))),
+                    }
+                }
+            }
+        }
+        Ok(RecoveryLookup { entries })
+    }
+
+    fn read_verified_page(&self, blocks: &BlockStore, page: &PageReference) -> io::Result<Arc<Vec<u8>>> {
+        let bytes = blocks.get_materialized_shared(page.id)?;
+        let verified = self.verified_pages.lock()
+            .map_err(|_| io::Error::other("history page verification lock poisoned"))?
+            .get(&page.id).and_then(Weak::upgrade)
+            .is_some_and(|old| Arc::ptr_eq(&old, &bytes));
+        if !verified {
+            validate_page(&bytes, page)?;
+            self.verified_pages.lock()
+                .map_err(|_| io::Error::other("history page verification lock poisoned"))?
+                .insert(page.id, Arc::downgrade(&bytes));
+        }
+        Ok(bytes)
+    }
+
+    /// Appends a run of new locations and carries it through occupied levels
+    /// like a binary counter. Every merge drops the locations whose source
+    /// `retained` (the segments of the manifest this root is published with)
+    /// no longer names: history retirement leaves routing pages untouched
+    /// (`Catalog` skips such locations), and the merge that rewrites a run
+    /// anyway is where they leave routing. Appended locations must name
+    /// retained sources.
     pub(crate) fn append(
         &self,
         blocks: &BlockStore,
         entries: &BTreeMap<BlockId, PayloadLocation>,
+        retained: &BTreeSet<BlockId>,
     ) -> io::Result<Self> {
         if entries.is_empty() {
             return Ok(self.clone());
+        }
+        if entries.values().any(|location| !retained.contains(&location.source)) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                "history routing appends a location its manifest does not retain"));
         }
         let mut writer = RunWriter::new(blocks);
         for (&id, &location) in entries {
@@ -442,6 +605,7 @@ impl RoutingRoot {
         let mut result = Self {
             levels: self.levels.clone(),
             verified_pages: Arc::default(),
+            holds_retired: self.holds_retired,
         };
         let mut level = size_level(run.entries);
         loop {
@@ -452,7 +616,7 @@ impl RoutingRoot {
                 .levels
                 .resize_with(result.levels.len().max(level + 1), || None);
             if let Some(older) = result.levels[level].take() {
-                run = merge_runs(blocks, &older, &run)?;
+                run = merge_runs(blocks, &older, &run, retained)?;
                 level = (level + 1).max(size_level(run.entries));
             } else {
                 result.levels[level] = Some(run);
@@ -473,41 +637,29 @@ impl RoutingRoot {
             let Some(page) = run.pages.get(position).filter(|page| page.first <= id) else {
                 continue;
             };
-            let bytes = blocks.get_materialized_shared(page.id)?;
-            let verified = self
-                .verified_pages
-                .lock()
-                .map_err(|_| io::Error::other("history page verification lock poisoned"))?
-                .get(&page.id)
-                .and_then(Weak::upgrade)
-                .is_some_and(|old| Arc::ptr_eq(&old, &bytes));
-            if !verified {
-                validate_page(&bytes, page)?;
-                self.verified_pages
-                    .lock()
-                    .map_err(|_| io::Error::other("history page verification lock poisoned"))?
-                    .insert(page.id, Arc::downgrade(&bytes));
-            }
-            let mut low = 0;
-            let mut high = page.entries as usize;
-            while low < high {
-                let middle = low + (high - low) / 2;
-                let entry = page_entry(&bytes, middle);
-                match entry.0.cmp(&id) {
-                    std::cmp::Ordering::Less => low = middle + 1,
-                    std::cmp::Ordering::Greater => high = middle,
-                    std::cmp::Ordering::Equal => {
-                        if visit(entry.1)? {
-                            return Ok(());
-                        }
-                        break;
-                    }
-                }
+            let bytes = self.read_verified_page(blocks, page)?;
+            if let Some(location) = lookup_page(&bytes, page, id) {
+                if visit(location)? { return Ok(()); }
             }
         }
         Ok(())
     }
 
+    /// Every source a location of any run names, reading every page.
+    #[cfg(test)]
+    pub(crate) fn location_sources(&self, blocks: &BlockStore) -> io::Result<BTreeSet<BlockId>> {
+        let mut sources = BTreeSet::new();
+        for run in self.levels.iter().flatten() {
+            let mut cursor = RunCursor::new(blocks, run);
+            while let Some((_, location)) = cursor.next()? {
+                sources.insert(location.source);
+            }
+        }
+        Ok(sources)
+    }
+
+    /// Unfiltered: may answer a retired source. Readers use `Catalog::lookup`.
+    #[cfg(test)]
     pub(crate) fn lookup(
         &self,
         blocks: &BlockStore,
@@ -521,29 +673,60 @@ impl RoutingRoot {
         Ok(found)
     }
 
-    /// Bulk operator compaction keeps one streaming cursor/page writer instead
-    /// of collecting every retired source's locations. Automatic, bounded
-    /// slices use remove_locations to avoid a full-history publication hold.
+    /// The same pages, published with a manifest that retired some of their
+    /// sources: encoded as `LAZY_ROOT_VERSION`, which older engines refuse.
+    pub(crate) fn with_retired_sources(&self) -> Self {
+        Self {
+            levels: self.levels.clone(),
+            verified_pages: Arc::clone(&self.verified_pages),
+            holds_retired: true,
+        }
+    }
+
+    pub(crate) fn holds_retired(&self) -> bool {
+        self.holds_retired
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        if self.holds_retired { LAZY_ROOT_VERSION } else { VERSION }
+    }
+
+    pub(crate) fn entries(&self) -> u64 {
+        self.levels.iter().flatten().map(|run| run.entries).sum()
+    }
+
+    /// Bulk operator compaction and the downgrade rewrite stream every run
+    /// once through one page writer instead of collecting every retired
+    /// source's locations: a k-way merge in which, as in `Catalog` lookups,
+    /// the lowest level holding a retained location of an ID answers.
+    /// Merging the runs pairwise wrote one complete run per extra level.
+    /// Automatic slices leave routing untouched (lazy retirement, see
+    /// `append`). The result holds only `keep`'s locations, so it is encoded
+    /// as `VERSION` again.
     pub(crate) fn retain_sources(
         &self,
         blocks: &BlockStore,
         keep: &BTreeSet<BlockId>,
     ) -> io::Result<Self> {
-        let mut merged: Option<Run> = None;
-        for run in self.levels.iter().flatten().rev() {
-            merged = Some(match merged {
-                Some(previous) => merge_runs(blocks, &previous, run)?,
-                None => run.clone(),
-            });
-        }
-        let Some(merged) = merged else {
-            return Ok(Self::default());
-        };
-        let mut cursor = RunCursor::new(blocks, &merged);
+        let mut cursors: Vec<RunCursor> =
+            self.levels.iter().flatten().map(|run| RunCursor::new(blocks, run)).collect();
+        let mut heads = cursors
+            .iter_mut()
+            .map(|cursor| cursor.next_retained(keep))
+            .collect::<io::Result<Vec<_>>>()?;
         let mut writer = RunWriter::new(blocks);
-        while let Some(entry) = cursor.next()? {
-            if keep.contains(&entry.1.source) {
-                writer.push(entry)?;
+        loop {
+            let lowest = heads
+                .iter()
+                .enumerate()
+                .filter_map(|(level, head)| head.map(|(id, location)| (id, level, location)))
+                .min_by_key(|&(id, level, _)| (id, level));
+            let Some((id, _, location)) = lowest else { break };
+            writer.push((id, location))?;
+            for (cursor, head) in cursors.iter_mut().zip(heads.iter_mut()) {
+                if head.is_some_and(|(other, _)| other == id) {
+                    *head = cursor.next_retained(keep)?;
+                }
             }
         }
         let run = writer.finish()?;
@@ -553,67 +736,7 @@ impl RoutingRoot {
         let level = size_level(run.entries);
         let mut levels = vec![None; level + 1];
         levels[level] = Some(run);
-        Ok(Self { levels, verified_pages: Arc::default() })
-    }
-
-    /// Retire exact (payload, source) locations after their authenticated
-    /// SegmentIndex payloads have durable ordinary copies. The index witnesses
-    /// identify candidate pages without reading unrelated history. Preserve
-    /// run precedence and immutable pages; never merge the full routing tree
-    /// while history pruning owns the publication lane needed by WAL rotation.
-    pub(crate) fn remove_locations(
-        &self,
-        blocks: &BlockStore,
-        retired: &BTreeSet<(BlockId, BlockId)>,
-    ) -> io::Result<Self> {
-        if retired.is_empty() {
-            return Ok(self.clone());
-        }
-        let mut result = Self {
-            levels: Vec::with_capacity(self.levels.len()),
-            verified_pages: Arc::default(),
-        };
-        for run in &self.levels {
-            let Some(run) = run else {
-                result.levels.push(None);
-                continue;
-            };
-            let mut retained_run = Run { entries: 0, pages: Vec::with_capacity(run.pages.len()) };
-            for page in &run.pages {
-                let range = (page.first, BlockId([0; 32]))
-                    ..=(page.last, BlockId([u8::MAX; 32]));
-                let retained_page = if retired.range(range).next().is_none() {
-                    Some(page.clone())
-                } else {
-                    // Always validate the actual candidate bytes, including
-                    // ordering, offsets and the page's identity/range witness.
-                    let mut entries = decode_page(&blocks.get_materialized_shared(page.id)?, page)?;
-                    entries.retain(|(id, location)| !retired.contains(&(*id, location.source)));
-                    if entries.len() == page.entries as usize {
-                        Some(page.clone())
-                    } else if entries.is_empty() {
-                        None
-                    } else {
-                        Some(PageReference {
-                            id: blocks.put_loose(&encode_page(&entries)?)?,
-                            first: entries.first().unwrap().0,
-                            last: entries.last().unwrap().0,
-                            entries: entries.len() as u32,
-                        })
-                    }
-                };
-                if let Some(page) = retained_page {
-                    retained_run.entries += u64::from(page.entries);
-                    retained_run.pages.push(page);
-                }
-            }
-            result.levels.push((retained_run.entries > 0).then_some(retained_run));
-        }
-        // The existing format permits gaps, but never a trailing empty level.
-        while result.levels.last().is_some_and(Option::is_none) {
-            result.levels.pop();
-        }
-        Ok(result)
+        Ok(Self { levels, verified_pages: Arc::default(), holds_retired: false })
     }
 
     pub(crate) fn page_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
@@ -629,7 +752,8 @@ impl RoutingRoot {
         }
         let mut out = Vec::new();
         out.extend_from_slice(ROOT_MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
+        let version = if self.holds_retired { LAZY_ROOT_VERSION } else { VERSION };
+        out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&(self.levels.len() as u32).to_le_bytes());
         for run in &self.levels {
             out.push(u8::from(run.is_some()));
@@ -669,10 +793,11 @@ impl RoutingRoot {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let version = bytes.get(8..12).map(|field| u32::from_le_bytes(field.try_into().unwrap()));
         if bytes.len() < 16
             || bytes.len() > MAX_BLOCK_BYTES
             || &bytes[..8] != ROOT_MAGIC
-            || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != VERSION
+            || !matches!(version, Some(VERSION | LAZY_ROOT_VERSION))
         {
             return Err(invalid("history routing root header mismatch"));
         }
@@ -728,6 +853,7 @@ impl RoutingRoot {
         let root = Self {
             levels,
             verified_pages: Arc::default(),
+            holds_retired: version == Some(LAZY_ROOT_VERSION),
         };
         if root.encode()? != bytes {
             return Err(invalid("history routing root is not canonical"));
@@ -750,163 +876,262 @@ mod tests {
     }
 
     #[test]
-    fn pruning_preserves_unaffected_routing_pages() {
-        // Separate key ranges model old history unrelated to this retirement.
-        // Pruning one source must not copy those immutable pages into new runs.
-        let blocks = store();
-        let retired = BlockId([11; 32]);
-        let retained = BlockId([12; 32]);
-        let location = |source| PayloadLocation {
-            source, source_bytes: 16, offset: 0, length: 1,
-        };
-        let older = BTreeMap::from([(BlockId([20; 32]), location(retained))]);
-        let newer = BTreeMap::from([(BlockId([21; 32]), location(retired))]);
-        let mut old_writer = RunWriter::new(&blocks);
-        for entry in older { old_writer.push(entry).unwrap(); }
-        let mut other_writer = RunWriter::new(&blocks);
-        other_writer.push((BlockId([22; 32]), location(retained))).unwrap();
-        let mut old_run = old_writer.finish().unwrap();
-        let other_run = other_writer.finish().unwrap();
-        old_run.entries += other_run.entries;
-        old_run.pages.extend(other_run.pages);
-        let mut new_writer = RunWriter::new(&blocks);
-        for entry in newer { new_writer.push(entry).unwrap(); }
-        let root = RoutingRoot { levels: vec![Some(new_writer.finish().unwrap()),
-            Some(old_run)], verified_pages: Arc::default() };
-        let unchanged = root.levels[1].as_ref().unwrap().pages[0].id;
-        let pruned = root.remove_locations(&blocks, &BTreeSet::from([(BlockId([21; 32]), retired)])).unwrap();
-        assert_eq!(pruned.lookup(&blocks, BlockId([21; 32])).unwrap(), None);
-        assert_eq!(pruned.lookup(&blocks, BlockId([20; 32])).unwrap(), Some(location(retained)));
-        assert!(pruned.page_ids().any(|id| id == unchanged),
-            "unrelated immutable routing pages must survive a small retirement");
-        assert_eq!(root.lookup(&blocks, BlockId([21; 32])).unwrap(), Some(location(retired)),
-            "a captured old routing root must remain readable");
-    }
-
-    #[test]
-    fn pruning_io_depends_on_affected_pages_not_retained_history() {
-        use crate::vfs::Operation;
-        for page_count in [4_u64, 64, 512] {
-            let vfs = Arc::new(DeterministicVfs::new(None));
-            vfs.create_dir(Path::new("/data")).unwrap();
-            vfs.sync_directory(Path::new("/")).unwrap();
-            let blocks = BlockStore::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
-            blocks.set_cache_capacity_bytes(0).unwrap();
-            let retired_source = BlockId([11; 32]);
-            let retained_source = BlockId([12; 32]);
-            let key = |page: u64, slot: u8| {
-                let mut bytes = [0; 32];
-                bytes[..8].copy_from_slice(&page.to_be_bytes());
-                bytes[31] = slot;
-                BlockId(bytes)
-            };
-            let location = |source| PayloadLocation { source, source_bytes: 16, offset: 0, length: 1 };
-            let mut pages = Vec::new();
-            for page in 0..page_count {
-                let mut writer = RunWriter::new(&blocks);
-                for slot in 0..3 {
-                    let source = if page == 1 && slot == 1 { retired_source } else { retained_source };
-                    writer.push((key(page, slot), location(source))).unwrap();
-                }
-                pages.extend(writer.finish().unwrap().pages);
-            }
-            let root = RoutingRoot { levels: vec![Some(Run { entries: page_count * 3, pages })],
-                verified_pages: Arc::default() };
-            let retired = BTreeSet::from([(key(1, 1), retired_source)]);
-            vfs.arm_fault(None).unwrap();
-            let pruned = root.remove_locations(&blocks, &retired).unwrap();
-            let trace = vfs.trace().unwrap();
-            let reads = trace.iter().filter(|op| **op == Operation::Read).count();
-            let writes = trace.iter().filter(|op| **op == Operation::Write).count();
-            println!("history pruning: retained_pages={page_count} reads={reads} writes={writes}");
-            assert!(reads <= 4, "small retirement scanned unrelated history: {reads} reads for {page_count} pages");
-            assert!(writes <= 4, "small retirement rewrote unrelated history: {writes} writes");
-            assert_eq!(pruned.lookup(&blocks, key(1, 1)).unwrap(), None);
-            for (page, slot) in [(0, 0), (1, 0), (1, 2), (page_count - 1, 2)] {
-                assert_eq!(pruned.lookup(&blocks, key(page, slot)).unwrap(), Some(location(retained_source)));
-            }
-            assert_eq!(root.lookup(&blocks, key(1, 1)).unwrap(), Some(location(retired_source)));
-            let reopened = RoutingRoot::decode(&pruned.encode().unwrap()).unwrap();
-            assert_eq!(reopened, pruned);
-            let appended = reopened.append(&blocks, &BTreeMap::from([
-                (key(1, 1), location(retained_source)),
-            ])).unwrap();
-            assert_eq!(appended.lookup(&blocks, key(1, 1)).unwrap(), Some(location(retained_source)));
-        }
-    }
-
-    #[test]
-    fn pruning_preserves_other_sources_of_the_same_payload_and_rejects_bad_pages() {
+    fn recovery_lookup_matches_ordered_candidates_absence_and_unselected_ids() {
         let blocks = store();
         let id = BlockId([20; 32]);
-        let old = PayloadLocation { source: BlockId([11; 32]), source_bytes: 16, offset: 0, length: 1 };
-        let new = PayloadLocation { source: BlockId([12; 32]), ..old };
-        let mut old_writer = RunWriter::new(&blocks);
-        old_writer.push((id, old)).unwrap();
-        let mut new_writer = RunWriter::new(&blocks);
-        new_writer.push((id, new)).unwrap();
-        let root = RoutingRoot { levels: vec![Some(new_writer.finish().unwrap()),
-            Some(old_writer.finish().unwrap())], verified_pages: Arc::default() };
-        let pruned = root.remove_locations(&blocks, &BTreeSet::from([(id, old.source)])).unwrap();
-        assert_eq!(pruned.lookup(&blocks, id).unwrap(), Some(new));
-        assert_eq!(RoutingRoot::decode(&pruned.encode().unwrap()).unwrap(), pruned);
-        let empty = pruned.remove_locations(&blocks, &BTreeSet::from([(id, new.source)])).unwrap();
-        assert_eq!(RoutingRoot::decode(&empty.encode().unwrap()).unwrap(), RoutingRoot::default());
-        assert_eq!(root.remove_locations(&blocks, &BTreeSet::new()).unwrap(), root);
-        let mut malformed = root.clone();
-        malformed.levels[0].as_mut().unwrap().pages[0].entries += 1;
-        assert_eq!(malformed.remove_locations(&blocks, &BTreeSet::from([(id, old.source)]))
-            .unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let absent = BlockId([21; 32]);
+        let location = |source| PayloadLocation { source: BlockId([source; 32]), source_bytes: 16, offset: 0, length: 1 };
+        let make_run = |source| {
+            let mut writer = RunWriter::new(&blocks);
+            writer.push((id, location(source))).unwrap();
+            writer.push((BlockId([22; 32]), location(source))).unwrap();
+            writer.finish().unwrap()
+        };
+        let root = RoutingRoot { levels: vec![Some(make_run(2)), Some(make_run(1))], verified_pages: Arc::default(), holds_retired: false };
+        blocks.set_cache_capacity_bytes(0).unwrap();
+        let both = BTreeSet::from([BlockId([1; 32]), BlockId([2; 32])]);
+        let prepared = root.prepare_recovery_lookup(&blocks, [id, absent].into_iter(), &both, &|| false).unwrap();
+        for selected in [id, absent] {
+            let mut ordinary = Vec::new();
+            root.visit_locations(&blocks, selected, &mut |location| { ordinary.push(location); Ok(false) }).unwrap();
+            let mut batched = Vec::new();
+            prepared.visit_locations(selected, &mut |location| { batched.push(location); Ok(false) }).unwrap().unwrap();
+            assert_eq!(batched, ordinary);
+        }
+        assert!(prepared.visit_locations(BlockId([23; 32]), &mut |_| panic!("unselected ID")).is_none());
+        let mut first = Vec::new();
+        prepared.visit_locations(id, &mut |location| { first.push(location); Ok(true) }).unwrap().unwrap();
+        assert_eq!(first, vec![location(2)]);
+        let newer_retired = root.prepare_recovery_lookup(
+            &blocks, [id].into_iter(), &BTreeSet::from([BlockId([1; 32])]), &|| false).unwrap();
+        let mut remaining = Vec::new();
+        newer_retired.visit_locations(id, &mut |location| { remaining.push(location); Ok(false) }).unwrap().unwrap();
+        assert_eq!(remaining, vec![location(1)], "a retired source is never a recovery candidate");
     }
 
     #[test]
-    fn routing_merges_overlapping_runs_and_rewrites_pruned_sources() {
+    fn recovery_lookup_keeps_page_errors_at_their_original_candidate_position() {
+        use crate::vfs::{FaultAction, FaultRule, OpenRequest};
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(Path::new("/data")).unwrap();
+        vfs.sync_directory(Path::new("/")).unwrap();
+        let blocks = BlockStore::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        let id = BlockId([20; 32]);
+        let run = |source| {
+            let mut writer = RunWriter::new(&blocks);
+            writer.push((id, PayloadLocation { source: BlockId([source; 32]), source_bytes: 1, offset: 0, length: 1 })).unwrap();
+            writer.finish().unwrap()
+        };
+        let root = RoutingRoot { levels: vec![Some(run(2)), Some(run(1))], verified_pages: Arc::default(), holds_retired: false };
+        let both = BTreeSet::from([BlockId([1; 32]), BlockId([2; 32])]);
+        let old_page = root.levels[1].as_ref().unwrap().pages[0].id.to_hex();
+        let path = format!("/data/blocks/{}/{old_page}.blk", &old_page[..2]);
+        vfs.open(Path::new(&path), OpenRequest { write: true, ..OpenRequest::default() }).unwrap()
+            .write_all_at(16, b"!").unwrap();
+        blocks.set_cache_capacity_bytes(0).unwrap();
+        let prepared = root.prepare_recovery_lookup(&blocks, [id].into_iter(), &both, &|| false).unwrap();
+        prepared.visit_locations(id, &mut |_| Ok(true)).unwrap().unwrap();
+        assert_eq!(prepared.visit_locations(id, &mut |_| Ok(false)).unwrap().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        // A non-repairable I/O error encountered during preparation must not
+        // disappear just because the transient fault has been consumed.
+        vfs.arm_fault(Some(FaultRule { operation_number: 1,
+            action: FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied) })).unwrap();
+        let failed = root.prepare_recovery_lookup(&blocks, [id].into_iter(), &both, &|| false).unwrap();
+        vfs.arm_fault(None).unwrap();
+        assert_eq!(failed.visit_locations(id, &mut |_| panic!("failed first page")).unwrap()
+            .unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(root.prepare_recovery_lookup(&blocks, [id].into_iter(), &both, &|| true).err().unwrap().kind(), io::ErrorKind::Interrupted);
+        assert!(vfs.trace().unwrap().is_empty(), "cancelled preparation performed I/O");
+    }
+
+    #[test]
+    fn merges_drop_retired_sources_and_keep_retained_duplicates() {
+        // A merge rewrites its runs anyway, so it is where retired locations
+        // leave routing. A retained copy in the older run survives even when
+        // the newer run's copy of the same block names a retired source.
         let blocks = store();
-        let old = BlockId([11; 32]);
-        let new = BlockId([12; 32]);
+        let (retired, older, newer) = (BlockId([11; 32]), BlockId([12; 32]), BlockId([13; 32]));
+        let location = |source| PayloadLocation { source, source_bytes: 16, offset: 0, length: 1 };
+        let shared = BlockId([20; 32]);
+        let mut writer = RunWriter::new(&blocks);
+        writer.push((shared, location(older))).unwrap();
+        writer.push((BlockId([21; 32]), location(retired))).unwrap();
+        let old_run = writer.finish().unwrap();
+        let mut writer = RunWriter::new(&blocks);
+        writer.push((shared, location(retired))).unwrap();
+        writer.push((BlockId([22; 32]), location(newer))).unwrap();
+        let new_run = writer.finish().unwrap();
+        let merged = merge_runs(&blocks, &old_run, &new_run, &BTreeSet::from([older, newer])).unwrap();
+        assert_eq!(merged.entries, 2);
+        let root = RoutingRoot { levels: vec![Some(merged)], verified_pages: Arc::default(), holds_retired: false };
+        assert_eq!(root.lookup(&blocks, shared).unwrap(), Some(location(older)));
+        assert_eq!(root.lookup(&blocks, BlockId([21; 32])).unwrap(), None);
+        assert_eq!(root.lookup(&blocks, BlockId([22; 32])).unwrap(), Some(location(newer)));
+        assert_eq!(RoutingRoot::decode(&root.encode().unwrap()).unwrap(), root);
+    }
+
+    #[test]
+    fn catalog_lookups_skip_locations_of_retired_sources() {
+        // Retirement leaves a location in its page; only the manifest's
+        // sources answer, for ordinary and prepared recovery lookups alike.
+        let blocks = store();
+        let (retired, retained) = (BlockId([11; 32]), BlockId([12; 32]));
+        let location = |source| PayloadLocation { source, source_bytes: 16, offset: 0, length: 1 };
+        let (id, kept) = (BlockId([20; 32]), BlockId([21; 32]));
+        let root = RoutingRoot::default()
+            .append(&blocks, &BTreeMap::from([(id, location(retired)), (kept, location(retained))]),
+                &BTreeSet::from([retired, retained]))
+            .unwrap();
+        let catalog = Catalog { root, sources: BTreeSet::from([retained]) };
+        assert_eq!(catalog.root.lookup(&blocks, id).unwrap(), Some(location(retired)), "the page still holds it");
+        assert_eq!(catalog.lookup(&blocks, id).unwrap(), None);
+        assert_eq!(catalog.lookup(&blocks, kept).unwrap(), Some(location(retained)));
+        let prepared = catalog.prepare_recovery_lookup(&blocks, [id, kept].into_iter(), &|| false).unwrap();
+        prepared.visit_locations(id, &mut |_| panic!("a retired source answered")).unwrap().unwrap();
+        let mut found = Vec::new();
+        prepared.visit_locations(kept, &mut |location| { found.push(location); Ok(false) }).unwrap().unwrap();
+        assert_eq!(found, vec![location(retained)]);
+    }
+
+    /// Three runs on separate levels; some IDs repeat across levels under
+    /// other sources, and source 4 is retired by `keep`.
+    fn layered_root(blocks: &BlockStore) -> (RoutingRoot, BTreeSet<BlockId>) {
+        let source = |n: u8| BlockId([n; 32]);
+        let id = |i: usize| BlockId::for_payload(format!("layered {i}").as_bytes());
+        let location = |source, i: usize| PayloadLocation { source, source_bytes: 4096, offset: (i % 4000) as u32, length: 1 };
+        let all = BTreeSet::from([source(1), source(2), source(3), source(4)]);
+        let run = |range: std::ops::Range<usize>, pick: &dyn Fn(usize) -> BlockId| -> BTreeMap<_, _> {
+            range.map(|i| (id(i), location(pick(i), i))).collect()
+        };
+        let root = RoutingRoot::default()
+            .append(blocks, &run(0..16_384, &|_| source(1)), &all).unwrap()
+            .append(blocks, &run(8_192..16_384, &|i| source(if i % 2 == 0 { 2 } else { 4 })), &all).unwrap()
+            .append(blocks, &run(12_288..16_384, &|i| source(if i % 3 == 0 { 4 } else { 3 })), &all).unwrap();
+        assert_eq!(root.levels.iter().flatten().count(), 3, "the fixture keeps three separate runs");
+        (root, BTreeSet::from([source(1), source(2), source(3)]))
+    }
+
+    fn counting_store() -> (Arc<DeterministicVfs>, BlockStore) {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(Path::new("/data")).unwrap();
+        vfs.sync_directory(Path::new("/")).unwrap();
+        let blocks = BlockStore::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        (vfs, blocks)
+    }
+
+    fn files_written(vfs: &DeterministicVfs) -> usize {
+        vfs.trace().unwrap().iter().filter(|operation| **operation == crate::vfs::Operation::Rename).count()
+    }
+
+    /// Bulk retention merged the runs pairwise from the oldest level down and
+    /// wrote every intermediate run (live 2026-11-08: 6 runs of ~11.6 GB
+    /// together). One k-way pass writes the retained run once and answers
+    /// like the pairwise merge and `Catalog`: the lowest level holding a
+    /// retained location of an ID wins.
+    #[test]
+    fn retain_sources_writes_one_run_with_the_answers_of_a_pairwise_merge() {
+        let (vfs, blocks) = counting_store();
+        let (root, keep) = layered_root(&blocks);
+        vfs.arm_fault(None).unwrap();
+        let streamed = root.retain_sources(&blocks, &keep).unwrap();
+        let streamed_pages = streamed.page_ids().count();
+        assert_eq!(files_written(&vfs), streamed_pages, "only the retained run is written");
+
+        let (pairwise_vfs, pairwise_blocks) = counting_store();
+        let (pairwise_root, _) = layered_root(&pairwise_blocks);
+        pairwise_vfs.arm_fault(None).unwrap();
+        let mut merged: Option<Run> = None;
+        for run in pairwise_root.levels.iter().flatten().rev() {
+            merged = Some(match merged {
+                Some(previous) => merge_runs(&pairwise_blocks, &previous, run, &keep).unwrap(),
+                None => run.clone(),
+            });
+        }
+        let merged = merged.unwrap();
+        assert!(files_written(&pairwise_vfs) > streamed_pages, "the pairwise merge writes an intermediate run");
+        assert_eq!(streamed.levels.iter().flatten().collect::<Vec<_>>(), vec![&merged]);
+        assert_eq!(streamed.version(), VERSION);
+
+        let catalog = Catalog { root: root.clone(), sources: keep.clone() };
+        for i in 0..16_384 {
+            let id = BlockId::for_payload(format!("layered {i}").as_bytes());
+            assert_eq!(streamed.lookup(&blocks, id).unwrap(), catalog.lookup(&blocks, id).unwrap(), "ID {i}");
+        }
+        assert_eq!(streamed.entries(), 16_384, "every ID keeps its run-1 location at least");
+    }
+
+    #[test]
+    fn lazily_retired_roots_carry_a_version_older_engines_refuse() {
+        // Before 2026-11-08 an engine read a location outside its manifest as
+        // an integrity error and accepted only version 1: a root that may
+        // still hold retired locations must fail its open instead.
+        let blocks = store();
+        let (retired, retained) = (BlockId([11; 32]), BlockId([12; 32]));
+        let location = |source| PayloadLocation { source, source_bytes: 16, offset: 0, length: 1 };
+        let root = RoutingRoot::default()
+            .append(&blocks, &BTreeMap::from([(BlockId([20; 32]), location(retired)),
+                (BlockId([21; 32]), location(retained))]), &BTreeSet::from([retired, retained]))
+            .unwrap();
+        let version = |root: &RoutingRoot| u32::from_le_bytes(root.encode().unwrap()[8..12].try_into().unwrap());
+        assert_eq!(version(&root), VERSION);
+        let lazy = root.with_retired_sources();
+        assert_eq!(version(&lazy), LAZY_ROOT_VERSION);
+        assert_eq!(RoutingRoot::decode(&lazy.encode().unwrap()).unwrap(), lazy);
+        assert!(lazy.page_ids().eq(root.page_ids()), "no page is rewritten");
+        let appended = lazy
+            .append(&blocks, &BTreeMap::from([(BlockId([22; 32]), location(retained))]), &BTreeSet::from([retained]))
+            .unwrap();
+        assert_eq!(version(&appended), LAZY_ROOT_VERSION, "an untouched run may still hold retired locations");
+        let rewritten = lazy.retain_sources(&blocks, &BTreeSet::from([retained])).unwrap();
+        assert_eq!(version(&rewritten), VERSION);
+        assert_eq!(rewritten.lookup(&blocks, BlockId([20; 32])).unwrap(), None);
+        let mut unknown = lazy.encode().unwrap();
+        unknown[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        assert_eq!(RoutingRoot::decode(&unknown).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn appends_refuse_locations_their_manifest_does_not_retain() {
+        let blocks = store();
+        let location = PayloadLocation { source: BlockId([11; 32]), source_bytes: 16, offset: 0, length: 1 };
+        let error = RoutingRoot::default()
+            .append(&blocks, &BTreeMap::from([(BlockId([20; 32]), location)]), &BTreeSet::new())
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn routing_merges_overlapping_runs_and_drop_retired_sources() {
+        let blocks = store();
+        let (old, new, newest) = (BlockId([11; 32]), BlockId([12; 32]), BlockId([13; 32]));
+        let location = |source, batch| PayloadLocation { source, source_bytes: 16, offset: batch, length: 1 };
+        let id = |index: u32| BlockId::for_payload(&index.to_le_bytes());
         let mut root = RoutingRoot::default();
+        // Batches 0-2 route IDs 0..5000 to `old`; batches 3-6 route 2500..7500
+        // to `new`, superseding half of them.
         for batch in 0..7_u32 {
-            let source = if batch < 3 { old } else { new };
-            let entries = (0..5000_u32)
-                .map(|index| {
-                    let id = BlockId::for_payload(&index.to_le_bytes());
-                    (
-                        id,
-                        PayloadLocation {
-                            source,
-                            source_bytes: 16,
-                            offset: batch,
-                            length: 1,
-                        },
-                    )
-                })
-                .collect();
-            root = root.append(&blocks, &entries).unwrap();
+            let (source, ids) = if batch < 3 { (old, 0..5000) } else { (new, 2500..7500) };
+            let entries = ids.map(|index| (id(index), location(source, batch))).collect();
+            root = root.append(&blocks, &entries, &BTreeSet::from([old, new])).unwrap();
             assert_eq!(RoutingRoot::decode(&root.encode().unwrap()).unwrap(), root);
         }
-        for index in [0_u32, 2500, 4999] {
-            let id = BlockId::for_payload(&index.to_le_bytes());
+        for index in [2500_u32, 4999, 7499] {
             let mut candidates = Vec::new();
-            root.visit_locations(&blocks, id, &mut |location| {
-                candidates.push(location);
-                Ok(false)
-            })
-            .unwrap();
+            root.visit_locations(&blocks, id(index), &mut |location| { candidates.push(location); Ok(false) }).unwrap();
             assert!(!candidates.is_empty());
             assert!(candidates.iter().all(|location| location.source == new));
         }
-        let retained = root
-            .remove_locations(&blocks, &(0..5000_u32).map(|index| (BlockId::for_payload(&index.to_le_bytes()), old)).collect())
-            .unwrap();
-        assert!(retained
-            .lookup(&blocks, BlockId::for_payload(&4999_u32.to_le_bytes()))
-            .unwrap()
-            .is_some());
-        assert!(retained
-            .remove_locations(&blocks, &(0..5000_u32).map(|index| (BlockId::for_payload(&index.to_le_bytes()), new)).collect())
-            .unwrap()
-            .levels
-            .is_empty());
+        assert_eq!(root.lookup(&blocks, id(0)).unwrap().map(|location| location.source), Some(old));
+        // `old` retires. The eighth append carries through every level, so
+        // its merges rewrite every run and drop `old`'s remaining locations.
+        let entries = (10_000..10_010).map(|index| (id(index), location(newest, 7))).collect();
+        root = root.append(&blocks, &entries, &BTreeSet::from([new, newest])).unwrap();
+        assert_eq!(root.levels.iter().flatten().count(), 1);
+        assert_eq!(root.levels.iter().flatten().map(|run| run.entries).sum::<u64>(), 5010);
+        assert_eq!(root.lookup(&blocks, id(0)).unwrap(), None);
+        assert_eq!(root.lookup(&blocks, id(2500)).unwrap().map(|location| location.source), Some(new));
+        assert_eq!(root.lookup(&blocks, id(10_009)).unwrap().map(|location| location.source), Some(newest));
+        assert_eq!(RoutingRoot::decode(&root.encode().unwrap()).unwrap(), root);
     }
 
     #[test]
@@ -925,7 +1150,7 @@ mod tests {
                 )
             })
             .collect();
-        let root = RoutingRoot::default().append(&blocks, &entries).unwrap();
+        let root = RoutingRoot::default().append(&blocks, &entries, &BTreeSet::from([BlockId([42; 32])])).unwrap();
         assert_eq!(root.page_ids().count(), 2);
         blocks.set_cache_capacity_bytes(0).unwrap();
         for (&id, &location) in entries
@@ -958,7 +1183,7 @@ mod tests {
         assert!(bad.encode().is_err());
         let blocks = store();
         let root = RoutingRoot::default()
-            .append(&blocks, &index.locations().collect())
+            .append(&blocks, &index.locations().collect(), &BTreeSet::from([source]))
             .unwrap();
         let bytes = root.encode().unwrap();
         for length in 0..bytes.len() {

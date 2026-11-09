@@ -105,7 +105,7 @@ def _emit_structural(task, first, count):
 @pytest.mark.parametrize('chunk', [None, 16])
 def test_a_queued_structural_backlog_commits_in_one_transaction_per_budget_chunk(
         turn_service, storage, owner, monkeypatch, request, chunk):
-    from lib.storage import storage_event_policy
+    from lib.agent_core import storage_event_policy
     if chunk is not None:
         budget = replace(storage_event_policy.resolve_storage_event_budget(),
                          batch_max_events=chunk)

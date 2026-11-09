@@ -2,7 +2,7 @@
 """tests/llm_dispatch/test_key_stats_model_exhaustion.py — per-(key, model) billing-stop
 granularity guards (epic pt_69e9d6038c9344dc, 2026-07-28 incident).
 
-The incident: sankuai_key_1 took an Aliyun ``insufficient_quota`` on
+The incident: example_corp_key_1 took an Aliyun ``insufficient_quota`` on
 qwen3.5-plus (11:10:34) and ``mark_key_exhausted`` flipped the KEY-WIDE
 flag — on an aggregating gateway where the same key also routes
 kimi-k3→Moonshot, a qwen billing-stop cross-poisoned kimi capacity. And
@@ -171,14 +171,22 @@ class TestStrictBillingStopAdmission:
 
     def test_strict_context_never_last_resort_promotes_billing_dead_key(
             self, fresh_stats):
+        """A recorded billing stop is not last-resort promoted under EITHER
+        admission policy (2026-11-06 edit benchmark: every DeepSeek-V4-Pro
+        credential answered 402 and ordinary admission kept re-picking one,
+        one live 402 per request). Last-resort survives only for a
+        credential-health disable — see test_billing_stop_no_last_resort."""
         ks = fresh_stats
         ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
 
-        assert ks.is_key_enabled(PROV, KEY) is True, (
-            'ordinary admission preserves the historical sole-key '
-            'last-resort policy')
+        assert ks.is_key_enabled(PROV, KEY) is False
         with ks.strict_billing_stop_admission():
             assert ks.is_key_enabled(PROV, KEY) is False
+        # The owner's explicit re-enable is the way back, in both contexts.
+        ks.set_key_override(PROV, KEY, True)
+        assert ks.is_key_enabled(PROV, KEY) is True
+        with ks.strict_billing_stop_admission():
+            assert ks.is_key_enabled(PROV, KEY) is True
 
     def test_context_is_nested_and_thread_local(self, fresh_stats):
         from concurrent.futures import ThreadPoolExecutor
@@ -212,7 +220,8 @@ class TestDispatcherModelGate:
     def _slot(self, model, key=KEY):
         from lib.llm_dispatch.slot import Slot
         return Slot(key_name=key, api_key='sk-test', model=model,
-                    capabilities={'text'}, provider_id=PROV)
+                    capabilities={'text'}, provider_id=PROV,
+                    route_credential_id=key)
 
     def test_pick_skips_stopped_model_keeps_sibling(self, fresh_stats):
         """End-to-end at the pick seam: the stopped (key, model) slot is
@@ -246,9 +255,16 @@ class TestDispatcherModelGate:
         ks.mark_key_exhausted(PROV, KEY, reason='HTTP 402 credit exhausted')
         disp = self._dispatcher([self._slot('qwen3.5-plus')])
 
+        # The owner re-enabled the key after the stop, so ordinary admission
+        # still has capacity (user supremacy); the recorded stop is what the
+        # strict optional-work policy refuses.
         assert disp.has_capable_slots('text') is True
         with ks.strict_billing_stop_admission():
             assert disp.has_capable_slots('text') is False
+        # Without that owner action the stopped key is durable disqualifying
+        # evidence under ordinary admission too, never a healable cooldown.
+        ks.clear_key_override(PROV, KEY)
+        assert disp.has_capable_slots('text') is False
 
     def test_strict_stopped_pool_exits_without_cooldown_polling(
             self, fresh_stats, monkeypatch):
@@ -285,18 +301,19 @@ class TestAccountVsModelQuotaScope:
     vendor's quota-death must not poison sibling vendors routed through
     the same key. An HTTP 402 Payment Required is a different signal
     class: it is emitted by the gateway's OWN credit-validation layer
-    (sankuai body: ext.error.source=AIGC, stage=validation) about the
+    (example-corp body: ext.error.source=AIGC, stage=validation) about the
     ACCOUNT's credit pool, so EVERY model on that key is dead and the
     honest stop is the key-wide ``exhausted`` flag. Per-model stops there
     just make each remaining model burn one live 402 before converging
-    (43 model entries on the sankuai account, 12 stopped, ~30 more live
+    (43 model entries on the example-corp account, 12 stopped, ~30 more live
     402s queued for real users on 2026-07-29).
     """
 
     def _slot(self, model, key=KEY):
         from lib.llm_dispatch.slot import Slot
         return Slot(key_name=key, api_key='sk-test', model=model,
-                    capabilities={'text'}, provider_id=PROV)
+                    capabilities={'text'}, provider_id=PROV,
+                    route_credential_id=key)
 
     def _healthy_sibling(self, ks, monkeypatch):
         """Keep the last-resort guard out of scope: one healthy sibling."""
@@ -345,7 +362,7 @@ class TestAccountVsModelQuotaScope:
 @pytest.mark.unit
 class TestDayRolloverRecovery:
     """「credit 按日赋予 ⇒ credit 停机次日自动恢复」机制守卫
-    (owner requirement, 2026-07-29 sankuai_key_2 402 storm).
+    (owner requirement, 2026-07-29 example_corp_key_2 402 storm).
 
     The mechanism: billing-stops live in the DAY-SCOPED ``stats`` map, so
     ``_ensure_fresh_unlocked`` resetting stats at the calendar boundary IS

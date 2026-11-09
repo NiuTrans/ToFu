@@ -77,7 +77,7 @@ def _make_summarize_fn(conv_id: str, task: dict | None):
                       'Summarize the following content concisely, preserving '
                       'file paths, identifiers, error messages, and concrete '
                       'conclusions. Drop filler. Output only the summary.')
-        tag = f'[AdvSummary conv={conv_id[:8] if conv_id else "?"}]'
+        tag = f'[AdvSummary conv={conv_id if conv_id else "?"}]'
         try:
             from lib.tasks_pkg.manager import task_user_id
             owner_user_id = task_user_id(task)
@@ -184,6 +184,6 @@ def advanced_compact(messages: list, conv_id: str = '',
     if saved > 0 or ctx.edit.removed_messages:
         logger.info('[AdvCompact] conv=%s  steps=%s  ~%d tokens saved, '
                     '%d message(s) structurally removed',
-                    conv_id[:8] if conv_id else '?', advanced_steps,
+                    conv_id if conv_id else '?', advanced_steps,
                     saved, ctx.edit.removed_messages)
     return saved

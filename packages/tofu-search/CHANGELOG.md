@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `SearchConfig.skip_domains` is a source ban only and defaults to empty. The
+  nine JS/social hosts it used to list by default (YouTube, X/Twitter,
+  Facebook, Instagram, TikTok, LinkedIn, Discord) are now the built-in
+  fetch-quality skip `fetch.utils.NO_TEXT_DOMAINS`, extended by the new
+  `SearchConfig.fetch_skip_domains` (same URL grammar). A fetch-quality skip
+  is refused at the fetch gate with reason `fetch_skip` and skipped by one-hop
+  deepening, but search listings keep its rows and the reader tier and
+  connected auth sources still read it. A `skip_domains` ban now also refuses
+  before the fetch cache, the reader tier and auth sources.
+- Public `SearchConfig.requests_transport` and `httpx_client_factory` ports let
+  the host own outbound routing for prepared Requests calls and HTTP/2 search.
+  Search and fetch use one host-managed attempt while retaining response budgets,
+  SSRF validation, cookies and standalone proxy behavior.
+
 - `skip_domains` entries are URL rules, not netloc substrings: a host covers
   itself and its subdomains on a label boundary (`x.com` no longer refuses
   `dropbox.com`); `host/path` is a path prefix; `*` is one path segment,

@@ -1,20 +1,24 @@
 """Disposable PostgreSQL for real row-lock and semantic authority tests.
 
-Entry points: postgres_cluster, owned_postgres_cluster, retire_cluster_root.
+Entry points: postgres_cluster, owned_postgres_cluster, postgres_bootstrap,
+retire_cluster_root.
 Each cluster owns a private Unix socket and foreground postmaster inside a
 pytest root named after its owning process (``tofu-test-postgres-pid-<owner>-``
 under the root parent of tests/conftest.py). Dynamic shared memory lives in the
 data directory. On Linux the kernel fast-stops the postmaster when its owner
 exits, even by SIGKILL, and that shutdown removes the SysV interlock segment.
 The shared dead-owner root reclaim, also run at every fixture start, retires
-leftover roots through retire_cluster_root. They use no existing service,
-database, authentication profile or application.
+leftover roots through retire_cluster_root. The fixture copies one pristine
+bootstrap per pytest worker; each case still owns its roles, WAL and server.
+Explicit restart retains a durable fast shutdown. Final disposal uses PostgreSQL
+immediate shutdown, then waits for exit before removing the private files and
+IPC resources. It does not checkpoint a database that is about to be deleted.
+They use no existing service, database, authentication profile or application.
 """
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-import ctypes
-import errno
 import os
 import shutil
 import signal
@@ -25,14 +29,15 @@ import time
 
 import pytest
 
+from tests.support.postgres_cleanup import retire_cluster_root as retire_cluster_root
+
+# semantic_authority consumes the session clock fixture; modules that opt into
+# a real PostgreSQL cluster alone (goals, router, orchestration) must still see
+# it, not only modules that also register semantic_authorities.
+pytest_plugins = ('tests.support.postgres_worker_clock',)
+
 
 _LINUX = sys.platform.startswith("linux")
-# <sys/ipc.h>.
-_IPC_RMID = 0
-# Zero-based postmaster.pid lines (PostgreSQL src/include/utils/pidfile.h).
-_LOCK_FILE_LINE_PID = 0
-_LOCK_FILE_LINE_DATA_DIR = 1
-_LOCK_FILE_LINE_SHMEM_KEY = 6
 
 
 class RestartablePostgresDsn(str):
@@ -70,91 +75,7 @@ def _bound_to_owner(command: list[str]) -> list[str]:
             str(os.getpid()), str(int(signal.SIGINT)), *command]
 
 
-def _serves(pid: int, data: str) -> bool:
-    """True while ``pid`` is a live process of the cluster in ``data``.
-
-    PostgreSQL processes run in their data directory. A zombie or a missing
-    process has no working directory; another user's process reusing the PID
-    is not this user's cluster.
-    """
-    try:
-        return os.path.samefile(f"/proc/{pid}/cwd", data)
-    except (FileNotFoundError, PermissionError):
-        return False
-
-
-def _sysv_segment(shmid: int):
-    with open("/proc/sysvipc/shm", encoding="ascii") as table:
-        header = table.readline().split()
-        for line in table:
-            row = dict(zip(header, map(int, line.split())))
-            if row["shmid"] == shmid:
-                return row
-    return None
-
-
-def _remove_recorded_segment(key: int, shmid: int, creator: int) -> bool:
-    """Remove a dead cluster's recorded interlock; True when none remains."""
-    row = _sysv_segment(shmid)
-    if (row is None or (row["key"] & 0xFFFFFFFF) != (key & 0xFFFFFFFF)
-            or row["cpid"] != creator):
-        # Already removed, or the identifier now names another segment.
-        return True
-    if row["uid"] != os.getuid() or row["cuid"] != os.getuid() or row["nattch"]:
-        # Unproven ownership, or orphaned cluster processes still attached.
-        return False
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.shmctl(shmid, _IPC_RMID, None) != 0:
-        failure = ctypes.get_errno()
-        if failure not in (errno.EINVAL, errno.EIDRM):
-            raise OSError(failure, os.strerror(failure))
-    return True
-
-
-def retire_cluster_root(root: Path) -> bool:
-    """Release what a cluster root still holds; True once ``root`` may be removed.
-
-    A process still serving the recorded data directory is asked for a fast
-    shutdown and the root is kept for a later reclaim. Otherwise the SysV
-    segment recorded in postmaster.pid is removed only while it carries the
-    recorded key and creator, belongs to this user and has nothing attached.
-    A record that cannot be read or proven keeps the root.
-    """
-    try:
-        lines = (root / "data" / "postmaster.pid").read_text().splitlines()
-    except FileNotFoundError:
-        # Never started, or a clean shutdown already released everything.
-        return True
-    if not _LINUX or len(lines) <= _LOCK_FILE_LINE_DATA_DIR:
-        return False
-    try:
-        # A standalone (initdb bootstrap) backend records its PID negated.
-        pid = abs(int(lines[_LOCK_FILE_LINE_PID]))
-    except ValueError:
-        return False
-    if _serves(pid, lines[_LOCK_FILE_LINE_DATA_DIR]):
-        try:
-            os.kill(pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass  # It exited after the check; the next reclaim proves the rest.
-        return False
-    segment = (lines[_LOCK_FILE_LINE_SHMEM_KEY].split()
-               if len(lines) > _LOCK_FILE_LINE_SHMEM_KEY else [])
-    if not segment:
-        # The process exited before it created shared memory.
-        return True
-    try:
-        key, shmid = (int(field) for field in segment)
-    except ValueError:
-        return False
-    return _remove_recorded_segment(key, shmid, pid)
-
-
-@contextmanager
-def owned_postgres_cluster(*, max_connections: int = 16):
-    """Own one cluster with explicit test demand; the fixture retains 16 slots."""
-    if type(max_connections) is not int or max_connections < 4:
-        raise ValueError('A private PostgreSQL cluster needs at least four slots')
+def _postgres_tools():
     if os.name != "posix" or os.getuid() == 0:
         pytest.skip("Local PostgreSQL tests need an ordinary POSIX user")
     psycopg = pytest.importorskip("psycopg")
@@ -162,36 +83,85 @@ def owned_postgres_cluster(*, max_connections: int = 16):
     postgres = shutil.which("postgres")
     if not initdb or not postgres:
         pytest.skip("Install PostgreSQL test binaries to exercise row locks")
+    return psycopg, initdb, postgres
+
+
+def _cluster_root(*, template=False):
     # Imported late: tests.conftest owns the pytest root parent and its
-    # dead-owner reclaim, which imports this module while conftest loads.
+    # dead-owner reclaim; startup reclamation imports only postgres_cleanup.
     from tests.conftest import _PYTEST_ROOT_PARENT, _reclaim_stale_pytest_roots
 
     _reclaim_stale_pytest_roots()
-    environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C"}
     # Unix socket paths have a small platform limit; the checkout's mount
     # prefix is too long. The root parent lives in the system temp directory.
-    root = Path(tempfile.mkdtemp(prefix=f"tofu-test-postgres-pid-{os.getpid()}-",
-                                 dir=str(_PYTEST_ROOT_PARENT)))
+    label = 'postgres-template' if template else 'postgres'
+    return Path(tempfile.mkdtemp(prefix=f"tofu-test-{label}-pid-{os.getpid()}-",
+                                dir=str(_PYTEST_ROOT_PARENT)))
+
+
+def _initialize_data(data, initdb, environment):
+    # Keep the existing bootstrap semantics: durability remains enabled when
+    # the independently owned postmaster starts.
+    try:
+        subprocess.run(
+            [initdb, "-D", str(data), "--auth=trust", "--no-locale", "--encoding=UTF8",
+             "--no-sync"],
+            env=environment, check=True, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        diagnostic = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise RuntimeError(f"Private PostgreSQL initdb failed: {diagnostic}") from exc
+
+
+def _bootstrap_inputs(initdb, postgres, environment):
+    identities = []
+    for executable in (initdb, postgres):
+        path = Path(executable).resolve()
+        stat = path.stat()
+        identities.append((str(path), stat.st_dev, stat.st_ino, stat.st_size,
+                           stat.st_mtime_ns, stat.st_ctime_ns))
+    return (*identities, tuple(sorted(environment.items())))
+
+
+@dataclass(frozen=True)
+class PostgresBootstrap:
+    """An unstarted initialization owned by this pytest session, never a server."""
+    data: Path
+    tools: tuple
+
+
+@contextmanager
+def postgres_bootstrap():
+    """Initialize once; private copies retain independent roles, WAL and restart."""
+    _, initdb, postgres = _postgres_tools()
+    environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C"}
+    root = _cluster_root(template=True)
+    try:
+        inputs = _bootstrap_inputs(initdb, postgres, environment)
+        _initialize_data(root / 'data', initdb, environment)
+        yield PostgresBootstrap(root / 'data', inputs)
+    finally:
+        if retire_cluster_root(root):
+            shutil.rmtree(root)
+
+
+@contextmanager
+def owned_postgres_cluster(*, max_connections: int = 16, bootstrap: PostgresBootstrap | None = None):
+    """Own one cluster with explicit test demand; the fixture retains 16 slots."""
+    if type(max_connections) is not int or max_connections < 4:
+        raise ValueError('A private PostgreSQL cluster needs at least four slots')
+    psycopg, initdb, postgres = _postgres_tools()
+    environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C"}
+    root = _cluster_root()
     server = None
     try:
         data = root / "data"
         socket_dir = root / "socket"
         socket_dir.mkdir(mode=0o700)
-        # A disposable cluster needs no crash-safe bootstrap; initdb's final
-        # fsync of every data file alone can exceed the timeout on a busy disk.
-        try:
-            subprocess.run(
-                [initdb, "-D", str(data), "--auth=trust", "--no-locale", "--encoding=UTF8",
-                 "--no-sync"],
-                env=environment,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except subprocess.CalledProcessError as exc:
-            diagnostic = (exc.stderr or exc.stdout or str(exc)).strip()
-            raise RuntimeError(f"Private PostgreSQL initdb failed: {diagnostic}") from exc
+        if bootstrap is not None and bootstrap.tools == _bootstrap_inputs(initdb, postgres, environment):
+            shutil.copytree(bootstrap.data, data)
+        else:
+            _initialize_data(data, initdb, environment)
         dsn = psycopg.conninfo.make_conninfo(
             host=str(socket_dir), dbname="postgres", connect_timeout=1
         )
@@ -221,7 +191,8 @@ def owned_postgres_cluster(*, max_connections: int = 16):
                 server = subprocess.Popen(_bound_to_owner(arguments), env=environment,
                                           stdout=log, stderr=subprocess.STDOUT,
                                           start_new_session=True)
-                deadline = time.monotonic() + 20
+                # The pytest/harness deadline bounds readiness. A shorter
+                # fixture timer used to kill live starts under concurrent load.
                 while True:
                     if server.poll() is not None:
                         raise RuntimeError("Private PostgreSQL exited during startup")
@@ -229,8 +200,6 @@ def owned_postgres_cluster(*, max_connections: int = 16):
                         with psycopg.connect(dsn):
                             return
                     except psycopg.OperationalError:
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError("Private PostgreSQL readiness deadline exceeded")
                         time.sleep(0.05)
 
             def restart_server():
@@ -242,18 +211,26 @@ def owned_postgres_cluster(*, max_connections: int = 16):
             start_server()
             yield RestartablePostgresDsn(dsn, restart_server)
     finally:
-        # Teardown completes when the postmaster has exited, which removes its
-        # SysV segment. An interrupted wait, or a crashed server whose processes
-        # still hold its recorded segment, leaves the root to the dead-owner
-        # reclaim instead of deleting files under a running cluster.
+        # The test and any explicit restart have finished: these private files
+        # will be deleted. SIGQUIT asks PostgreSQL itself to retire its children
+        # and release IPC without a final checkpoint. Unlike SIGKILL, the
+        # postmaster still owns that cleanup. Keep the exit barrier and exact
+        # root/segment proof; interrupted waits retain evidence for reclaim.
+        # https://www.postgresql.org/docs/current/server-shutdown.html
         if server is not None and server.poll() is None:
-            server.send_signal(signal.SIGINT)
+            server.send_signal(signal.SIGQUIT)
             server.wait()
         if retire_cluster_root(root):
             shutil.rmtree(root)
 
 
+@pytest.fixture(scope='session')
+def _postgres_bootstrap():
+    with postgres_bootstrap() as bootstrap:
+        yield bootstrap
+
+
 @pytest.fixture
-def postgres_cluster():
-    with owned_postgres_cluster() as dsn:
+def postgres_cluster(_postgres_bootstrap):
+    with owned_postgres_cluster(bootstrap=_postgres_bootstrap) as dsn:
         yield dsn

@@ -64,6 +64,30 @@ def test_progress_reuses_exact_structure_while_structural_events_replace_it():
     assert fresh_size == retained_snapshot_bytes(_structure(fresh))
 
 
+def test_late_frame_of_a_released_terminal_attempt_is_captured_without_its_history():
+    """A reaped attempt's tool thread can return after terminal persistence.
+
+    2026-11-09: the stuck-task reaper settled a Coordinator whose
+    ``delegate_project_work`` was still running; terminal persistence released
+    the attempt's history lists (the settled Turn owns them), and the call's
+    late tool frame then crashed capture with ``'NoneType' object is not
+    iterable``. Capture must leave released lists absent so the frame reaches
+    the stale-attempt fence like every other late frame.
+    """
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+    task = {**_task(), '_turnId': 'turn-1', '_attemptId': 'attempt-1',
+            '_checkpointToolRounds': [{'round': 0, 'result': 'checkpoint'}]}
+    capture_task_projection_snapshot(task, {'type': 'round_end'})
+    task.update(status='error', finishReason='error')
+    assert _release_heavy_task_state(task)
+    assert task['toolRounds'] is None and task['segments'] is None
+    source, size = capture_task_projection_snapshot(
+        task, {'type': 'tool_complete', 'toolCallId': 'late-call'})
+    assert source['toolRounds'] is None and source['segments'] is None
+    assert source['_checkpointToolRounds'] is None
+    assert size == retained_snapshot_bytes(_structure(source))
+
+
 def test_config_aliases_remain_detached_and_are_charged_once():
     task = _task()
     task['_checkpointToolRounds'] = task['config']['checkpointToolRounds']

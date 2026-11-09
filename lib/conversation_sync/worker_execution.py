@@ -13,6 +13,9 @@ from lib.durable_worker import (
     WorkerDomainSettlementUnknown, WorkerExecutionContext, WorkerJobOutcome,
     WorkerProtocolError,
 )
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 def _accepted(context, payload):
@@ -79,6 +82,9 @@ def _settled_outcome(context, attempt, *, task=None):
         turn = get_turn(attempt['conversationId'], attempt['turnId'],
                         user_id=context.principal.owner_user_id)
         record_joined_exit(context, attempt, turn, task)
+    if task is not None:
+        # The durable receipt now holds the exit evidence this carrier retained.
+        task.pop('_exitReceiptPending', None)
     from lib.storage.generated_worker_job_contract import WORKER_EXECUTION_EXIT_KEY
     unknown = (metadata.get(WORKER_EXECUTION_EXIT_KEY) or {}).get('settlement') == 'unknown'
     return WorkerJobOutcome(
@@ -100,7 +106,7 @@ def execute_claimed_attempt(context, payload, *, application=None):
     lease nor missing process-local task proves that a call is safe to repeat.
     Detached Swarm work the attempt spawned keeps this claim after its Turn
     settles: the job releases only once that work has ended, outside the
-    attempt dispatch stripe (``swarm/turn_handoff.own_detached_swarm``).
+    attempt's dispatch lock (``swarm/turn_handoff.own_detached_swarm``).
     """
     outcome, resume_detached = _run_claimed_attempt(context, payload, application=application)
     from lib.swarm.turn_handoff import own_detached_swarm
@@ -191,11 +197,28 @@ def _run_claimed_attempt(context, payload, *, application=None):
         return _settled_outcome(context, settled, task=registered_task), False
 
 
+def _refused_receipt_outcome(context, refusal, *, status, task):
+    """Settle the job whose exit receipt the authority refuses on every claim.
+
+    The receipt follows the terminal Turn, so only the receipt is missing.
+    Reporting the refusal as unknown would lapse the lease and re-claim the
+    job every lease forever. The terminal job keeps the refusal as its durable
+    reason; overall settlement stays unknown and nothing is replayed.
+    """
+    logger.error('[ConversationWorker] exit receipt refused; job settles %s task=%s: %s',
+                 status, context.claim.task_id, refusal)
+    from lib.conversation_sync.worker_recovery import release_refused_exit_carrier
+    release_refused_exit_carrier(context, task)
+    return WorkerJobOutcome(status=status, result_ref=context.claim.task_id,
+        error={'code': 'worker_exit_receipt_refused', 'retryable': False, 'detail': str(refusal)},
+        replay_cursor=context.replay_cursor)
+
+
 def settle_claimed_failure(context, payload, error):
     """The runner's failure port only reconciles entered work; it never reruns it."""
     from lib.turn_lifecycle import attempt_dispatch_lock
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
-    from lib.conversation_sync.worker_recovery import recover_exited_attempt
+    from lib.conversation_sync.worker_recovery import WorkerExitReceiptRefused, recover_exited_attempt
     context.checkpoint(allow_cancelled=True)
     with attempt_dispatch_lock(context.claim.task_id):
         owner, attempt, turn = _accepted(context, payload)
@@ -215,8 +238,11 @@ def settle_claimed_failure(context, payload, error):
                                             include_execution_config=True)
             return _settled_outcome(context, attempt)
         task = chat_task_runtime.get(context.claim.task_id)
-        attempt = recover_exited_attempt(context, attempt, turn, task=task)
-        return _settled_outcome(context, attempt, task=task)
+        try:
+            attempt = recover_exited_attempt(context, attempt, turn, task=task)
+            return _settled_outcome(context, attempt, task=task)
+        except WorkerExitReceiptRefused as refusal:
+            return _refused_receipt_outcome(context, refusal, status='failed', task=task)
 
 
 def conversation_registration(*, application=None):
@@ -251,10 +277,13 @@ def cancel_claimed_attempt(context, payload):
     with attempt_dispatch_lock(context.claim.task_id):
         owner, attempt, turn = _accepted(context, payload)
         if attempt.get('startedAt') is not None:
-            from lib.conversation_sync.worker_recovery import recover_exited_attempt
+            from lib.conversation_sync.worker_recovery import WorkerExitReceiptRefused, recover_exited_attempt
             task = chat_task_runtime.get(context.claim.task_id)
-            attempt = recover_exited_attempt(context, attempt, turn, task=task)
-            return _settled_outcome(context, attempt, task=task)
+            try:
+                attempt = recover_exited_attempt(context, attempt, turn, task=task)
+                return _settled_outcome(context, attempt, task=task)
+            except WorkerExitReceiptRefused as refusal:
+                return _refused_receipt_outcome(context, refusal, status='cancelled', task=task)
         if attempt['status'] == 'pending':
             config = dict(attempt.get('config') or {}, _turnOwnerUserId=owner)
             # Stop drains accepted work; it never reauthorizes the grant that

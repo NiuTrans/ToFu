@@ -5,7 +5,7 @@ import os
 import shutil
 import pytest
 
-pytest_plugins = ("tests.support.postgres_cluster",)
+pytest_plugins = ("tests.support.postgres_cluster", "tests.support.postgres_worker_clock")
 
 
 @pytest.fixture(params=["sqlite", "native", "postgres"])
@@ -17,8 +17,8 @@ def semantic_authority(request, tmp_path, monkeypatch):
     if request.param in {"sqlite", "postgres"}:
         if request.param == "postgres":
             dsn = request.getfixturevalue("postgres_cluster")
-            from tests.support.postgres_worker_clock import install_worker_clock
-            install_worker_clock(dsn, tmp_path / 'server-clock')
+            from tests.support.postgres_worker_clock import install_clock_function
+            install_clock_function(dsn, request.getfixturevalue('postgres_worker_clock_library'))
             dsn_file = tmp_path / "postgres-dsn"
             dsn_file.write_text(dsn)
             dsn_file.chmod(0o600)

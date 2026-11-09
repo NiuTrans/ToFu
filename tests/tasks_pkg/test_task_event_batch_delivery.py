@@ -126,7 +126,7 @@ def test_a_backlog_behind_a_blocked_head_persists_as_one_run_published_after_com
 @pytest.mark.parametrize('merge_progress', [False, True])
 def test_committed_rpc_prefix_is_published_while_a_later_batch_is_blocked(
         coordinator, merge_progress):
-    from lib.storage.storage_event_policy import resolve_storage_event_budget
+    from lib.agent_core.storage_event_policy import resolve_storage_event_budget
     limit = resolve_storage_event_budget().batch_max_events
     lane = DeliveryLane({'id': 'visible-prefix'})
     storage = Storage()
@@ -282,9 +282,12 @@ def test_revocation_releases_every_member_and_never_interrupts_an_entered_run(
     assert coordinator.snapshot()['pending_events'] == 4
     release.set()
     if revoked_by == 'owner':
+        # The pump completes the revocation requested during its run: the
+        # refused run is released, never retained as a failed head.
         with coordinator.condition:
-            assert coordinator.condition.wait_for(lambda: lane.error is not None, timeout=2)
-        assert coordinator.revoke(lane) is True
+            assert coordinator.condition.wait_for(lambda: lane.revoked, timeout=2)
+        assert lane.error is None
+        assert coordinator.revoke(lane) is True, 'a released lane revokes idempotently'
     coordinator.flush(lane)
     snapshot = coordinator.snapshot()
     assert snapshot['pending_events'] == snapshot['pending_batches'] == snapshot['pending_bytes'] == 0

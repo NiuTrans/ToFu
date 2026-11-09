@@ -21,7 +21,7 @@ from lib.tasks_pkg.cache_tracking._state import with_cache_tracking_scope
 
 from typing import Any
 
-from lib.log import clear_log_context, get_logger, set_log_context, set_req_id
+from lib.log import clear_log_context, get_logger, set_log_context, set_req_id, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,8 @@ from lib.tasks_pkg.orchestrator._memory_prefetch import (
 from lib.tasks_pkg.orchestrator._resume_state import (
     apply_resume_state,
     prepare_resume_state,
+    restore_resume_view,
+    resume_view_holds_turn_block,
 )
 from lib.tasks_pkg.orchestrator._post_loop import (
     finalize_after_loop,
@@ -104,7 +106,7 @@ def _execute_task_invocation(
         throughout the run (content, usage, status, events, etc.).
     """
     # Only execute_invocation admits callers to this internal mature body.
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     # Seed the thread-local request-id so audit_log / log_exception / log_context
     # (which auto-stamp req_id) correlate to THIS task. run_task executes on a
     # pooled background thread where req_id() would otherwise be empty, leaving
@@ -248,6 +250,12 @@ def _execute_task_invocation(
             _prefetch_executor = None
 
         if not _prep_aborted:
+            # ── A Continue resumes its Turn's checkpointed working view
+            #    before any context is composed, so composition reuses what
+            #    the interrupted request carried and appends only changes.
+            with measure_task_startup('startup_resume_view', identity=startup_identity):
+                restore_resume_view(task=task, cfg=cfg, messages=messages,
+                                    prepared_state=prepared_resume_state)
             # ── Section 3.5: local high-confidence memory selection. It
             #    completes synchronously before Composer and never mutates
             #    messages.
@@ -259,6 +267,8 @@ def _execute_task_invocation(
                     memory_enabled=memory_enabled,
                     has_real_tools=has_real_tools,
                     injected_tool_calls=prepared_tool_history.injected_calls,
+                    turn_selection_retained=resume_view_holds_turn_block(
+                        task, messages, 'relevant_memories'),
                 )
 
             # ── Section 3: Context Injection → _t_prep_done
@@ -289,7 +299,7 @@ def _execute_task_invocation(
 
 
         logger.debug('[Task %s] conv=%s Start model=%s think=%s search=%s fetch=%s project=%s code_exec=%s',
-                    task['id'][:8], task.get('convId', ''), model, thinking_enabled, search_mode, fetch_enabled,
+                    task_log_tag(task['id']), task.get('convId', ''), model, thinking_enabled, search_mode, fetch_enabled,
                     'yes' if project_enabled else 'no', 'yes' if code_exec_enabled else 'no')
         # (the six historical loop-state init lines — tool_call_happened /
         #  last_finish_reason / last_usage / assistant_msg / accumulated_usage

@@ -31,7 +31,8 @@ Locks are advisory: external editors and programs deliberately
 closing inherited FDs are non-cooperating writers. Non-Git file transactions
 use canonical targets in the neutral namespace; non-Git checkout scopes remain
 no-ops. Explicit destructive tree scopes also protect non-Git directories.
-There is no owner database, expiry-based stealing, or stale-lock deletion.
+There is no owner database or expiry-based stealing; a lock file is unlinked
+only when a fresh exclusive flock proves that nobody holds it.
 
 In-process gates distinguish writer ownership and reader counts. A writer may
 reenter read without downgrading; the sole reader may upgrade and retain its
@@ -46,9 +47,14 @@ Checkout operations retain shared real-path lifecycle ancestor barriers, not
 ancestor checkout root claims. Parent checkout mutations therefore commute with
 nested edits; explicit tree leases fence destructive descendants (including
 external linked worktrees and their Git administration) without scans. Complete checkout/Git/common-dir bindings
-are revalidated after admission; metadata rebinding fails visibly. Persistent
-zero-byte lockfiles are one inode per historical root/file/setup key, not per
-checkout alone, and are never unlinked or migrated by release.
+are revalidated after admission; metadata rebinding fails visibly. Zero-byte
+lockfiles are one inode per root/file/setup key in use, not per checkout
+alone. The last local release unlinks its key's file under a fresh
+descriptor's non-blocking exclusive flock, so no holder, shared holder or
+descendant that inherited a descriptor remains; an acquirer whose locked
+descriptor no longer matches the name reopens it, so nothing is admitted on a
+removed inode. `reclaim_unheld_lock_files` applies the same proof to what
+killed processes left behind (a boot step sweeps the tree namespace).
 
 Admission order: a blocked request queues on its key. A fresh request may not
 overtake an earlier queued request of a conflicting mode while every holder
@@ -306,11 +312,20 @@ _registry_lock = threading.Lock()
 _registry_condition = threading.Condition(_registry_lock)
 _opening_descriptors = 0  # fork waits for open -> registration/close
 _registry = {}  # active holders/waiters only; removed at last departure
+# root -> its one active _registry key, so the rebinding check on every entry
+# is a lookup: a delivery claim holds thousands of keys at once.
+_registry_roots = {}
 _active_descriptors = set()  # includes pending cross-process admission
 
 _lease_scope_state = threading.local()  # bounded depth + pending hint, never ownership
 _admission_wait_state = threading.local()  # armed flag + this thread's open wait record
 _admission_request_state = threading.local()  # this thread's outermost named lease request
+
+def _retire_registry_key(key):
+    """Drop a departed key and its root index entry; the caller holds the registry lock."""
+    if _registry.pop(key, None) is not None and _registry_roots.get(key[0]) == key:
+        del _registry_roots[key[0]]
+
 
 @contextlib.contextmanager
 def _timed_registry():
@@ -334,7 +349,7 @@ def _timed_registry():
 def _after_fork():
     # Close, never LOCK_UN: the parent's open-file-description owns the flock.
     global _registry_lock, _registry_condition, _opening_descriptors
-    global _registry, _active_descriptors, _lease_scope_state
+    global _registry, _registry_roots, _active_descriptors, _lease_scope_state
     global _admission_wait_state, _admission_publications_lock, _admission_publications
     global _admission_request_state
     for fd in _active_descriptors:
@@ -346,6 +361,7 @@ def _after_fork():
     _registry_condition = threading.Condition(_registry_lock)
     _opening_descriptors = 0
     _registry = {}
+    _registry_roots = {}
     _active_descriptors = set()
     _lease_scope_state = threading.local()
     _admission_wait_state = threading.local()
@@ -443,6 +459,146 @@ def _validate_lock_fd(common, root, fd):
         raise WorkspaceBusyError(f'Cannot validate workspace lock binding for {root}: {error}') from error
     if not safe:
         raise WorkspaceBusyError('Workspace lock metadata rebound during admission: ' + root)
+
+
+def _lock_path_names_fd(common, root, fd):
+    """Whether the key's lock name still names the file `fd` opened.
+
+    False once release-time reclamation removed the name (or a later open
+    recreated it) after this descriptor opened it: its flock excludes no one.
+    """
+    lock = common / 'tofu-workspace-leases' / (hashlib.sha256(os.fsencode(root)).hexdigest() + '.lock')
+    try:
+        current = lock.lstat()
+    except FileNotFoundError:
+        return False
+    held = os.fstat(fd)
+    return (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino)
+
+
+@contextlib.contextmanager
+def _forks_wait():
+    """Fork waits while the enclosed code holds a descriptor it closes itself
+    (the `_opening_descriptors` barrier), so no child inherits its lock."""
+    global _opening_descriptors
+    with _timed_registry():
+        _opening_descriptors += 1
+    try:
+        yield
+    finally:
+        pending_error = sys.exc_info()[1]
+        interrupted = None
+        while True:
+            try:
+                _registry_lock.acquire()
+                break
+            except BaseException as error:
+                # Leaving the reservation behind would fence every fork.
+                if interrupted is None:
+                    interrupted = error
+        try:
+            _opening_descriptors -= 1
+            _registry_condition.notify_all()
+        finally:
+            _registry_lock.release()
+        if interrupted is not None and pending_error is None:
+            raise interrupted
+
+
+def _reclaim_unheld_lock_file(directory_fd, name):
+    """Unlink one lock file that no open file description holds.
+
+    A fresh descriptor's non-blocking exclusive flock proves no holder, shared
+    holder or descendant that inherited a lease descriptor remains. An
+    acquirer that opened the name before the unlink finds it gone after its
+    own flock and locks the recreated file instead (`_lock_path_names_fd`).
+    Anything but a regular single-link file is left alone, as admission
+    refuses it. True when the file was removed.
+    """
+    import fcntl
+    with _forks_wait():
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+        except OSError:
+            return False
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return False
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            try:
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                return False
+            os.unlink(name, dir_fd=directory_fd)
+            return True
+        finally:
+            os.close(fd)
+
+
+def _reclaim_lock_file(common, root):
+    """Release-time reclamation of one key's lock file. Best effort: the lease
+    has already ended, and a file left behind waits only for the next release
+    of its key or for `reclaim_unheld_lock_files`."""
+    try:
+        directory_fd = os.open(common / 'tofu-workspace-leases',
+                               os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        _reclaim_unheld_lock_file(directory_fd, hashlib.sha256(os.fsencode(root)).hexdigest() + '.lock')
+    except OSError:
+        pass
+    finally:
+        os.close(directory_fd)
+
+
+def reclaim_unheld_lock_files(namespace=None):
+    """Unlink every lock file of one namespace that no process holds.
+
+    Release reclaims a key's file when its last local holder leaves; files a
+    killed process left behind wait for this sweep, which takes the same
+    per-file proof and is therefore safe while other processes hold and
+    acquire leases. `namespace` is a checkout's Git common directory or the
+    per-user tree namespace (the default). Returns how many files it removed.
+    """
+    common = _tree_lock_namespace() if namespace is None else Path(namespace)
+    try:
+        directory_fd = os.open(common / 'tofu-workspace-leases',
+                               os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return 0
+    removed = 0
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                if entry.name.endswith('.lock') and _reclaim_unheld_lock_file(directory_fd, entry.name):
+                    removed += 1
+    finally:
+        os.close(directory_fd)
+    return removed
+
+
+def start_lock_file_reclamation():
+    """Boot step: sweep the per-user tree namespace once on a daemon thread,
+    so the files a previous server generation left behind never accumulate."""
+    def sweep():
+        from lib.log import get_logger
+        try:
+            removed = reclaim_unheld_lock_files()
+        except Exception:
+            get_logger(__name__).warning('Workspace lock-file reclamation failed', exc_info=True)
+            return
+        get_logger(__name__).info('Workspace lock-file reclamation removed %d unheld files', removed)
+
+    thread = threading.Thread(target=sweep, name='workspace-lock-reclamation', daemon=True)
+    thread.start()
+    return thread
 
 
 def _bounded_identifier(value):
@@ -758,6 +914,15 @@ def _close_descriptor(fd):
 
 
 def _acquire_process_lock(common, root, deadline, cancel_event, mode):
+    while True:
+        fd = _acquire_process_lock_once(common, root, deadline, cancel_event, mode)
+        if fd is not None:
+            return fd
+
+
+def _acquire_process_lock_once(common, root, deadline, cancel_event, mode):
+    """One open-and-lock of the key's current file; None when release-time
+    reclamation removed that name after this open, so the caller reopens."""
     global _opening_descriptors
     fd = None
     opening = False
@@ -812,6 +977,10 @@ def _acquire_process_lock(common, root, deadline, cancel_event, mode):
             try:
                 physical_mode = fcntl.LOCK_SH if mode == _FILE_BARRIER else fcntl.LOCK_EX
                 fcntl.flock(fd, physical_mode | fcntl.LOCK_NB)
+                if not _lock_path_names_fd(common, root, fd):
+                    # Reclaimed after this open; lock the file the name has now.
+                    _close_descriptor(fd)
+                    return None
                 _validate_lock_fd(common, root, fd)
                 return fd
             except BlockingIOError:
@@ -858,15 +1027,18 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
     deadline = _wait_deadline(timeout)
     thread_id = threading.get_ident()
     with _timed_registry():
-        if any(other[0] == root and other != key for other in _registry):
+        if _registry_roots.get(root, key) != key:
             raise WorkspaceBusyError('Workspace metadata rebound during an active lease: ' + root)
-        entry = _registry.setdefault(key, {
-            'cond': threading.Condition(), 'users': 0,
-            'writer_thread': None, 'writer_depth': 0,
-            'readers': {}, 'reader_reentry': 0, 'file_writers': {},
-            'fds': {}, 'acquiring_thread': None, 'holders': {},
-            'queued': {},  # blocked requests in arrival order: thread -> identity
-        })
+        entry = _registry.get(key)
+        if entry is None:
+            entry = _registry[key] = {
+                'cond': threading.Condition(), 'users': 0,
+                'writer_thread': None, 'writer_depth': 0,
+                'readers': {}, 'reader_reentry': 0, 'file_writers': {},
+                'fds': {}, 'acquiring_thread': None, 'holders': {},
+                'queued': {},  # blocked requests in arrival order: thread -> identity
+            }
+            _registry_roots[root] = key
         entry['users'] += 1
     pending = False
     fd = None
@@ -965,7 +1137,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
         with _timed_registry():
             entry['users'] -= 1
             if entry['users'] == 0:
-                _registry.pop(key, None)
+                _retire_registry_key(key)
         raise
 
 
@@ -1254,13 +1426,13 @@ def _lease(path, mode, timeout, cancel_event, _identity=None, _binding=None,
         # name child-owned files, and inherited Conditions may be locked.
         if os.getpid() == owner_pid:
             with entry['cond']:
-                _release(entry, thread_id, mode, action)
+                _release(entry, thread_id, mode, action, key)
                 entry['cond'].notify_all()
             with _timed_registry():
                 entry['users'] -= 1
                 last_departure = entry['users'] == 0
                 if last_departure:
-                    _registry.pop(key, None)
+                    _retire_registry_key(key)
             if last_departure and mode in {_WRITE, _FILE_BARRIER}:
                 state.pending_wake = True
             state.depth -= 1
@@ -1277,7 +1449,7 @@ def _lease(path, mode, timeout, cancel_event, _identity=None, _binding=None,
                         get_logger(__name__).warning('Integration release wake failed', exc_info=True)
 
 
-def _release(entry, thread_id, mode, action):
+def _release(entry, thread_id, mode, action, key):
     if action == 'enter':
         if mode in (_WRITE, _FILE_BARRIER):
             entry['writer_depth'] -= 1
@@ -1299,11 +1471,17 @@ def _release(entry, thread_id, mode, action):
             owners[thread_id] = depth - 1
     if (entry['writer_thread'] is None and not entry['readers']
             and not entry['file_writers'] and entry['reader_reentry'] == 0):
+        held = bool(entry['fds'])
         with _timed_registry():
             for fd in entry['fds'].values():
                 _active_descriptors.discard(fd)
                 os.close(fd)
             entry['fds'].clear()
+        if held:
+            # The last local holder left: unlink the key's file unless another
+            # process (or a descendant that inherited a descriptor) still holds it.
+            root, common = key
+            _reclaim_lock_file(Path(common), root)
 
 
 def _tree_lock_namespace():
@@ -1311,7 +1489,7 @@ def _tree_lock_namespace():
 
     Checkout common directories cannot fence arbitrary filesystem ancestors:
     an external linked worktree may live outside every discovered checkout.
-    Keep these persistent zero-byte keys outside removable workspace trees.
+    Keep these zero-byte keys outside removable workspace trees.
     """
     common = Path('/tmp') / ('tofu-workspace-tree-' + str(os.getuid()))
     try:
@@ -1576,7 +1754,7 @@ def workspace_write_lease(path, *, timeout=0.0, cancel_event=None):
     Reentrant on the owning thread; the sole reader may upgrade in place.
     Waits accept an exact finite nonnegative bound or None, are cancellable, and fail-fast
     by default. Authorization/readonly checks remain the caller's authority.
-    Lock files are never unlinked and ownership is never stolen.
+    Ownership is never stolen; a lock file is unlinked only while unheld.
     """
     return _root_lease(path, _WRITE, timeout, cancel_event)
 

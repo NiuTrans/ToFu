@@ -39,6 +39,55 @@ def runtime(context, monkeypatch):
     return SimpleNamespace(c=c, assignment=assignment, binding=binding, trusted=trusted, task=task)
 
 
+@pytest.mark.parametrize('same_task', [False, True])
+def test_replayed_attempt_command_does_not_rebind_a_newer_dispatch_execution(
+        runtime, monkeypatch, same_task):
+    """A late background-batch replay acknowledges its old, already-settled attempt."""
+    from lib.conversation_sync import command_service as commands
+
+    r = runtime
+    work_id = 'project-worker:' + r.assignment['id']
+    old = {'attemptId': 'old-attempt', 'turnId': 'worker-turn',
+           'conversationId': 'recipient', 'taskId': 'conversation-attempt:old',
+           'operation': 'continue', 'status': 'failed'}
+    if same_task:
+        old['taskId'] = work_id
+    current = {**old, 'attemptId': 'current-attempt', 'taskId': '', 'status': 'pending'}
+    attempts = {item['attemptId']: item for item in (old, current)}
+    r.c.repo.attempt_get = lambda attempt_id, **kw: deepcopy(attempts[attempt_id])
+    previous = r.c.repo.bind_execution(r.assignment['id'], 'worker-turn', 'old-attempt',
+                                     task_id=work_id)['execution']
+    r.c.repo.continue_execution(r.assignment['id'], previous, 'worker-turn', 'current-attempt')
+    current.update(taskId='conversation-attempt:current', status='failed')
+    before = r.c.repo.read(r.assignment['id'])
+    turn = {'conversationId': 'recipient', 'turnId': 'worker-turn',
+            'currentAttemptId': 'current-attempt', 'actor': 'assistant',
+            'projection': {}, 'projectionRevision': 3, 'status': 'failed'}
+    monkeypatch.setattr(commands, 'create_attempt', lambda *a, **kw: {
+        'turn': deepcopy(turn), 'attempt': deepcopy(old),
+        'idempotentReplay': True, '_needsStart': False})
+    monkeypatch.setattr(commands, 'get_turn', lambda *a, **kw: deepcopy(turn))
+    monkeypatch.setattr(commands, 'get_attempt', r.c.repo.attempt_get)
+    monkeypatch.setattr('lib.acceptance.continuity.get_attempt', r.c.repo.attempt_get)
+    monkeypatch.setattr(commands, 'get_conversation_revision', lambda *a, **kw: 3)
+    monkeypatch.setattr('lib.conversation_sync.workspace.resolve_workspace_config',
+                        lambda config, *a: config)
+    service = commands.ConversationTurnCommandService(
+        build_user_message=lambda value, *a: value, was_aborted_after=lambda *a: False,
+        start_task=lambda *a, **kw: pytest.fail('restarted settled replay'))
+
+    result = service.create_attempt('recipient', 'worker-turn', 7, {
+        'commandId': 'background-completion', 'operation': 'continue',
+        'expectedProjectionRevision': 3, 'config': {},
+    }, request_started_at=time.time(), principal=r.trusted.principal,
+        trusted_dispatch=r.trusted).value
+
+    assert result['idempotentReplay'] is True
+    assert result['attempt']['attemptId'] == 'old-attempt'
+    assert result['turn']['currentAttemptId'] == 'current-attempt'
+    assert r.c.repo.read(r.assignment['id']) == before
+
+
 def test_separate_project_system_identity_does_not_relax_generic_user_contract(runtime):
     from lib.conversation_sync.execution_identity import capture_execution_identity, restore_execution_identity
     r = runtime

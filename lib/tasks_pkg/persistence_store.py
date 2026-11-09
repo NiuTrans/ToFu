@@ -371,7 +371,7 @@ class DefaultConversationStore:
             from lib.storage.errors import describe_storage_failure
             logger.warning(
                 "[Store] archive create failed conv=%s: %s",
-                conv_id[:8] if conv_id else "?",
+                conv_id if conv_id else "?",
                 describe_storage_failure(exc),
             )
             return None

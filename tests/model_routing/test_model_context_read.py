@@ -13,7 +13,7 @@ from tests.tofudb.test_tofudb_differential import (
     tofudb_binary, tofudb_daemon, LegacyDriver,
 )
 
-pytest_plugins = ('tests._chat_sidecar',)
+pytest_plugins = ('tests._chat_sidecar', 'tests.support.semantic_authorities')
 # serial: builds/spawns the native tofu-db engine (flock-serialized
 # cargo build); queued behind the build, parallel-lane tests hit
 # their 300s timeout — dedicated no-xdist phase per TESTING_STRATEGY.
@@ -317,3 +317,208 @@ def test_malformed_proof_cannot_replace_a_valid_checkpoint(context_driver, proof
     assert invoke(context_driver, 'model_continuation.put', base | {
         'lane_id': 'main', 'projection': bad}, command=True) is False
     assert invoke(context_driver, 'turn.context.read', base | {'turn_id': 'a2'})['covered'] == 2
+
+
+# Paged Turns (docs/STORAGE.md, "Paged Turn storage", Decision 6): a Turn whose
+# turn.projection.page plan has more than one page travels in the context read
+# as its page-0 head; the client reads its pages pinned to the head's revision.
+# Native runs when TOFUDB_BIN names a source-matched engine, and skips otherwise.
+_PAGED_CONFIG = {'model': 'kimi-k3', 'excludeLast': True}
+_PAGED_ROUNDS = 5
+_PAGED_ROUND_BYTES = 1 << 20
+# Multi-byte characters, quotes, backslashes and control characters cost more
+# encoded bytes than code points.
+_PAGED_TEXT_UNIT = 'Résumé "quoted" \\ path\n\t 🚀 '
+
+
+def _paged_projection():
+    """Tool rounds whose derived segments mirror them: more than one projection page."""
+    return {
+        'content': 'final answer ' + _PAGED_TEXT_UNIT * 4000,
+        'thinking': _PAGED_TEXT_UNIT * 2000,
+        'toolRounds': [{
+            'toolCallId': f'call-{index}', 'toolName': 'read_file',
+            'roundNum': index, 'llmRound': index,
+            'toolArgs': {'path': f'src/module_{index}.py'},
+            'toolContent': f'{index}:' + 'r' * _PAGED_ROUND_BYTES, 'status': 'done',
+        } for index in range(_PAGED_ROUNDS)],
+        'apiRounds': [{'round': index, 'inputTokens': 1000 + index, 'outputTokens': 10}
+                      for index in range(_PAGED_ROUNDS)],
+    }
+
+
+def _paged_history(semantic_authority, monkeypatch):
+    """A request, a paged reply, then a live input/target pair after it."""
+    from lib.turn_lifecycle import append_settled_turn
+
+    client, owner, _engine = semantic_authority
+    monkeypatch.setattr('lib.storage.get_storage_client', client)
+    conversation = 'paged-context-' + uuid.uuid4().hex[:12]
+    append_settled_turn(
+        conversation, command_id=uuid.uuid4().hex, actor='human', user_id=owner,
+        projection={'content': 'Inspect every module'},
+        conversation_defaults={'allowCreate': True})
+    paged = append_settled_turn(
+        conversation, command_id=uuid.uuid4().hex, actor='assistant', user_id=owner,
+        projection=_paged_projection())['turn']
+    command_id = uuid.uuid4().hex
+    pair = client(write=True).command('turn.create_pair', {
+        'conversation_id': conversation, 'user_id': owner, 'command_id': command_id,
+        'input_projection': {'content': 'Summarize every module'},
+        'config': dict(_PAGED_CONFIG)}, command_id)
+    identity = {'user_id': owner, 'conversation_id': conversation}
+    return client, identity, paged['turnId'], pair['turn']['turnId']
+
+
+class _Reader:
+    """The authority's client, recording each query after an optional hook."""
+
+    def __init__(self, inner, before=None):
+        self.inner, self.before, self.calls = inner, before, []
+
+    def query(self, operation, payload, **kwargs):
+        if self.before is not None:
+            self.before(operation, payload)
+        self.calls.append((operation, dict(payload)))
+        return self.inner.query(operation, payload, **kwargs)
+
+    def command(self, *args, **kwargs):
+        return self.inner.command(*args, **kwargs)
+
+
+class _WholeTurnReader(_Reader):
+    """The whole-Turn context read: every page-0 head replaced by its turn.get."""
+
+    def query(self, operation, payload, **kwargs):
+        result = super().query(operation, payload, **kwargs)
+        if operation != 'turn.context.read' or not (result or {}).get('supported'):
+            return result
+        identity = {key: payload[key] for key in ('user_id', 'conversation_id')}
+        turns = []
+        for row in result['turns']:
+            head = row.get('pagedTurn')
+            if head is not None:
+                row = self.inner.query('turn.get', identity | {'turn_id': head['turnId']})
+                assert row['projectionRevision'] == head['projectionRevision']
+            turns.append(row)
+        return result | {'turns': turns}
+
+
+def _read_context(reader, identity, turn_id, *, replay=False):
+    from lib.storage.model_continuation import ModelContinuationStore
+    return ModelContinuationStore(client=reader).read_context(
+        **identity, turn_id=turn_id, replay=replay)
+
+
+def _restarts(reader):
+    return sum(1 for operation, payload in reader.calls
+               if operation == 'turn.context.read' and 'after_turn_id' not in payload)
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native', 'postgres'], indirect=True)
+def test_a_turn_above_one_page_assembles_the_whole_turn_context(semantic_authority, monkeypatch):
+    from lib import turn_lifecycle
+    from lib.tasks_pkg.model_replay import _history_fingerprint, policy_witness
+
+    client, identity, paged_id, target_id = _paged_history(semantic_authority, monkeypatch)
+    whole_turn = client().query('turn.get', identity | {'turn_id': paged_id})
+    first_page = client().query('turn.projection.page', identity | {'turn_id': paged_id, 'page': 0})
+    assert first_page['pageCount'] > 1
+
+    raw = client().query('turn.context.read', identity | {'turn_id': target_id, 'replay': False})
+    validate_result(raw)
+    rows = {(row.get('pagedTurn') or row)['turnId']: row for row in raw['turns']}
+    assert rows.pop(paged_id) == {'pagedTurn': first_page['turn']}
+    for turn_id, row in rows.items():
+        assert row == client().query('turn.get', identity | {'turn_id': turn_id})
+
+    paged_reader, whole_reader = _Reader(client()), _WholeTurnReader(client())
+    paged, whole = (_read_context(reader, identity, target_id)
+                    for reader in (paged_reader, whole_reader))
+    assert paged == whole and paged['turns'][1] == whole_turn and paged['nextTurnId'] is None
+    pages = [payload for operation, payload in paged_reader.calls
+             if operation == 'turn.projection.page']
+    assert [payload['page'] for payload in pages] == list(range(first_page['pageCount']))
+    assert {payload['projection_revision'] for payload in pages} == {whole_turn['projectionRevision']}
+    # Digests derived from Turns never depend on the reader's projection key order.
+    assert ([settled_witness(row) for row in paged['turns']]
+            == [settled_witness(row) for row in whole['turns']])
+    input_id = paged['turns'][-1]['parentTurnId']
+    assert _history_fingerprint(paged, input_id) == _history_fingerprint(whole, input_id)
+
+    built = []
+    for reader in (_Reader(client()), _WholeTurnReader(client())):
+        monkeypatch.setattr(turn_lifecycle, '_turn_client', lambda reader=reader, **kwargs: reader)
+        config = dict(_PAGED_CONFIG)
+        messages = turn_lifecycle.build_api_messages(
+            identity['conversation_id'], target_id, config, user_id=identity['user_id'])
+        built.append((json.dumps(messages, ensure_ascii=False),
+                      json.dumps(config, ensure_ascii=False, sort_keys=True)))
+    assert built[0] == built[1]
+    assert whole_turn['projection']['toolRounds'][-1]['toolContent'] in built[0][0]
+
+    # The authority accepts the terminal witness and proof derived from the
+    # paged Turn as its own, and covers it in the next read.
+    at_paged = _read_context(_Reader(client()), identity, paged_id)
+    assert at_paged['turns'][-1] == whole_turn
+    command_id = uuid.uuid4().hex
+    assert client(write=True).command('model_continuation.put', identity | {
+        'lane_id': 'main', 'projection': {
+            'turns': [settled_witness(at_paged['turns'][-1])],
+            'historyProof': at_paged['historyProof'],
+            'policy': policy_witness(dict(_PAGED_CONFIG)),
+            'messages': [{'role': 'assistant', 'content': 'retained paged history'}]}},
+        command_id) is True
+    warm = client().query('turn.context.read', identity | {'turn_id': target_id})
+    assert (warm['covered'], warm['continuationStatus']) == (2, 'available')
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native', 'postgres'], indirect=True)
+def test_a_paged_turn_that_moves_mid_read_restarts_under_a_fresh_proof(semantic_authority, monkeypatch):
+    client, identity, paged_id, target_id = _paged_history(semantic_authority, monkeypatch)
+    before = client().query('turn.context.read', identity | {
+        'turn_id': target_id, 'replay': False})['historyProof']
+    edits = []
+
+    def edit_once(operation, payload):
+        if operation == 'turn.projection.page' and payload['page'] == 1 and not edits:
+            current = client().query('turn.get', identity | {'turn_id': paged_id})
+            command_id = uuid.uuid4().hex
+            edits.append(client(write=True).command('turn.projection.update', identity | {
+                'turn_id': paged_id,
+                'expected_projection_revision': current['projectionRevision'],
+                'projection': current['projection'] | {'content': 'edited while paging'}},
+                command_id))
+
+    reader = _Reader(client(), before=edit_once)
+    context = _read_context(reader, identity, target_id)
+
+    edited = client().query('turn.get', identity | {'turn_id': paged_id})
+    assert edits and edited['projection']['content'] == 'edited while paging'
+    # The restarted read is the history after the edit, never a mix of revisions.
+    assert context == _read_context(_WholeTurnReader(client()), identity, target_id)
+    assert context['turns'][1] == edited and context['historyProof'] != before
+    assert _restarts(reader) == 2
+    assert {payload['projection_revision'] for operation, payload in reader.calls
+            if operation == 'turn.projection.page'} == {
+        edited['projectionRevision'] - 1, edited['projectionRevision']}
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native', 'postgres'], indirect=True)
+def test_a_paged_turn_deleted_mid_read_restarts_without_it(semantic_authority, monkeypatch):
+    client, identity, paged_id, target_id = _paged_history(semantic_authority, monkeypatch)
+    deleted = []
+
+    def delete_once(operation, payload):
+        if operation == 'turn.projection.page' and not deleted:
+            command_id = uuid.uuid4().hex
+            deleted.append(client(write=True).command('turn.delete', identity | {
+                'turn_ids': [paged_id]}, command_id))
+
+    reader = _Reader(client(), before=delete_once)
+    context = _read_context(reader, identity, target_id)
+
+    assert deleted and client().query('turn.get', identity | {'turn_id': paged_id}) is None
+    assert context == _read_context(_Reader(client()), identity, target_id)
+    assert paged_id not in [row['turnId'] for row in context['turns']]
+    assert _restarts(reader) == 2

@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import math
 import time
 from typing import Any, TypeGuard
 
 from lib.storage.errors import StorageError
+from lib.storage.worker_process import process_claim_protected
 from lib.storage.generated_worker_job_contract import (
     WORKER_TERMINAL_STATES, WORKER_JOB_MAX_CLOCK_MS, WORKER_LEASE_MAX_NOW_MS,
     WORKER_LEASE_EPOCH_CHARACTERS, WORKER_LEASE_MAX_MS, WorkerLeaseAuthoritySnapshot,
@@ -96,7 +98,8 @@ def _live_claim(
             and str(row['claim_owner']) == worker_id
             and int(row['fencing_token']) == fence
             and str(row['lease_authority_epoch']) == epoch
-            and int(row['lease_deadline_ms']) > now)
+            and (int(row['lease_deadline_ms']) > now
+                 or process_claim_protected(str(row['claim_owner']))))
 
 
 def _starts_tool_effect(event: Any) -> bool:
@@ -332,37 +335,76 @@ def _claim_kind_filter(payload: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]
     return f' AND task_kind IN ({placeholders})', tuple(kinds)
 
 
+def _current_lease_candidate(session, *, kind, epoch, now_ms, lock=False):
+    """Traverse only expired active holders; skip live processes, never jobs.
+
+    The first future lease ends the scan. A retained process schedules its next
+    death check using its existing lease interval, without a new deadline.
+    """
+    after = ()
+    recheck = None
+    probe = (session.fetch_one_for_update_skip_locked if lock else session.fetch_one)
+    while True:
+        row = probe(
+            'SELECT task_id, claim_owner, lease_authority_epoch, lease_deadline_ms, '
+            'heartbeat_at_ms, priority, created_at_ms, fencing_token FROM storage_worker_jobs '
+            "WHERE status='running' AND task_kind=? AND lease_authority_epoch=? "
+            + ('AND (lease_deadline_ms, priority, created_at_ms, task_id) > (?, ?, ?, ?) ' if after else '')
+            + 'ORDER BY lease_deadline_ms, priority, created_at_ms, task_id LIMIT 1',
+            (kind, epoch, *after))
+        if row is None or int(row['lease_deadline_ms']) > now_ms:
+            return row, recheck
+        if not process_claim_protected(str(row['claim_owner'])):
+            return row, recheck
+        delay = int(row['lease_deadline_ms']) - int(row['heartbeat_at_ms'])
+        if delay <= 0:
+            raise StorageError('database_integrity', 'Invalid process liveness interval')
+        recheck = min(recheck, delay) if recheck is not None else delay
+        after = tuple(row[key] for key in ('lease_deadline_ms', 'priority', 'created_at_ms', 'task_id'))
+
+
 def _claim_candidate(
     session: Session, *, now_ms: int, utc_now_ms: int, epoch: str, kinds: tuple[str, ...],
 ) -> Mapping[str, Any] | None:
-    # Each kind has at most three indexed lease probes. Epoch ranges recover
-    # legacy/restarted holders even if their old wall-clock deadline is future.
+    # Old epochs always fence; current holders need process-death evidence.
     expired = []
     for kind in kinds:
-        for relation, bound in (('<', epoch), ('>', epoch), ('=', epoch)):
-            current = relation == '='
+        for relation in ('<', '>'):
             row = session.fetch_one_for_update_skip_locked(
                 f'SELECT {_WORKER_JOB_COLUMNS} FROM storage_worker_jobs '
                 "WHERE status='running' AND task_kind=? "
                 f'AND lease_authority_epoch {relation} ? '
-                + ('AND lease_deadline_ms <= ? ' if current else '')
-                + 'ORDER BY lease_authority_epoch, lease_deadline_ms, priority, '
-                'created_at_ms, task_id LIMIT 1',
-                (kind, bound, now_ms) if current else (kind, bound),
-            )
+                'ORDER BY lease_authority_epoch, lease_deadline_ms, priority, '
+                'created_at_ms, task_id LIMIT 1', (kind, epoch))
             if row is not None:
                 expired.append(row)
-    if expired:
-        return min(expired, key=lambda row: (
-            int(row['lease_deadline_ms']) if row['lease_authority_epoch'] == epoch else 0,
-            int(row['priority']), int(row['created_at_ms']), str(row['task_id'])))
-    return session.fetch_one_for_update_skip_locked(
+        row, _ = _current_lease_candidate(session, kind=kind, epoch=epoch, now_ms=now_ms, lock=True)
+        if row is not None and int(row['lease_deadline_ms']) <= now_ms:
+            expired.append(row)
+    queued = session.fetch_one_for_update_skip_locked(
         f'SELECT {_WORKER_JOB_COLUMNS} FROM storage_worker_jobs '
         "WHERE status IN ('queued', 'suspended') AND available_at_ms <= ? "
         f"AND task_kind IN ({', '.join('?' for _ in kinds)}) "
         'ORDER BY priority, available_at_ms, created_at_ms, task_id LIMIT 1',
         (utc_now_ms, *kinds),
     )
+    if not expired:
+        return queued
+    lease = min(expired, key=lambda row: (
+        int(row['lease_deadline_ms']) if row['lease_authority_epoch'] == epoch else 0,
+        int(row['priority']), int(row['created_at_ms']), str(row['task_id'])))
+    if queued is None:
+        return lease
+    # One order across both sets, as in the native engine: the candidate
+    # claimable for longer wins, each wait read on its own clock (UTC lags the
+    # advancing lease clock after a rollback). A lease from another lifecycle
+    # has waited since before this one began. Ties use priority, creation, ID.
+    leased_for = (now_ms - int(lease['lease_deadline_ms'])
+                  if lease['lease_authority_epoch'] == epoch else math.inf)
+    waited_for = utc_now_ms - int(queued['available_at_ms'])
+    return min((lease, leased_for), (queued, waited_for), key=lambda candidate: (
+        -candidate[1], int(candidate[0]['priority']), int(candidate[0]['created_at_ms']),
+        str(candidate[0]['task_id'])))[0]
 
 
 def _worker_job_claim_next(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -417,12 +459,9 @@ def _worker_job_claim_horizon(session: Session, payload: Mapping[str, Any]) -> A
                 (kind, epoch),
             ) is not None:
                 return {'claimableInMs': 0}
-        lease = session.fetch_one(
-            'SELECT lease_deadline_ms FROM storage_worker_jobs '
-            "WHERE status='running' AND task_kind=? AND lease_authority_epoch=? "
-            'ORDER BY lease_deadline_ms LIMIT 1',
-            (kind, epoch),
-        )
+        lease, recheck = _current_lease_candidate(session, kind=kind, epoch=epoch, now_ms=now_ms)
+        if recheck is not None:
+            delays.append(recheck)
         if lease is not None:
             delays.append(max(0, int(lease['lease_deadline_ms']) - now_ms))
     for status in ('queued', 'suspended'):
@@ -496,7 +535,7 @@ def _worker_job_defer(session: Session, payload: Mapping[str, Any]) -> Any:
         "UPDATE storage_worker_jobs SET status=?, lease_deadline_ms=0, "
         "available_at_ms=?, replay_cursor=?, updated_at_ms=? "
         "WHERE task_id=? AND status='running' AND claim_owner=? "
-        "AND fencing_token=? AND lease_authority_epoch=? AND lease_deadline_ms>?",
+        "AND fencing_token=? AND lease_authority_epoch=?",
         (
             "suspended",
             effective_available,
@@ -506,7 +545,6 @@ def _worker_job_defer(session: Session, payload: Mapping[str, Any]) -> Any:
             worker_id,
             fence,
             epoch,
-            authority_now,
         ),
     )
     if not count:
@@ -561,10 +599,10 @@ def _worker_job_heartbeat(session: Session, payload: Mapping[str, Any]) -> Any:
         'replay_cursor=CASE WHEN replay_cursor > ? '
         'THEN replay_cursor ELSE ? END, updated_at_ms=? '
         "WHERE task_id=? AND status='running' AND claim_owner=? "
-        'AND fencing_token=? AND lease_authority_epoch=? AND lease_deadline_ms>?',
+        'AND fencing_token=? AND lease_authority_epoch=?',
         (
             deadline, deadline, authority_now, authority_now, replay_cursor, replay_cursor,
-            now_ms, task_id, worker_id, fence, epoch, authority_now,
+            now_ms, task_id, worker_id, fence, epoch,
         ),
     )
     if changed != 1:
@@ -687,11 +725,11 @@ def _worker_job_complete(session: Session, payload: Mapping[str, Any]) -> Any:
         'THEN replay_cursor ELSE ? END, lease_deadline_ms=0, '
         'updated_at_ms=?, terminal_at_ms=? '
         "WHERE task_id=? AND status='running' AND claim_owner=? "
-        'AND fencing_token=? AND lease_authority_epoch=? AND lease_deadline_ms>? '
+        'AND fencing_token=? AND lease_authority_epoch=? '
         "AND (cancel_requested_at_ms=0 OR ?='cancelled')",
         (
             terminal_status, result_ref, encoded_error, replay_cursor,
-            replay_cursor, now_ms, now_ms, task_id, worker_id, fence, epoch, authority_now,
+            replay_cursor, now_ms, now_ms, task_id, worker_id, fence, epoch,
             terminal_status,
         ),
     )

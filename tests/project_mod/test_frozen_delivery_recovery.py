@@ -213,6 +213,20 @@ def test_initial_capture_still_requires_source_writer_admission(repo, monkeypatc
     assert not (root / 'task.txt').exists()
 
 
+def test_capture_refused_by_a_busy_source_is_retried_once_it_is_free(repo, monkeypatch):
+    """Busy admission refused the capture before it ran; it is not a capture failure."""
+    root, _, owner = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('captured once the holder leaves\n')
+    queue_completion(root, monkeypatch, owner)
+    with held_source(work):
+        delivery.resume_pending_workspace_deliveries()
+        assert receipt(root)['reason'] == 'workspace_busy'
+    delivery.resume_pending_workspace_deliveries()
+    assert receipt(root)['state'] == 'delivered', receipt(root)
+    assert (root / 'task.txt').read_text() == 'captured once the holder leaves\n'
+
+
 def test_recovery_restores_conflict_cause_overwritten_by_busy_receipt(repo, monkeypatch):
     root, _, owner = repo
     work = automatic_workspace(repo, monkeypatch)

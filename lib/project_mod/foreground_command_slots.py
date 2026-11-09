@@ -33,7 +33,8 @@ FOREGROUND_REGISTRY_KEY = '_foregroundCommands'
 PROCESS_KEYS = frozenset({'_subprocess_pid', '_subprocess_pgid'})
 # The command never owns its task's lifecycle. A copied value outlives the
 # turn: a late frame then re-adopted a settled or discarded task as live.
-_LIFECYCLE_KEYS = frozenset({'status', '_discarded_at'})
+# ``_abort_reason`` names who stopped the task; the snapshot predates any Stop.
+_LIFECYCLE_KEYS = frozenset({'status', '_discarded_at', '_abort_reason'})
 # A view starts from a snapshot of its task; these slots address one command,
 # so a copy of a sibling's value must never become this command's own.
 _COMMAND_SLOT_KEYS = PROCESS_KEYS | {'_cmd_interrupt', FOREGROUND_REGISTRY_KEY}

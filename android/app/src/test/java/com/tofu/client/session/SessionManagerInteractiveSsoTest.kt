@@ -1,6 +1,7 @@
 package com.tofu.client.session
 
 import com.tofu.client.data.AuthType
+import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import kotlinx.coroutines.flow.Flow
@@ -51,7 +52,7 @@ class SessionManagerInteractiveSsoTest {
         override fun secretFor(alias: String): String? = null
     }
 
-    private class FakeDao(private var current: Profile) : ProfileDao {
+    private class FakeDao(private var current: Profile) : ProfileDaoFixture {
         val updates = mutableListOf<Profile>()
         override fun observeAll(): Flow<List<Profile>> = flowOf(listOf(current))
         override suspend fun getById(id: Long): Profile? = current
@@ -73,7 +74,7 @@ class SessionManagerInteractiveSsoTest {
         }
         override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
             val row = getById(id) ?: return 0
-            return if (row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
+            return if (row.kind == KernelKind.REMOTE_URL && row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int {
             current = current.copy(lastUsedAt = timestamp); return 1

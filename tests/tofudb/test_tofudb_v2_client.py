@@ -529,20 +529,25 @@ def test_v2_client_busy_command_budget_absorbs_sustained_backpressure(monkeypatc
     assert len(set(attempts)) == 1
 
 
-def test_v2_client_busy_command_budget_is_bounded(monkeypatch):
+def test_v2_client_unsupervised_busy_command_keeps_its_attempt_bound(monkeypatch):
+    """Without a supervising runtime nothing proves the authority alive.
+
+    A standalone client therefore keeps its attempt bound, but elapsed time
+    no longer cuts it short: every replay keeps the full wire deadline and
+    the same receipt identity, however long the busy authority holds it.
+    """
     import lib.storage.v2_client as implementation
     from lib.storage.errors import StorageError
-    client = _histogram_client()
+    # Sixteen 20 s attempts outlast the former 45 s command window.
+    client = implementation.StorageV2Client(
+        '127.0.0.1', 1, b's' * 32, owner_id=11, tenant_id=7, timeout=20.0)
     attempts = []
     clock = [1000.0]
-    budget = max(client._timeout * client._read_attempts,
-                 implementation._COMMAND_MIN_RETRY_BUDGET_S)
 
     def busy_forever(operation, payload, *, timeout, command_id, deadline_unix_ms):
         attempts.append(command_id)
-        assert 0 < timeout <= client._timeout
-        assert clock[0] < 1000.0 + budget
-        clock[0] += min(timeout, 0.01)
+        assert timeout == 20.0
+        clock[0] += timeout
         raise StorageError('database_busy', 'rotation in flight', True, 1)
 
     monkeypatch.setattr(client, '_attempt', busy_forever)
@@ -552,8 +557,7 @@ def test_v2_client_busy_command_budget_is_bounded(monkeypatch):
     monkeypatch.setattr(implementation.random, 'uniform', lambda *_: 0)
     with pytest.raises(StorageError, match='rotation in flight'):
         client.command('record.put', {'key': 'k', 'value': 1}, command_id=None)
-    assert budget - 0.05 <= clock[0] - 1000.0 <= budget + 0.01
-    assert len(attempts) > 16
+    assert len(attempts) == implementation._BUSY_COMMAND_ATTEMPTS
     assert len(set(attempts)) == 1
 
 

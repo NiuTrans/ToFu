@@ -92,7 +92,7 @@ pub const RESOURCE_GATE_REFERENCE_RETAINED_BYTES: u64 = 1073741824;
 pub const RESOURCE_GATE_REFERENCE_COMMIT_MEAN_MICROS: u64 = 5000;
 pub const RESOURCE_GATE_REFERENCE_TOTAL_MICROS: u64 = 300000000;
 pub const BLOCK_PAYLOAD_CACHE_ENTRY_OVERHEAD_BYTES: usize = 256;
-pub const MAX_RECOVERY_PACKED_LOCATIONS: usize = 65536;
+pub const MAX_PERSISTED_PAYLOAD_HINTS: usize = 65536;
 pub const PAYLOAD_SEGMENT_CACHE_BYTES: usize = 67108864;
 pub const MAX_PAYLOAD_SEGMENT_CACHE_SEGMENTS: usize = 4096;
 pub const MAX_PAYLOAD_SEGMENT_CACHE_RECENCY_RECORDS: usize = 8192;
@@ -478,6 +478,7 @@ pub const RAW_ARCHIVE_ATTEMPT_INDEX_NAMESPACE: &str = "raw_archives_by_attempt_c
 pub const RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE: &str = "raw_archives_by_conversation_created";
 pub const RAW_ARCHIVE_CONVERSATION_STATS_NAMESPACE: &str = "raw_archive_conversation_stats";
 pub const RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE: &str = "raw_archives_by_owner_created";
+pub const RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE: &str = "raw_archive_bodies_by_owner_created";
 pub const RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE: &str = "raw_archive_owner_age_backfill";
 pub const MAX_RAW_ARCHIVE_STORED_BYTES: usize = 16777216;
 pub const MAX_RAW_ARCHIVE_DOCUMENT_BYTES: usize = 25165824;
@@ -533,6 +534,7 @@ pub const MAX_MODEL_ROUTING_CIPHERTEXT_CHARACTERS: usize = 32768;
 pub const MAX_MODEL_ROUTING_KEY_HINT_CHARACTERS: usize = 64;
 pub const MAX_MODEL_ROUTING_PRUNED_PER_COMMAND: usize = 256;
 pub const MAX_MODEL_ROUTING_TIMESTAMP_SECONDS: f64 = 32503680000.0;
+pub const WORKER_PROCESS_OWNER_PREFIX: &str = "tofu.worker-process/v1:";
 pub const WORKER_JOB_STATES: &[&str] = &["queued", "running", "suspended", "succeeded", "failed", "cancelled"];
 pub const WORKER_EXECUTION_WITNESS_FORMAT: &str = "tofu.conversation-worker-execution/v1";
 pub const WORKER_EXECUTION_CONFIG_KEY: &str = "_conversationWorkerExecution";
@@ -754,6 +756,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "conversation.search",
     "conversation.settings.update",
     "conversation.trash.prune",
+    "conversation.turn_usage",
     "credential.authenticate",
     "credential.create",
     "credential.create_if_owner_empty",
@@ -1059,6 +1062,7 @@ pub static EXECUTABLE_STORAGE_OPERATIONS: &[&str] = &[
     "turn.list",
     "turn.list_delta",
     "turn.perception.record",
+    "turn.projection.page",
     "turn.projection.update",
     "turn.queue.activate",
     "turn.queue.cancel",

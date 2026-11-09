@@ -6,10 +6,11 @@ every tool requires the owner's Global Router conversation, except
 ``channel_read`` which a subscriber of the requested thread may also use.
 The owner's decisions (``channel_outbox_approve``, ``channel_configure_thread``,
 ``channel_subscribe``, ``channel_unsubscribe``) additionally require that the
-current Turn's input is a genuine human Turn (``require_human_turn``), and a
-chat approval names the draft's code in the owner's own words; channel events
-never authorize them. A Turn reviewing other people's messages is confined to
-the threads under review (C11, ``lib.channels.assistant``).
+current Turn's input, and every input steered into it, is genuine human input
+(``require_human_turn``), and a chat approval names the draft's code in the
+owner's own words; channel events, reports and peer messages never authorize
+them. A Turn reviewing other people's messages is confined to the threads under
+review (C11, ``lib.channels.assistant``).
 
 Entry points: ``visible_tools(owner, conversation_id)`` (catalog builder),
 ``execute(name, args, task)`` (handler). Schemas: ``contracts/channels_v1``.
@@ -65,17 +66,19 @@ def _identity(task: dict[str, Any]) -> tuple[int, str]:
 
 
 def _require_human_turn(task: dict[str, Any], owner: int, conversation_id: str) -> None:
-    """The current Turn answers genuine human input with no channel batch steered in.
+    """The current Turn answers genuine human input, and so does every steer merged into it.
 
     Mirrors the project-dispatch source fence: user principal, the task's own
-    assistant Turn, a human parent passing ``require_human_turn``. A channel
-    event batch delivered into a running Turn arrives through the steer lane,
-    which records only its command ID, so those IDs are checked as well.
+    assistant Turn, a human parent passing ``require_human_turn``. A steered
+    input (persisted on the Turn or already consumed by the task) has no Turn
+    of its own; unless it missed this Turn and was queued as the next request,
+    its committed author must pass ``require_human_turn`` as well
+    (``steered_input_turn``). Channel events, Router reports and peer messages
+    record no author, and neither do legacy records, so all of them revoke it.
     """
     from lib.channels.assistant import steered_records
-    from lib.channels.delivery import is_event_command
     from lib.identity import PrincipalContext
-    from lib.turn_initiation import require_human_turn
+    from lib.turn_initiation import require_human_turn, steered_input_turn
     from lib.turn_lifecycle import get_turn
     refused = ChannelError('human_turn_required',
                            'Only a genuine human request can decide outbox items, configure threads or '
@@ -96,10 +99,17 @@ def _require_human_turn(task: dict[str, Any], owner: int, conversation_id: str) 
         raise refused from error
     if human.get('conversationId') != conversation_id:
         raise refused
-    if any(is_event_command(record.get('commandId')) for record in steered_records(task, output)):
-        raise ChannelError('human_turn_required',
-                           'Channel events were merged into this Turn; ask the owner to repeat the '
-                           'decision in a new message')
+    for record in steered_records(task, output):
+        if record.get('deliveryState') == 'queued':
+            continue  # the next request's own input, never merged into this Turn
+        try:
+            require_human_turn(steered_input_turn(output, str(record.get('commandId') or '')),
+                               user_id=owner)
+        except ValueError as error:
+            raise ChannelError('human_turn_required',
+                               'Input without a recorded human author (a channel event, report or '
+                               'peer message) was merged into this Turn; ask the owner to repeat '
+                               'the decision in a new message') from error
 
 
 def _outside_review(what: str) -> ChannelError:
@@ -108,11 +118,8 @@ def _outside_review(what: str) -> ChannelError:
 
 
 def _requested_thread(args: dict[str, Any]) -> str | None:
-    if args.get('thread'):
-        return str(ThreadKey.parse(args['thread']))
-    if args.get('event_id'):
-        return str(parse_event_id(args['event_id'])[0])
-    return None
+    thread, _ = _read_target(args)
+    return str(thread) if thread is not None else None
 
 
 def _confine_review(name: str, args: dict[str, Any], authority, owner: int) -> None:
@@ -150,11 +157,16 @@ def _authorize(name: str, args: dict[str, Any], task: dict[str, Any]):
     from lib.channels.delivery import is_global_router
     router = is_global_router(owner, conversation_id)
     if not router:
+        if name == 'channel_send':
+            raise ChannelError('forbidden', 'Only the Global Router sends to channels. Report the file\'s path and '
+                                            'its project to the Global Router and ask it to send with channel_send; '
+                                            'never send through a platform login of your own (it takes over '
+                                            'Tofu\'s session)')
         if name not in SUBSCRIBER_TOOLS:
             raise ChannelError('forbidden', 'Channel tools are available only in the Global Router')
-        thread = args.get('thread') or (parse_event_id(args['event_id'])[0] if args.get('event_id') else None)
+        thread, _ = _read_target(args)
         if thread is None or conversation_id not in (
-                (ChannelStore(owner).thread(ThreadKey.parse(str(thread))) or {}).get('subscribers') or []):
+                (ChannelStore(owner).thread(thread) or {}).get('subscribers') or []):
             raise ChannelError('forbidden', 'Subscribers may read only the threads they subscribe to')
         return owner, conversation_id, router, None
     from lib.channels.assistant import turn_authority
@@ -173,22 +185,40 @@ def _event_view(record: dict[str, Any]) -> dict[str, Any]:
     keys = ('eventId', 'thread', 'senderId', 'senderName', 'text', 'sentAtMs', 'messageType',
             'disposition', 'replyToExternalId', 'mentionsAll', 'mentionedIds', 'url')
     # Media records hold the outcome and attachment ref, never the provider URL (C9).
-    return {key: record.get(key) for key in keys} | {'media': record.get('media') or [],
+    view = {key: record.get(key) for key in keys} | {'senderKind': record.get('senderKind') or 'user',
+                                                     'media': record.get('media') or [],
                                                      'deliveries': record.get('deliveries') or []}
+    # Edits are revisions of the original text, a recall removed it (channel protocol P2).
+    if record.get('revisions'):
+        view['revisions'] = record['revisions']
+    if record.get('recalled'):
+        view['recalled'] = True
+    return view
+
+
+def _read_target(args: dict[str, Any]) -> tuple[ThreadKey | None, str | None]:
+    """The one thread (and event) a ``channel_read`` names; ``thread`` and ``event_id`` must agree."""
+    thread = ThreadKey.parse(str(args['thread'])) if args.get('thread') else None
+    if not args.get('event_id'):
+        return thread, None
+    event_thread, external_id = parse_event_id(args['event_id'])
+    if thread is not None and thread != event_thread:
+        raise ChannelError('invalid_arguments', 'thread and event_id name different threads; '
+                                                'give the event_id alone')
+    return event_thread, external_id
 
 
 def _read(owner: int, args: dict[str, Any]) -> dict[str, Any]:
     store = ChannelStore(owner)
-    if args.get('event_id'):
-        thread, external_id = parse_event_id(args['event_id'])
+    thread, external_id = _read_target(args)
+    if external_id is not None:
         record = store.event(thread, external_id)
         if record is None:
             raise ChannelError('not_found', 'Event is not stored (ignored threads and dropped '
                                             'messages keep no events)')
         return {'event': _event_view(record)}
-    if not args.get('thread'):
+    if thread is None:
         raise ChannelError('invalid_arguments', 'Provide thread or event_id')
-    thread = ThreadKey.parse(args['thread'])
     events, following = store.event_page(thread, before=str(args.get('before') or ''))
     return {'thread': service.thread_view(store.thread(thread) or {'key': str(thread)},
                                           store.account(thread.channel)),
@@ -206,15 +236,13 @@ def execute(name: str, args: dict[str, Any], task: dict[str, Any]) -> dict[str, 
     if name == 'channel_read':
         return _read(owner, args)
     if name == 'channel_send':
-        files = []
+        files, carried = [], False
         if args.get('attachments') is not None:
             from lib.channels import attachments
             from lib.channels.model import CHANNEL_TRAITS
-            channel = ThreadKey.parse(args.get('thread')).channel
-            if not CHANNEL_TRAITS[channel].get('attachments'):
-                raise ChannelError('attachments_unsupported',
-                                   f'{CHANNEL_TRAITS[channel]["label"]} threads take no attachments')
-            files = attachments.from_tool(task, owner, conversation_id, args['attachments'])
+            # A platform without files gets each one named in the text (channel protocol P5).
+            carried = bool(CHANNEL_TRAITS[ThreadKey.parse(args.get('thread')).channel].get('attachments'))
+            files = attachments.from_tool(task, owner, conversation_id, args['attachments'], carried=carried)
         item = outbox.enqueue(
             owner, args.get('thread'), args.get('text'), idempotency_key=args.get('idempotency_key'),
             reply_to=args.get('reply_to'), attachments=files,
@@ -223,7 +251,7 @@ def execute(name: str, args: dict[str, Any], task: dict[str, Any]) -> dict[str, 
             needs_approval=args.get('needs_approval') is True)
         result = {'item': service.outbox_item_view(owner, item.id),
                   'note': 'queued/draft is not proof of delivery; read channel_outbox for the outcome'}
-        if files:
+        if files and carried:
             from lib.channels.renditions import preview_plan
             result['previews'] = preview_plan(files)
         return result

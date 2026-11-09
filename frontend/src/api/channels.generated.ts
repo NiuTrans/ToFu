@@ -5,7 +5,7 @@ export const CHANNEL_DEFAULT_REPLY_POLICY = "notify";
 export const CHANNEL_MIS_PATTERN = "^[a-z0-9][a-z0-9._-]{0,63}$";
 export const CHANNEL_OWNER_NOTE_MAX_CHARS = 2000;
 
-export type Channel = "dx" | "github";
+export type Channel = "dx" | "github" | "wecom" | "qq" | "wechat";
 
 export type ThreadKind = "gid" | "uid" | "pid" | "issue";
 
@@ -19,7 +19,7 @@ export type ConfigurableThreadMode = "watch" | "mentions" | "ignore";
 
 export type ReplyPolicy = "auto" | "draft" | "notify" | "never";
 
-export type AccountState = "disabled" | "starting" | "authorizing" | "connected" | "disconnected" | "needs_login" | "kicked" | "error";
+export type AccountState = "disabled" | "starting" | "authorizing" | "connected" | "disconnected" | "needs_login" | "runtime_unavailable" | "kicked" | "error";
 
 export type Mis = string;
 
@@ -27,7 +27,7 @@ export type EventDisposition = "command" | "candidate" | "context";
 
 export type OutboxState = "draft" | "queued" | "sending" | "unknown" | "sent" | "failed" | "discarded";
 
-export type OutboxOriginKind = "router_receipt" | "router_content" | "router_progress" | "router_reply" | "router_status" | "tool" | "draft_notice";
+export type OutboxOriginKind = "router_receipt" | "router_content" | "router_progress" | "router_reply" | "router_status" | "tool" | "draft_notice" | "robot_notice";
 
 export type OutboxAuthority = "owner" | "merged" | "third_party" | "nonhuman";
 
@@ -73,6 +73,7 @@ export type DxRobotView = {
   credentialName: string;
   credentialHint: string;
   managed: boolean;
+  builtIn: boolean;
   error: DxRobotError | null;
 };
 
@@ -143,6 +144,7 @@ export type OutboxAttachmentView = {
   renditionOf: number | null;
   state: OutboxAttachmentState;
   error: string | null;
+  project?: string;
 };
 
 export type OutboxItemView = {
@@ -194,6 +196,45 @@ export type GitHubAccountView = {
   webBaseUrl: string;
   poll: GitHubPollView;
   routerConversationId: string | null;
+};
+
+export type BotOwnerIdentity = {
+  uid: string;
+  name: string;
+};
+
+export type BotCredentialView = {
+  name: string;
+  hint: string;
+  managed: boolean;
+};
+
+export type BotLoginView = {
+  state: "waiting" | "scanned" | "expired" | "failed";
+  qrDataUri: string | null;
+  detail: string;
+};
+
+export type BotAccountView = {
+  channel: "wecom" | "qq" | "wechat";
+  enabled: boolean;
+  appId: string | null;
+  identity: BotOwnerIdentity | null;
+  commandChat: ThreadKey | null;
+  status: ChannelAccountStatus;
+  credential: BotCredentialView | null;
+  pairingCode: string | null;
+  login: BotLoginView | null;
+  routerConversationId: string | null;
+};
+
+export type BotAccountUpdate = {
+  enabled?: boolean;
+  appId?: string;
+  secret?: string;
+  credentialName?: string | null;
+  pair?: boolean;
+  login?: boolean;
 };
 
 export type GitHubAccountUpdate = {

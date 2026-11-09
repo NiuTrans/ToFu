@@ -113,7 +113,10 @@ def test_heartbeats_do_not_split_wait_or_ttft(monkeypatch):
     ttft = [s for s in result['spans'] if s['kind'] == 'llm_ttft']
     assert len(waits) == len(ttft) == 1
     assert (waits[0]['tStart'], waits[0]['tEnd']) == (3, 8)
-    assert (ttft[0]['tStart'], ttft[0]['tEnd']) == (1, 8)
+    # The real retry, not a beat, ends the window: the attempt before it
+    # failed pre-first-token. No attempt start follows, so no new window.
+    assert (ttft[0]['tStart'], ttft[0]['tEnd']) == (1, 3)
+    assert ttft[0]['status'] == 'error' and ttft[0]['attrs']['failedAttempt'] is True
 
 
 def test_backward_clock_is_partial_and_clamped(monkeypatch):

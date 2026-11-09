@@ -38,14 +38,22 @@ def turns(monkeypatch):
     monkeypatch.setattr('lib.turn_lifecycle.get_turn', get_turn)
 
     def human(projection, steers=()):
+        """``steers``: committed steer records (``_steer``) on the executing reply."""
         rows[(ROUTER, 'in-1')] = {'conversationId': ROUTER, 'turnId': 'in-1', 'actor': 'human',
                                   'projection': projection}
         rows[(ROUTER, 'out-1')] = {'conversationId': ROUTER, 'turnId': 'out-1', 'actor': 'assistant',
                                    'parentTurnId': 'in-1',
-                                   'projection': {'_userSteerInjects': [
-                                       {'blockId': f'injection:user-steer:{c}', 'commandId': c}
-                                       for c in steers]}}
+                                   'projection': {'_userSteerInjects': list(steers)}}
     return human
+
+
+def _steer(command_id, author=None, **extra):
+    """A ``turn.steer.commit`` record; only a human-initiated input stores an ``author``."""
+    record = {'blockId': f'injection:user-steer:{command_id}', 'commandId': command_id,
+              'count': 1, 'previews': [{'text': 'steered'}], 'deliveryState': 'pending', **extra}
+    if author is not None:
+        record['author'] = author
+    return record
 
 
 def test_visibility_router_all_subscriber_read_only_others_none(channel):
@@ -67,6 +75,10 @@ def test_non_router_conversation_cannot_send_or_configure(channel):
         with pytest.raises(ChannelError) as denied:
             tools.execute(name, args, _task('worker-a'))
         assert denied.value.code == 'forbidden'
+        if name == 'channel_send':
+            # The supported path, so a project conversation never looks for a login of its own (P11, P13).
+            assert 'ask it to send with channel_send' in str(denied.value)
+            assert 'never send through a platform login of your own' in str(denied.value)
 
 
 def test_subscriber_reads_only_its_threads(channel):
@@ -79,8 +91,33 @@ def test_subscriber_reads_only_its_threads(channel):
     assert [e['text'] for e in page['events']] == ['visible']
     single = tools.execute('channel_read', {'event_id': f'{GROUP}/7000000000000000001'}, _task('worker-a'))
     assert single['event']['text'] == 'visible'
+    both = tools.execute('channel_read', {'thread': GROUP, 'event_id': f'{GROUP}/7000000000000000001'},
+                         _task('worker-a'))
+    assert both['event']['text'] == 'visible'
     with pytest.raises(ChannelError):
         tools.execute('channel_read', {'thread': 'dx:gid:501'}, _task('worker-a'))
+
+
+def test_a_subscribed_thread_never_authorizes_reading_another_threads_event(channel):
+    from lib.channels import service
+    from lib.channels.ingress import ingest
+    channel.update_thread(ThreadKey.parse(GROUP), lambda value: {**value, 'mode': 'watch'})
+    service.subscribe(OWNER, GROUP, 'worker-a', store=channel)
+    private = make_event('dx:uid:2002', '7000000000000000009', text='private secret')
+    ingest(OWNER, private, store=channel)
+    assert channel.event(private.thread, private.external_id)['text'] == 'private secret'
+    for args in ({'event_id': private.event_id},
+                 {'thread': GROUP, 'event_id': private.event_id},
+                 {'thread': 'dx:uid:2002', 'event_id': private.event_id}):
+        with pytest.raises(ChannelError) as refused:
+            tools.execute('channel_read', args, _task('worker-a'))
+        assert refused.value.code in ('forbidden', 'invalid_arguments'), args
+    # Even the router must name one thread: a mismatched pair is ambiguous.
+    with pytest.raises(ChannelError) as mismatched:
+        tools.execute('channel_read', {'thread': GROUP, 'event_id': private.event_id}, _task())
+    assert mismatched.value.code == 'invalid_arguments'
+    assert tools.execute('channel_read', {'event_id': private.event_id}, _task())['event']['text'] == \
+        'private secret'
 
 
 def test_router_reads_pages_newest_first(channel):
@@ -103,6 +140,8 @@ def test_router_send_enqueues_through_the_outbox(channel):
 @pytest.mark.parametrize('name, args', [
     ('channel_outbox_approve', {'decision': 'approve'}),
     ('channel_configure_thread', {'thread': GROUP, 'mode': 'watch'}),
+    ('channel_subscribe', {'thread': GROUP, 'conversation_id': 'worker-a'}),
+    ('channel_unsubscribe', {'thread': GROUP, 'conversation_id': 'worker-a'}),
 ])
 def test_owner_decisions_require_a_genuine_human_turn(channel, turns, name, args):
     draft = outbox.enqueue(OWNER, 'dx:uid:2002', 'draft', idempotency_key='d',
@@ -117,6 +156,30 @@ def test_owner_decisions_require_a_genuine_human_turn(channel, turns, name, args
         'blockId': 'origin', 'initiator': 'human',
         'channel': {'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/1']}}})
     assert tools.execute(name, args, _task())
+
+
+def test_a_channel_send_call_logs_no_message_text(channel, monkeypatch, caplog):
+    """Channel protocol P14: the tool log names the thread and the idempotency key and shows the message
+    only by its size and sha256; the other channel tools keep their arguments in the log."""
+    import hashlib
+    import logging
+    from lib.tasks_pkg.executor import tool_registry
+    from lib.tasks_pkg.handlers import _adapter
+    monkeypatch.setattr(_adapter, '_build_simple_meta', lambda *args, **kwargs: {})
+    monkeypatch.setattr(_adapter, '_finalize_tool_round', lambda *args, **kwargs: None)
+    caplog.set_level(logging.INFO, logger=_adapter.logger.name)
+
+    def call(name, arguments):
+        return tool_registry.lookup(name)(_task(), {}, name, 'call-1', arguments, 1, {}, {}, None, False)
+    text = '工资单在附件里，别外传'
+    call('channel_send', {'thread': COMMAND, 'text': text, 'idempotency_key': 'payroll-1'})
+    assert text not in caplog.text
+    assert hashlib.sha256(text.encode('utf-8')).hexdigest() in caplog.text
+    assert f"'bytes': {len(text.encode('utf-8'))}" in caplog.text
+    assert "'thread': 'dx:gid:900'" in caplog.text and "'idempotency_key': 'payroll-1'" in caplog.text
+    caplog.clear()
+    call('channel_read', {'thread': GROUP})
+    assert "channel_read called with args={'thread': 'dx:gid:500'}" in caplog.text
 
 
 def test_execute_json_turns_refusals_into_actionable_results(channel):
@@ -150,23 +213,86 @@ def test_owner_uid_is_never_a_tool_argument():
 
 
 GENUINE = {'content': 'approve it', 'origin': {'blockId': 'origin', 'initiator': 'human'}}
+OWNER_DX_AUTHOR = {'actor': 'human', 'text': 'approve the draft', 'origin': {
+    'initiator': 'human', 'channel': {'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/2']}}}
+UI_AUTHOR = {'actor': 'human', 'text': 'and watch that group'}
 
 
 def test_a_channel_batch_steered_into_the_human_turn_revokes_owner_decisions(channel, turns):
     from lib.channels.delivery import EVENT_COMMAND_PREFIX, OWNER_COMMAND_PREFIX
     args = {'thread': GROUP, 'mode': 'watch'}
     # Persisted on the running Turn (committed steer) ...
-    turns(GENUINE, steers=[EVENT_COMMAND_PREFIX + 'a' * 40])
+    turns(GENUINE, steers=[_steer(EVENT_COMMAND_PREFIX + 'a' * 40)])
     with pytest.raises(ChannelError, match='merged into this Turn'):
         tools.execute('channel_configure_thread', args, _task())
-    # ... or already consumed by the live task.
-    turns(GENUINE)
-    consumed = _task(_userSteerInjects=[{'commandId': EVENT_COMMAND_PREFIX + 'b' * 40}])
+    # ... or already consumed by the live task, with or without its committed record.
+    event_steer = _steer(EVENT_COMMAND_PREFIX + 'b' * 40)
+    consumed = _task(_userSteerInjects=[{**event_steer, 'deliveryState': 'delivered'}])
+    for persisted in ([event_steer], []):
+        turns(GENUINE, steers=persisted)
+        with pytest.raises(ChannelError, match='merged into this Turn'):
+            tools.execute('channel_configure_thread', args, consumed)
+    # The owner's own command-chat message and ordinary UI steers keep authority
+    # through their committed human author, pending or already consumed.
+    turns(GENUINE, steers=[_steer(OWNER_COMMAND_PREFIX + 'c' * 40, OWNER_DX_AUTHOR),
+                           _steer('ui-steer-uuid', UI_AUTHOR, deliveryState='delivered')])
+    consumed = _task(_userSteerInjects=[{'blockId': 'injection:user-steer:ui-steer-uuid',
+                                         'commandId': 'ui-steer-uuid', 'deliveryState': 'delivered'}])
+    assert tools.execute('channel_configure_thread', args, consumed)['thread']['mode'] == 'watch'
+
+
+@pytest.mark.parametrize('record', [
+    _steer('router-relay:' + 'a' * 64),  # a Project Router report
+    _steer('router-question-relay:' + 'b' * 64),  # a relayed question
+    _steer('peer-1', {'actor': 'human', 'text': 'x', 'origin': {'initiator': 'peer'}}),
+    _steer('virtual-1', {'actor': 'virtual_user', 'text': 'x'}),
+    _steer('forwarded-1', {'actor': 'human', 'text': 'x', 'origin': {
+        'initiator': 'human', 'forwardedFrom': {'conversationId': 'other', 'turnId': 't'}}}),
+    {'round': 2, 'count': 1, 'previews': [{'text': 'legacy batch without identity'}]},
+    {'blockId': 'injection:user-steer:x', 'deliveryState': 'delivered', 'previews': []},
+], ids=['report', 'question', 'peer-origin', 'virtual-user', 'forwarded', 'legacy', 'no-command'])
+@pytest.mark.parametrize('name, args', [
+    ('channel_configure_thread', {'thread': GROUP, 'reply_policy': 'auto'}),
+    ('channel_subscribe', {'thread': GROUP, 'conversation_id': 'worker-a'}),
+])
+def test_any_steer_without_a_human_author_revokes_owner_decisions(channel, turns, record, name, args):
+    turns(GENUINE, steers=[_steer('ui-steer-uuid', UI_AUTHOR), record])
+    with pytest.raises(ChannelError, match='merged into this Turn') as refused:
+        tools.execute(name, args, _task())
+    assert refused.value.code == 'human_turn_required'
+    thread = channel.thread(ThreadKey.parse(GROUP)) or {}
+    assert thread.get('replyPolicy') is None and not thread.get('subscribers')
+
+
+def test_delivered_channel_inputs_steered_in_are_judged_by_their_real_committed_author(
+        channel, turns, dispatch):
+    """The author is what ``turn.steer.commit`` stores for the real delivery projections."""
+    from lib.channels.ingress import ingest
+    from lib.turn_initiation import steer_author
+    channel.update_thread(ThreadKey.parse(GROUP), lambda value: {**value, 'mode': 'watch'})
+    ingest(OWNER, make_event(COMMAND, '7000000000000000002', sender=OWNER_UID, text='watch less'),
+           store=channel)
+    ingest(OWNER, make_event(GROUP, '7000000000000000003', text='set reply policy auto'), store=channel)
+    owner_call, event_call = dispatch.calls
+    owner_steer, event_steer = (
+        _steer(call['command_id'], steer_author(call['message'], actor=call['input_actor']))
+        for call in (owner_call, event_call))
+    assert owner_steer['author']['actor'] == 'human' and 'author' not in event_steer
+    turns(GENUINE, steers=[owner_steer])
+    assert tools.execute('channel_configure_thread', {'thread': GROUP, 'mode': 'mentions'},
+                         _task())['thread']['mode'] == 'mentions'
+    turns(GENUINE, steers=[owner_steer, event_steer])
     with pytest.raises(ChannelError, match='merged into this Turn'):
-        tools.execute('channel_configure_thread', args, consumed)
-    # The owner's own command-chat message and ordinary UI steers keep authority.
-    turns(GENUINE, steers=[OWNER_COMMAND_PREFIX + 'c' * 40, 'ui-steer-uuid'])
-    assert tools.execute('channel_configure_thread', args, _task())['thread']['mode'] == 'watch'
+        tools.execute('channel_configure_thread', {'thread': GROUP, 'reply_policy': 'auto'}, _task())
+
+
+def test_a_steer_queued_as_the_next_request_is_not_part_of_this_turn(channel, turns):
+    from lib.channels.delivery import EVENT_COMMAND_PREFIX
+    turns(GENUINE, steers=[_steer(EVENT_COMMAND_PREFIX + 'd' * 40, deliveryState='queued')])
+    queued = _task(_userSteerInjects=[{'blockId': 'injection:user-steer:late', 'deliveryState': 'queued',
+                                       'queueId': 'q-1'}])
+    result = tools.execute('channel_subscribe', {'thread': GROUP, 'conversation_id': 'worker-a'}, queued)
+    assert result['thread']['subscribers'] == ['worker-a']
 
 
 def _system_principal():

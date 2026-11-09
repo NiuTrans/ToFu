@@ -160,7 +160,7 @@ def issue_ack(root: str, conv_id: str) -> str:
             nonce = secrets.token_hex(3)
         _acks[(root, nonce)] = (now + ACK_TTL_SEC, conv_id or '')
     logger.info('[GitGuard] ack issued root=%s conv=%s', os.path.basename(root),
-                (conv_id or '-')[:8])
+                (conv_id or '-'))
     return nonce
 
 

@@ -580,7 +580,7 @@ def get_conversation(conversation_id, *, user_id,
             row = prose_projection[0] if prose_projection is not None else None
     except Exception as exc:
         logger.debug('[conv_ref] conversation read failed conv=%s: %s',
-                     (conversation_id or '')[:12], exc)
+                     (conversation_id or ''), exc)
         row = None
     if row is None:
         return f"Error: Conversation '{conversation_id}' not found. Use list_conversations to find valid conversation IDs."
@@ -602,7 +602,7 @@ def get_conversation(conversation_id, *, user_id,
             except Exception as exc:
                 logger.debug(
                     '[conv_ref] raw fallback read failed conv=%s: %s',
-                    (conversation_id or '')[:12],
+                    (conversation_id or ''),
                     exc,
                 )
                 full_row = None
@@ -809,7 +809,7 @@ def _get_conversation_around_turn(conversation_id, *, owner_id, turn_id,
             window=window_size)
     except Exception as exc:
         logger.debug('[conv_ref] anchored read failed conv=%s: %s',
-                     (conversation_id or '')[:12], exc)
+                     (conversation_id or ''), exc)
         window = None
     if window is None:
         return (f"Error: Conversation '{conversation_id}' not found. "

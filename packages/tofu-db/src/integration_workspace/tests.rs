@@ -187,6 +187,44 @@ fn denial_survives_restart_and_conflicts_with_inflight_claim_transaction() {
 }
 
 #[test]
+fn next_executor_generation_reopens_a_denial_and_fences_the_stale_one() {
+    for first in [json!({"executorTaskId":"attempt-1"}), json!({})] {
+        let (_vfs, mut database) = prepared();
+        let input = registration(11, "work", "/checkout/work");
+        call(&mut database, "register", input.clone()).unwrap();
+        let mut checkpoint = input.clone();
+        checkpoint["checkpoint_sha"] = json!("checkpoint");
+        call(&mut database, "save_checkpoint", checkpoint).unwrap();
+        let receipt = |delivery: Value| -> Value {
+            let mut merged = first.clone();
+            merged.as_object_mut().unwrap().extend(delivery.as_object().unwrap().clone());
+            merged
+        };
+        let mut database_meta = |database: &mut AuthorityDatabase, delivery: Value| -> Value {
+            let mut patch = input.clone();
+            patch["patch_json"] = json!(json!({"delivery": delivery}).to_string());
+            call(database, "set_meta", patch).unwrap()["origin"]["delivery"].clone()
+        };
+        let denied = database_meta(&mut database, receipt(json!({"taskOutcome":"failed","state":"preserved"})));
+        for stale in [receipt(json!({"taskOutcome":"completed","state":"pending"})),
+                      receipt(json!({"taskOutcome":"","state":"working"})),
+                      json!({"executorTaskId":"attempt-2","taskOutcome":"completed","state":"pending"}),
+                      json!({"executorTaskId":"attempt-2","taskOutcome":"failed","state":"working"}),
+                      json!({"executorTaskId":"","taskOutcome":"","state":"working"})] {
+            assert_eq!(database_meta(&mut database, stale), denied);
+        }
+        let opened = json!({"executorTaskId":"attempt-2","taskOutcome":"","state":"working"});
+        assert_eq!(database_meta(&mut database, opened.clone()), opened);
+        let mut late = denied.clone();
+        late["reason"] = json!("late preservation");
+        assert_eq!(database_meta(&mut database, late), opened);
+        let settled = json!({"executorTaskId":"attempt-2","taskOutcome":"completed","state":"pending"});
+        assert_eq!(database_meta(&mut database, settled.clone()), settled);
+        call(&mut database, "submit", input.clone()).unwrap();
+    }
+}
+
+#[test]
 fn checkout_claim_supports_paths_larger_than_entity_keys() {
     let (_vfs, mut database) = prepared();
     let path = format!("/{}", "x".repeat(4095));

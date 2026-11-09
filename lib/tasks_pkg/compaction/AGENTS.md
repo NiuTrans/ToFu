@@ -12,7 +12,10 @@ tests are the executable compatibility matrix.
 `_continuity.py` carries source-derived folded execution state independently
 of model prose; its schema is `contracts/compaction_continuity_v1.schema.json`.
 Verify identity/digest before reuse and reserve the complete packet before a
-summary call. Verify `test_unified_continuity.py`, including manual rebuild.
+summary call; only a packet unfit beside the smallest tail folds its oldest
+observations into the narrative (`foldedIntoNarrative`, one fold set shared by
+plan, summary input, quote and acceptance). Verify `test_unified_continuity.py`,
+including manual rebuild and the floor fold.
 `_evidence.py` binds L1's original observations to their compacted occurrences;
 verify `test_compaction_chain.py` for L1/L2, restored snapshots and provider wire.
 Final request-size settlement follows all injections/admission, not recomposition.
@@ -32,6 +35,10 @@ metadata; candidate finalizers are pure and retention stays outside the search.
 Verify `test_cloud_idle_l1.py` and `tests/model_routing/test_context_activity.py`.
 Verify final-result budget facts/backends, aggregate recovery and source round
 budget tests. Source-policy ceilings must agree across every fitting stage.
+Round allocation reserves required views before sharing optional space by demand;
+prepare each shrinking result once and keep all subsequent fitting pure. Verify
+round-evidence allocation/backends and file-preview layout tests.
+Mixed-result utilization tests verify that admitted items release unused space to text.
 Canonical verdict overrides must reconcile prior views and manifest references
 before fast returns; verify canonical-envelope verdict and backend tests.
 `_context_lifecycle.py` validates manual admission through the captured

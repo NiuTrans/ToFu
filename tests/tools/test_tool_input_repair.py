@@ -641,23 +641,19 @@ def test_edit_file_item_keys_from_claude_edit_are_renamed():
     instead of rejecting the call for a missing argument it already holds."""
     args = {
         'description': 'x',
-        'edits': [{'file_path': 'a.py', 'operation': 'replace',
-                   'old_string': 'foo', 'new_string': 'bar'}],
+        'edits': [{'file_path': 'a.py', 'old_string': 'foo', 'new_string': 'bar'}],
     }
     out, log = validate_then_repair('edit_file', args)
-    assert out['edits'] == [{'path': 'a.py', 'operation': 'replace',
-                             'anchor': 'foo', 'content': 'bar'}]
-    assert args['edits'] == [{'file_path': 'a.py', 'operation': 'replace',
-                              'old_string': 'foo', 'new_string': 'bar'}]
-    assert log == [('edits[0].path', 'item_param_alias'),
-                   ('edits[0].anchor', 'item_param_alias'),
-                   ('edits[0].content', 'item_param_alias')]
+    assert out['edits'] == [{'path': 'a.py', 'anchor': 'foo', 'content': 'bar'}]
+    assert args['edits'] == [{'file_path': 'a.py', 'old_string': 'foo', 'new_string': 'bar'}]
+    # Without the retired ``operation`` the foreign item is reshaped whole.
+    assert log == [('edit_file', 'structural_transform')]
 
 
 def test_edit_file_item_alias_never_clobbers_a_canonical_key():
     out, log = validate_then_repair('edit_file', {
         'description': 'x',
-        'edits': [{'path': 'a.py', 'operation': 'replace', 'anchor': 'foo',
+        'edits': [{'path': 'a.py', 'anchor': 'foo',
                    'content': 'keep', 'new_string': 'other'}],
     })
     assert out['edits'][0]['content'] == 'keep'
@@ -668,7 +664,7 @@ def test_edit_file_item_alias_stays_noop_without_a_recoverable_value():
     """Nothing to rename means nothing to repair — the contract round must
     still report ``content`` missing rather than invent a replacement."""
     args = {'description': 'x', 'edits': [
-        {'path': 'a.py', 'operation': 'replace', 'anchor': 'foo'}]}
+        {'path': 'a.py', 'anchor': 'foo'}]}
     out, log = validate_then_repair('edit_file', args)
     assert log == []
     assert 'content' not in out['edits'][0]
@@ -692,12 +688,11 @@ def test_edit_file_claude_item_keys_survive_contract_validation():
     Claude Code's item key — the call must execute, not be rejected."""
     result = _ingest_edit_file({
         'description': 'Add bar',
-        'edits': [{'file_path': 'a.py', 'operation': 'replace',
-                   'old_string': 'foo', 'new_string': 'bar'}],
+        'edits': [{'file_path': 'a.py', 'old_string': 'foo', 'new_string': 'bar'}],
     })
     assert result.parse_error is None
     assert result.fn_args['edits'][0]['content'] == 'bar'
-    assert ('edits[0].content', 'item_param_alias') in result.repair_log
+    assert ('edit_file', 'structural_transform') in result.repair_log
 
 
 def test_edit_file_envelope_path_reaches_every_edit():
@@ -707,7 +702,7 @@ def test_edit_file_envelope_path_reaches_every_edit():
     result = _ingest_edit_file({
         'description': 'Wire main',
         'path': 'src/app.py',
-        'edits': [{'operation': 'replace', 'anchor': 'foo', 'content': 'bar'}],
+        'edits': [{'anchor': 'foo', 'content': 'bar'}],
     })
     assert result.parse_error is None
     assert result.fn_args['edits'][0]['path'] == 'src/app.py'
@@ -721,10 +716,8 @@ def test_edit_file_blank_item_path_inherits_the_batch_single_file():
     result = _ingest_edit_file({
         'description': 'Wire main',
         'edits': [
-            {'path': 'src/app.py', 'operation': 'replace',
-             'anchor': 'foo', 'content': 'bar'},
-            {'path': '', 'operation': 'insert_after',
-             'anchor': 'baz', 'content': 'qux'},
+            {'path': 'src/app.py', 'anchor': 'foo', 'content': 'bar'},
+            {'path': '', 'anchor': 'baz', 'content': 'qux'},
         ],
     })
     assert result.parse_error is None
@@ -738,12 +731,9 @@ def test_edit_file_blank_item_path_in_multi_file_batch_fails_closed():
     result = _ingest_edit_file({
         'description': 'Wire two',
         'edits': [
-            {'path': 'a.py', 'operation': 'replace',
-             'anchor': 'foo', 'content': 'bar'},
-            {'path': 'b.py', 'operation': 'replace',
-             'anchor': 'foo', 'content': 'bar'},
-            {'path': '', 'operation': 'replace',
-             'anchor': 'foo', 'content': 'bar'},
+            {'path': 'a.py', 'anchor': 'foo', 'content': 'bar'},
+            {'path': 'b.py', 'anchor': 'foo', 'content': 'bar'},
+            {'path': '', 'anchor': 'foo', 'content': 'bar'},
         ],
     })
     assert result.parse_error is not None
@@ -755,8 +745,7 @@ def test_edit_file_all_blank_paths_fails_closed_without_guessing():
     the rejection stays honest and the recovery round supplies the path."""
     result = _ingest_edit_file({
         'description': 'Wire main',
-        'edits': [{'path': '', 'operation': 'replace',
-                   'anchor': 'foo', 'content': 'bar'}],
+        'edits': [{'path': '', 'anchor': 'foo', 'content': 'bar'}],
     })
     assert result.parse_error is not None
     assert 'edits[0].path' in result.parse_error
@@ -766,24 +755,24 @@ def test_edit_file_rejection_names_the_missing_item_key_and_item_shape():
     missing and what a complete item looks like."""
     result = _ingest_edit_file({
         'description': 'Add bar',
-        'edits': [{'path': 'a.py', 'operation': 'replace', 'anchor': 'foo'}],
+        'edits': [{'path': 'a.py', 'anchor': 'foo'}],
     })
     assert result.parse_error is not None
     assert 'content' in result.parse_error
     assert '$.edits[0]' in result.parse_error
     assert 'each item needs:' in result.parse_error
 
-def test_edit_item_without_operation_is_never_guessed_as_an_insertion():
+def test_edit_item_without_operation_is_a_replace_never_an_insertion():
     """An anchored item naming no operation used to become insert_after, so
-    an intended replace silently duplicated the anchor's code. Nothing in the
-    item proves an insertion: the contract round must name the missing key."""
+    an intended replace silently duplicated the anchor's code. edit_file only
+    replaces now: the item executes exactly as sent."""
     result = _ingest_edit_file({
         'description': 'Fix it',
         'edits': [{'path': 'a.py', 'anchor': 'old()', 'content': 'new()'}],
     })
-    assert result.parse_error is not None
-    assert 'operation' in result.parse_error
-    assert 'operation' not in result.fn_args['edits'][0]
+    assert result.parse_error is None
+    assert result.fn_args['edits'] == [
+        {'path': 'a.py', 'anchor': 'old()', 'content': 'new()'}]
     assert ('edit_file', 'structural_transform') not in result.repair_log
 
 
@@ -803,9 +792,10 @@ def test_legacy_insert_position_still_names_its_operation(position, operation):
     ('insert_content', {'path': 'a.py', 'anchor': 'A', 'content': 'B'}),
     ('insert_contents', {'edits': [{'path': 'a.py', 'anchor': 'A', 'content': 'B'}]}),
 ])
-def test_retired_insert_tool_name_keeps_its_documented_after_default(name, args):
+def test_retired_insert_tool_name_is_refused_with_its_after_default(name, args):
     """The retired insert tools documented ``position`` as optional (default
-    after); their emitted name is the evidence that an anchored item inserts."""
+    after); their emitted name is the evidence that an anchored item inserts,
+    so the refusal explains the insert-after as a replace."""
     import json as _json
     from lib.tool_input_repair import ingest_tool_call
     from lib.tools.project import PROJECT_TOOL_EDIT_FILE
@@ -816,9 +806,10 @@ def test_retired_insert_tool_name_keeps_its_documented_after_default(name, args)
         contract_documents_by_name={'edit_file': adapt_legacy_tool_contract(
             PROJECT_TOOL_EDIT_FILE).search_document()})
     assert result.fn_name == 'edit_file'
-    assert result.parse_error is None
     assert result.fn_args['edits'] == [
         {'path': 'a.py', 'operation': 'insert_after', 'anchor': 'A', 'content': 'B'}]
+    assert 'only replaces' in result.parse_error
+    assert '{"anchor":"A","content":"A\\nNEW"}' in result.parse_error
 
 
 def test_schema_hint_names_required_keys_of_array_items():
@@ -826,9 +817,9 @@ def test_schema_hint_names_required_keys_of_array_items():
     key was missing; the hint must name the item shape."""
     hint = schema_hint('edit_file')
     assert 'each item needs:' in hint
-    for key in ('path(string)', 'operation(string)', 'anchor(string)',
-                'content(string)'):
+    for key in ('path(string)', 'anchor(string)', 'content(string)'):
         assert key in hint
+    assert 'operation' not in hint
 
 def test_todo_write_contract_rejection_carries_schema_hint():
     """The recovery round must see the expected shape, not a bare path —
@@ -1604,9 +1595,9 @@ def test_kimi_str_replace_file_envelope_to_edit_file():
             {'old': 'c', 'new': 'd', 'replace_all': True}]},
     )
     assert out['edits'] == [
-        {'path': 'a.py', 'operation': 'replace', 'anchor': 'a',
+        {'path': 'a.py', 'anchor': 'a',
          'content': 'b'},
-        {'path': 'a.py', 'operation': 'replace', 'anchor': 'c',
+        {'path': 'a.py', 'anchor': 'c',
          'content': 'd', 'replace_all': True},
     ]
 
@@ -1619,7 +1610,7 @@ def test_opencode_edit_keys_to_edit_file():
          'replaceAll': True},
     )
     assert out['edits'] == [
-        {'path': 'a.py', 'operation': 'replace', 'anchor': 'foo',
+        {'path': 'a.py', 'anchor': 'foo',
          'content': 'bar', 'replace_all': True},
     ]
 
@@ -1835,8 +1826,7 @@ def test_caption_backfill_never_fires_for_native_spelling():
     assert 'description' not in out
     assert ('write_file', 'structural_transform') not in log
     out, log = validate_then_repair(
-        'edit_file', {'edits': [{'path': 'a.py', 'operation': 'replace',
-                                 'anchor': 'x', 'content': 'y'}]})
+        'edit_file', {'edits': [{'path': 'a.py', 'anchor': 'x', 'content': 'y'}]})
     assert 'description' not in out
     assert ('edit_file', 'structural_transform') not in log
 
@@ -1864,8 +1854,7 @@ def test_edit_file_allow_outside_workspace_survives_foreign_reshape():
     out, log = validate_then_repair(
         'edit_file', {'file_path': '/abs/eh/c.smali', 'old_string': 'x',
                       'new_string': 'y', 'allow_outside_workspace': True})
-    assert out['edits'] == [{'path': '/abs/eh/c.smali', 'operation': 'replace',
-                             'anchor': 'x', 'content': 'y'}]
+    assert out['edits'] == [{'path': '/abs/eh/c.smali', 'anchor': 'x', 'content': 'y'}]
     assert out['allow_outside_workspace'] is True
     assert ('edit_file', 'structural_transform') in log
 
@@ -2051,9 +2040,8 @@ def test_edit_file_stringified_edits_honor_batch_path(overrides):
     """Type repair runs after structural repair; coverage must use the envelope."""
     import json
 
-    edits = [{'operation': 'replace', 'anchor': 'A', 'content': 'B'}]
-    edits.extend({'path': path, 'operation': 'replace',
-                  'anchor': 'C', 'content': 'D'} for path in overrides)
+    edits = [{'anchor': 'A', 'content': 'B'}]
+    edits.extend({'path': path, 'anchor': 'C', 'content': 'D'} for path in overrides)
     result = _ingest_edit_file({
         'description': 'decoded batch', 'path': 'batch.py',
         'edits': json.dumps(edits)})
@@ -2071,6 +2059,6 @@ def test_edit_file_stringified_edits_without_batch_file_stays_rejected(batch_pat
     result = _ingest_edit_file({
         'description': 'decoded nameless batch', 'path': batch_path,
         'edits': json.dumps([
-            {'operation': 'replace', 'anchor': 'A', 'content': 'B'}])})
+            {'anchor': 'A', 'content': 'B'}])})
     assert result.contract_error is not None
     assert result.parse_error is not None

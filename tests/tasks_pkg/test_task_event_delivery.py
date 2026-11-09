@@ -366,6 +366,29 @@ def test_barrier_failure_wakes_without_a_polling_deadline(coordinator):
         thread.join(3)
 
 
+def test_slow_in_call_storage_wait_withholds_push_until_durable(coordinator):
+    """A supervised client waits inside the persist; the read side still sees it."""
+    from lib.storage.retry import observe_storage_wait
+    lane = DeliveryLane({'id': 'slow-authority'})
+    waiting, release = threading.Event(), threading.Event()
+
+    def persist():
+        observe_storage_wait(StorageError('database_timeout', 'deadline_elapsed', retryable=False))
+        waiting.set()
+        assert release.wait(3)
+
+    coordinator.submit(lane, 1, 128, persist, lambda: None)
+    assert waiting.wait(2)
+    try:
+        assert '_pushWithheldAt' in lane.task and lane.task['_pushWithheldCount'] == 1
+        assert lane.task['phase']['detail'] == 'Waiting for storage'
+    finally:
+        release.set()
+    coordinator.flush(lane)
+    assert '_pushWithheldAt' not in lane.task and '_pushWithheldCount' not in lane.task
+    assert 'phase' not in lane.task or lane.task['phase'] is None
+
+
 def test_failed_head_is_retained_and_recovered_before_followers(coordinator):
     lane = DeliveryLane({'id': 'retry'})
     failed, release = threading.Event(), threading.Event()
@@ -449,6 +472,37 @@ def test_permanent_failed_head_still_refuses_new_events(coordinator, failure):
     finally:
         recovered = True
         coordinator.flush(lane)
+
+
+@pytest.mark.parametrize('outcome', ['commit', 'failure'])
+def test_revoke_during_an_entered_run_completes_when_the_run_returns(coordinator, outcome):
+    """The pump keeps its entered head; a revoke requested meanwhile is never lost."""
+    from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
+    lane = DeliveryLane({'id': 'superseded'})
+    entered, release = threading.Event(), threading.Event()
+    observed = []
+
+    def first():
+        entered.set()
+        assert release.wait(3)
+        if outcome == 'failure':
+            raise RuntimeError('superseded publication claim')
+        observed.append('commit-1')
+
+    coordinator.submit(lane, 1, 128, first, lambda: observed.append('push-1'))
+    coordinator.submit(lane, 2, 128, lambda: observed.append('commit-2'), lambda: None)
+    assert entered.wait(2)
+    assert coordinator.revoke(lane) is False
+    assert not lane.revoked
+    with pytest.raises(EventDeliveryRevoked):
+        coordinator.submit(lane, 3, 128, lambda: None, lambda: None)
+    release.set()
+    with coordinator.condition:
+        assert coordinator.condition.wait_for(lambda: lane.revoked, timeout=2)
+    assert lane.error is None and not lane.pending and lane not in coordinator.lanes
+    assert lane.task['_eventDeliveryRevoked'] is True
+    assert observed == (['commit-1', 'push-1'] if outcome == 'commit' else [])
+    assert coordinator.snapshot()['pending_events'] == 0
 
 
 def test_progress_after_lost_ack_preserves_the_original_receipt_shape(coordinator):

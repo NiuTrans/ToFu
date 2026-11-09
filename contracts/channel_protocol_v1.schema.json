@@ -1,0 +1,567 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu://contracts/channel_protocol_v1.schema.json",
+  "title": "Tofu channel protocol v1",
+  "description": "The one protocol between Tofu's channel core (lib/channels) and every chat-app adapter (docs/CHANNEL_PROTOCOL.md). Adapters translate platform <-> protocol and supply raw platform identity; the core owns authority, identity binding, reply policy, the outbox and its idempotency, approvals, labelling, routing, subscriptions, retention, degradation and the outbound fallback chain. Envelopes are strict (additionalProperties false): no message can carry an authority field. The in-process binding passes these objects by call; the stdio binding frames them as JSON-RPC 2.0, one JSON object per line.",
+  "x-protocol": {
+    "name": "tofu.channel",
+    "version": 1,
+    "supportedVersions": [1],
+    "jsonRpc": "2.0",
+    "versionPolicy": "The core supports the current major version N and N-1 (supportedVersions). initialize offers them; the adapter answers the highest one it speaks or refuses with unsupportedProtocolVersion. A field, message type or semantic change that an N adapter cannot ignore is a new major version. Optional additions inside a major version are announced by the core in coreFeatures and used by an adapter only when announced; envelopes stay strict.",
+    "deprecationPolicy": "A new major version N+1 ships with the core supporting N+1 and N. An adapter that negotiates N then runs with health connected and the core logs one deprecation line per session; the release after drops N, and an adapter still on it is refused at initialize (health runtime_missing / protocol_version_unsupported, remedy update_adapter). In-repository adapters move in the release that introduces N+1."
+  },
+  "x-methods": {
+    "description": "Method catalog. direction core_to_adapter: the core calls, the adapter answers; adapter_to_core: the adapter calls. A request ends with its result or error, or with the end of the binding (process exit, closed pipe or socket), which makes an in-flight send unknown; the protocol adds no timeout of its own. capability names the descriptor field that must be true before the core calls an optional method.",
+    "initialize": {"direction": "core_to_adapter", "kind": "request", "params": "InitializeParams", "result": "InitializeResult"},
+    "start": {"direction": "core_to_adapter", "kind": "request", "params": "StartParams", "result": "Empty"},
+    "identity": {"direction": "core_to_adapter", "kind": "request", "params": "Empty", "result": "AccountIdentity"},
+    "events": {"direction": "adapter_to_core", "kind": "request", "params": "EventBatch", "result": "EventBatchAck"},
+    "health": {"direction": "adapter_to_core", "kind": "notification", "params": "Health"},
+    "send": {"direction": "core_to_adapter", "kind": "request", "params": "OutboundIntent", "result": "Receipt"},
+    "lookup": {"direction": "core_to_adapter", "kind": "request", "params": "LookupQuery", "result": "LookupResult", "capability": "outbound.lookup"},
+    "history": {"direction": "core_to_adapter", "kind": "request", "params": "HistoryQuery", "result": "HistoryPage", "capability": "history.read"},
+    "threads": {"direction": "core_to_adapter", "kind": "request", "params": "ThreadsQuery", "result": "ThreadsPage", "capability": "history.threads"},
+    "download": {"direction": "core_to_adapter", "kind": "request", "params": "DownloadRequest", "result": "DownloadResult", "capability": "inbound.attachments"},
+    "shutdown": {"direction": "core_to_adapter", "kind": "request", "params": "Empty", "result": "Empty"}
+  },
+  "x-errors": {
+    "description": "JSON-RPC 2.0 error codes: the standard ones, then this protocol's in the implementation-defined server range -32000..-32099. error.data.code may add a Receipt or health code.",
+    "parseError": -32700,
+    "invalidRequest": -32600,
+    "methodNotFound": -32601,
+    "invalidParams": -32602,
+    "internalError": -32603,
+    "unsupportedProtocolVersion": -32001,
+    "notInitialized": -32002,
+    "capabilityMissing": -32003,
+    "platformFailure": -32004,
+    "connectorOwned": -32005
+  },
+  "x-connectorOwnership": {
+    "description": "One live session per platform account, owned by the core (docs/CHANNEL_PROTOCOL.md P11). A platform session of a bound account is opened only by the core's supervisor through its adapter; tools, skills and other agents send through the outbox's outbound intent (supportedPath), never through a login of their own, which would displace the core's session. A request for a second session of an account the core owns is refused with refusalCode (JSON-RPC connectorOwned), naming supportedPath. A displaced session stays down until the owner restores it once (health displaced).",
+    "refusalCode": "connector_owned",
+    "supportedPath": "channel_send"
+  },
+  "x-identities": {
+    "description": "The outbound identities (docs/CHANNEL_PROTOCOL.md P7). The core chooses one per intent: bot first wherever the platform and the binding let it post (大象: the robot only in its bound group command chat, C6; never files, C10), else self. Every intent, receipt and outbox part records its identity; the outbox view and the send log show it. A self text outside the command chat carries the disclosure label (channels_v1 x-disclosureLabel). Only a definite non-send (a failed or deferred receipt) moves the rest of an item to the next identity; an unknown receipt is reconciled under the identity that sent it and continues there, never under another, because its copy may already be posted.",
+    "self": "The owner's own platform account, through the core's one session (P11).",
+    "bot": "Tofu's bot or robot application on that platform."
+  },
+  "x-selfEcho": {
+    "description": "How the core recognizes a message Tofu itself sent, whatever the send path, so that it is never input: never a command, approval or review candidate, on live delivery or history backfill alike (docs/CHANNEL_PROTOCOL.md P12). Only a message from a platform identity the core bound to this account (the owner's account, the account's bot, or the bound robot) can be an echo; the steps run in order before classification and the first match wins. A message from the owner's account that matches none stays the owner's: the core cannot tell an unmarked API send from typing, which is why sends outside the core are forbidden (P11).",
+    "steps": [
+      {"id": "outbox_marker", "rule": "EchoFacts.marker names an outbox item of this account or one of its parts (<item>/<n>): the echo of that item; an in-flight item it confirms becomes sent."},
+      {"id": "recorded_id", "rule": "The platform message ID or client ID is in the account's echo registry: every receipt's platformMessageId/clientId, and every ID that another Tofu send path registered through the core's self-send port."},
+      {"id": "origin_marker", "rule": "EchoFacts.marker carries any other value: a Tofu send path stamped it (the platform's marker field, channels_v1 x-outboxMarkerField, can be set only through an API, never by typing)."},
+      {"id": "own_connection", "rule": "EchoFacts.ownConnection: the platform says this session sent it."},
+      {"id": "host_sent", "rule": "EchoFacts.hostSent: the adapter's host recorded that another client on this host sent it (大象: the engine's sent-message record, its newest 100 sends within 24 h). The core registers its IDs in the echo registry at first sight, so a later replay stays an echo; an older out-of-band send is beyond this bound, which the displacement rule (docs/CHANNEL_PROTOCOL.md P12) and the refusal (P11) cover."}
+    ],
+    "displacementWindow": "Owner-account messages sent while the account's session was displaced (health displaced, from the displacement to the restore) are owner context, never commands or approvals: the displacing client sent as the owner."
+  },
+  "x-attachmentSources": {
+    "description": "Which files an outbound intent may attach, and from where (docs/CHANNEL_PROTOCOL.md P13). The core admits every file before anything is recorded, pins its size and sha256, and hands the adapter only a private verified copy; adapters never read caller paths. Every refusal names the supported path, so no caller needs a workaround.",
+    "sources": [
+      {"id": "conversation_roots", "rule": "A regular file in the sending conversation's verified workspace roots, read without following symlinks."},
+      {"id": "own_artifacts", "rule": "An artifact or slide deck the sending conversation published, by its delivery URL."},
+      {"id": "owner_project_roots", "rule": "An attachment {path, project} naming one of the owner's registered project roots and a regular file inside it, read with the same no-follow snapshot and limits, recorded on the item with that project as its provenance: how a project's deliverable reaches the Global Router, the only conversation that sends (docs/CHANNELS.md C7)."}
+    ],
+    "supportedPath": "Send it with channel_send from the Global Router. A project conversation reports the file's path to the Global Router and asks it to send; nothing sends through a platform login of its own."
+  },
+  "x-remedies": {
+    "description": "What each remedy asks of the owner, in English for logs and the model; Settings shows its own translation of the same instruction.",
+    "none": "Nothing to do.",
+    "wait": "Nothing to do: Tofu reconnects or retries at its next check.",
+    "approve_login": "Approve the pending login request on your phone.",
+    "relogin": "Log in again from Settings.",
+    "update_credentials": "Enter a working credential in Settings.",
+    "repair_runtime": "Repair the server's runtime for this channel (for example its Node.js); logging in again cannot fix it.",
+    "install_adapter": "Install this channel's adapter (for 大象, the dx-pura-api skill).",
+    "restore_session": "Another login took this account's session: close the other login (a 大象 web page, another host, or a tool on this server; tools send through Tofu's channel_send), then reconnect once in Settings (重新连接). Tofu never reconnects on its own.",
+    "update_adapter": "Update the adapter to a protocol version this Tofu supports.",
+    "reconfigure": "Open Tofu so the Global Router exists, then enable the channel again."
+  },
+  "x-healthCodes": {
+    "description": "Every health code with its state, the remedy shown to the owner, who retries (core_tick: the supervisors' existing scheduler tick; resume_at: the platform-given time; owner: nothing retries until the owner acts; none: nothing to retry) and the channels_v1 AccountState it is stored as until the account view carries typed health. origin core: the core reports it, never the adapter.",
+    "ok": {"state": "connected", "remedy": "none", "retry": "none", "legacyState": "connected", "origin": "adapter"},
+    "history_failed": {"state": "degraded", "remedy": "wait", "retry": "core_tick", "legacyState": "connected", "origin": "core"},
+    "ingest_failed": {"state": "degraded", "remedy": "wait", "retry": "core_tick", "legacyState": "connected", "origin": "core"},
+    "protocol_version_deprecated": {"state": "degraded", "remedy": "update_adapter", "retry": "none", "legacyState": "connected", "origin": "core"},
+    "login_pending": {"state": "auth_required", "remedy": "approve_login", "retry": "owner", "legacyState": "authorizing", "origin": "adapter"},
+    "session_required": {"state": "auth_required", "remedy": "relogin", "retry": "owner", "legacyState": "needs_login", "origin": "adapter"},
+    "credential_rejected": {"state": "auth_required", "remedy": "update_credentials", "retry": "owner", "legacyState": "needs_login", "origin": "adapter"},
+    "credential_missing": {"state": "auth_required", "remedy": "update_credentials", "retry": "owner", "legacyState": "needs_login", "origin": "core"},
+    "session_expired": {"state": "auth_required", "remedy": "relogin", "retry": "owner", "legacyState": "needs_login", "origin": "adapter"},
+    "identity_mismatch": {"state": "auth_required", "remedy": "relogin", "retry": "owner", "legacyState": "error", "origin": "core"},
+    "runtime_unavailable": {"state": "runtime_missing", "remedy": "repair_runtime", "retry": "core_tick", "legacyState": "runtime_unavailable", "origin": "adapter"},
+    "adapter_missing": {"state": "runtime_missing", "remedy": "install_adapter", "retry": "core_tick", "legacyState": "error", "origin": "core"},
+    "protocol_version_unsupported": {"state": "runtime_missing", "remedy": "update_adapter", "retry": "owner", "legacyState": "error", "origin": "core"},
+    "platform_rate_limited": {"state": "rate_limited", "remedy": "wait", "retry": "resume_at", "legacyState": "disconnected", "origin": "adapter"},
+    "transport_lost": {"state": "disconnected", "remedy": "wait", "retry": "core_tick", "legacyState": "disconnected", "origin": "adapter"},
+    "network_unreachable": {"state": "disconnected", "remedy": "wait", "retry": "core_tick", "legacyState": "disconnected", "origin": "adapter"},
+    "platform_unavailable": {"state": "disconnected", "remedy": "wait", "retry": "core_tick", "legacyState": "disconnected", "origin": "adapter"},
+    "superseded": {"state": "displaced", "remedy": "restore_session", "retry": "owner", "legacyState": "kicked", "origin": "adapter"},
+    "superseded_same_device": {"state": "displaced", "remedy": "restore_session", "retry": "owner", "legacyState": "kicked", "origin": "adapter"},
+    "adapter_failed": {"state": "disconnected", "remedy": "wait", "retry": "core_tick", "legacyState": "error", "origin": "adapter"},
+    "router_unavailable": {"state": "disconnected", "remedy": "reconfigure", "retry": "core_tick", "legacyState": "error", "origin": "core"}
+  },
+  "x-watchdogStates": {
+    "description": "Health states that open a Router Watchdog channel signal (docs/ROUTER.md R7), keyed by channel, state, code and the last connection time. degraded heals itself through the owed catch-up at the next tick and would open a new signal on every reconnect, so it is shown in Settings and the Watchdog snapshot without opening one (docs/CHANNEL_PROTOCOL.md P6).",
+    "signal": ["auth_required", "runtime_missing", "rate_limited", "disconnected", "displaced"]
+  },
+  "x-threadKeyCodecs": {
+    "description": "How the core turns a ThreadRef into today's thread key <channel>:<kind>:<id> (docs/CHANNELS.md Vocabulary). digits: the platform ID verbatim (大象 IDs are digits). github_issue: github:<owner>/<repo>#<number>, lowercased. base32: the platform ID as unpadded lowercase RFC 4648 base32 (lib/channels/bots/ids.py); every channel added after v1 uses it.",
+    "dx": "digits",
+    "github": "github_issue",
+    "default": "base32"
+  },
+  "x-externalIds": {
+    "description": "How the core derives the event's ordered external ID (the store's event key and the thread watermark) from MessageRef, reproducing today's IDs: seq verbatim when the adapter supplies it (大象 snowflakes; GitHub's time-kind-id composite); otherwise <platform epoch seconds, 10 digits><22 digits of sha256(message.id)> (lib/channels/bots/ids.py), and when the platform sends no time the first sighting of (channel, message.id) mints it once (ChannelStore.provider_message_id, CAS create).",
+    "secondsDigits": 10,
+    "digestDigits": 22
+  },
+  "x-legacy": {
+    "description": "Read-only maps from today's channels_v1 vocabulary, used by the compatibility shim and by the core until each adapter speaks the protocol (docs/CHANNEL_PROTOCOL.md Backward compatibility). approximate: the legacy state cannot name the cause, so the code is the commonest one.",
+    "accountStateHealth": {
+      "disabled": null,
+      "starting": null,
+      "authorizing": {"code": "login_pending", "approximate": false},
+      "connected": {"code": "ok", "approximate": true},
+      "disconnected": {"code": "transport_lost", "approximate": true},
+      "needs_login": {"code": "credential_rejected", "approximate": true},
+      "runtime_unavailable": {"code": "runtime_unavailable", "approximate": false},
+      "kicked": {"code": "superseded", "approximate": true},
+      "error": {"code": "adapter_failed", "approximate": true}
+    },
+    "deferredSendCodes": ["not_connected", "rate_limited"]
+  },
+  "x-adapters": {
+    "description": "Target capability descriptors of the in-repository adapters: what each platform offers, which is what its adapter must declare at initialize. A {\"$fact\": \"<JSON pointer into contracts/channels_v1.schema.json>\"} value is resolved from that contract (platform-documented limits live there once); {\"$attachmentFacts\": \"x-dxAttachments\"} expands that attachment fact set by kind. Feishu gets its descriptor when it moves onto the channel core (migration step 5).",
+    "dx": {
+      "channel": "dx",
+      "threadKinds": ["uid", "gid", "pid"],
+      "commandChat": true,
+      "inbound": {"mode": "push", "senderKinds": ["user"], "mentions": true, "quotes": true, "edits": false, "recalls": true, "attachments": ["image", "file", "voice"], "echoes": true},
+      "history": {"read": true, "threads": true, "byMessageId": true},
+      "outbound": {"lookup": false, "idempotentResend": "none", "requiresInboundFirst": false, "replyWindows": null},
+      "identities": {
+        "self": {"notifiesOwner": false, "formats": ["markdown"], "maxTextBytes": null, "quoteReply": true, "markers": true,
+                 "attachments": {"$attachmentFacts": "x-dxAttachments"}, "rateLimits": []},
+        "bot": {"notifiesOwner": true, "formats": ["markdown"], "maxTextBytes": {"$fact": "/x-providerLimits/dxRobotTextBytes"}, "quoteReply": false, "markers": false,
+                "attachments": {}, "rateLimits": [{"scope": "application_path", "limit": {"$fact": "/x-providerLimits/dxRobotSendsPerSecond"}, "windowMs": 1000, "source": "大象消息 §2.2 (1s5次 per application and path), docs/CHANNELS.md C6"}]}
+      }
+    },
+    "github": {
+      "channel": "github",
+      "threadKinds": ["issue"],
+      "commandChat": false,
+      "inbound": {"mode": "poll", "senderKinds": ["user", "bot"], "mentions": true, "quotes": true, "edits": true, "recalls": false, "attachments": [], "echoes": true},
+      "history": {"read": true, "threads": true, "byMessageId": false},
+      "outbound": {"lookup": false, "idempotentResend": "none", "requiresInboundFirst": false, "replyWindows": null},
+      "identities": {
+        "self": {"notifiesOwner": false, "formats": ["markdown"], "maxTextBytes": null, "quoteReply": false, "markers": true, "attachments": {},
+                 "rateLimits": [{"scope": "account", "limit": 1, "windowMs": {"$fact": "/x-github/mutationSpacingMs"}, "source": "GitHub REST best practices: at least one second between mutative requests, docs/CHANNELS.md C8"}]}
+      }
+    },
+    "wecom": {
+      "channel": "wecom",
+      "threadKinds": ["uid", "gid"],
+      "commandChat": true,
+      "inbound": {"mode": "push", "senderKinds": ["user"], "mentions": false, "quotes": false, "edits": false, "recalls": false, "attachments": [], "echoes": false},
+      "history": {"read": false, "threads": false, "byMessageId": false},
+      "outbound": {"lookup": false, "idempotentResend": "none", "requiresInboundFirst": true, "replyWindows": null},
+      "identities": {
+        "bot": {"notifiesOwner": true, "formats": ["markdown"], "maxTextBytes": {"$fact": "/x-wecom/markdownBytes"}, "quoteReply": false, "markers": false, "attachments": {},
+                "rateLimits": [
+                  {"scope": "chat", "limit": {"$fact": "/x-wecom/sendsPerChatPerMinute"}, "windowMs": 60000, "source": "智能机器人长连接 (document 101463), docs/CHANNELS.md C12"},
+                  {"scope": "chat", "limit": {"$fact": "/x-wecom/sendsPerChatPerHour"}, "windowMs": 3600000, "source": "智能机器人长连接 (document 101463), docs/CHANNELS.md C12"}]}
+      }
+    },
+    "qq": {
+      "channel": "qq",
+      "threadKinds": ["uid", "gid"],
+      "commandChat": true,
+      "inbound": {"mode": "push", "senderKinds": ["user", "bot"], "mentions": false, "quotes": false, "edits": false, "recalls": false, "attachments": [], "echoes": false},
+      "history": {"read": false, "threads": false, "byMessageId": false},
+      "outbound": {"lookup": false, "idempotentResend": "passive_reply_window", "requiresInboundFirst": false, "replyWindows": {"$fact": "/x-qq/passiveReply"}},
+      "identities": {
+        "bot": {"notifiesOwner": true, "formats": ["plain"], "maxTextBytes": null, "quoteReply": false, "markers": false, "attachments": {}, "rateLimits": []}
+      }
+    },
+    "wechat": {
+      "channel": "wechat",
+      "threadKinds": ["uid", "gid"],
+      "commandChat": true,
+      "inbound": {"mode": "long_poll", "senderKinds": ["user"], "mentions": false, "quotes": false, "edits": false, "recalls": false, "attachments": [], "echoes": true},
+      "history": {"read": false, "threads": false, "byMessageId": false},
+      "outbound": {"lookup": false, "idempotentResend": "none", "requiresInboundFirst": true, "replyWindows": null},
+      "identities": {
+        "bot": {"notifiesOwner": true, "formats": ["plain"], "maxTextBytes": null, "quoteReply": false, "markers": false, "attachments": {}, "rateLimits": []}
+      }
+    }
+  },
+  "$defs": {
+    "Empty": {"type": "object", "additionalProperties": false, "properties": {}},
+    "ChannelName": {"type": "string", "pattern": "^[a-z][a-z0-9]{1,15}$",
+                    "description": "The channel identifier: lowercase ASCII, used as the thread key prefix (dx, github, wecom, qq, wechat; new chat apps add theirs to channels_v1 Channel)."},
+    "ThreadKind": {"type": "string", "enum": ["uid", "gid", "pid", "issue"],
+                   "description": "channels_v1 ThreadKind: uid a private chat with one person, gid a group, pid a public-account or broadcast session, issue one work item (issue or pull request). Another platform maps each of its conversation types onto one of these."},
+    "HealthState": {"type": "string", "enum": ["connected", "degraded", "auth_required", "runtime_missing", "rate_limited", "disconnected", "displaced"],
+                    "description": "connected: receiving and sending. degraded: connected, but a catch-up or an ingest is owed (nothing is lost; the next tick retries). auth_required: only the owner can restore the session (login approval, new credential, QR scan). runtime_missing: the adapter's own runtime, installation or protocol version cannot run; logging in cannot fix it. rate_limited: the platform refused for its rate limit until resumeAtMs. disconnected: no connection; the supervisor reconnects at its next tick. displaced: another login or client of the same platform account took the session (大象 KickOff, 企业微信 disconnected_event); terminal: nothing reconnects or pushes a login, across server restarts too, until the owner restores the session once (x-connectorOwnership)."},
+    "HealthCode": {"type": "string", "enum": ["ok", "history_failed", "ingest_failed", "protocol_version_deprecated", "login_pending", "session_required", "credential_rejected", "credential_missing", "session_expired", "identity_mismatch", "runtime_unavailable", "adapter_missing", "protocol_version_unsupported", "platform_rate_limited", "transport_lost", "network_unreachable", "platform_unavailable", "superseded", "superseded_same_device", "adapter_failed", "router_unavailable"],
+                   "description": "Machine-readable cause; x-healthCodes gives each one's state, remedy, retry owner and legacy AccountState. superseded: another client of the account took the session from another device, a browser or another host (大象 KickOff). superseded_same_device: a client with this session's own device identity took it, i.e. a process on this host outside the core (大象 KickOffWithSameDeviceId; docs/CHANNEL_PROTOCOL.md P11). The platform's own event name stays in detail."},
+    "Remedy": {"type": "string", "enum": ["none", "wait", "approve_login", "relogin", "update_credentials", "repair_runtime", "install_adapter", "restore_session", "update_adapter", "reconfigure"],
+               "description": "x-remedies gives each one's instruction."},
+    "Health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "code", "atMs"],
+      "description": "One connector state transition. The adapter reports a state once per transition; the core stores it on the account, maps it to the legacy AccountState and the Router Watchdog signal (x-watchdogStates). detail is diagnostic text for logs and Settings: never a credential, URL with a token, or message content.",
+      "properties": {
+        "state": {"$ref": "#/$defs/HealthState"},
+        "code": {"$ref": "#/$defs/HealthCode"},
+        "detail": {"type": "string"},
+        "resumeAtMs": {"type": ["integer", "null"], "minimum": 0, "description": "rate_limited: the platform-given time sending and reading may resume; null when the platform names none (the next tick)."},
+        "atMs": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ThreadRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "description": "A conversation as the platform names it. id is the raw platform ID (for GitHub <owner>/<repo>#<number>); the core encodes the thread key (x-threadKeyCodecs).",
+      "properties": {
+        "kind": {"$ref": "#/$defs/ThreadKind"},
+        "id": {"type": "string", "minLength": 1},
+        "title": {"type": "string"}
+      }
+    },
+    "MessageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "description": "Platform identity and order of one message. id is unique within its thread and never changes (a redelivery repeats it). seq, when the platform offers one, is a decimal ID that grows with platform time within a thread (snowflake, composite). timeMs is the platform's server time, null when the platform sends none. clientId is the platform's echo of the client-generated ID of a message this account sent.",
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "seq": {"type": "string", "pattern": "^[0-9]{1,32}$"},
+        "timeMs": {"type": ["integer", "null"], "minimum": 0},
+        "clientId": {"type": "string"}
+      }
+    },
+    "Sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "description": "Raw platform identity of the author. The core alone compares id with the identity it bound to the owner; there is deliberately no field by which an adapter could say 'this is the owner'. kind is the platform's own fact: user (a person), bot (an automated account the platform flags), system (platform notices).",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "kind": {"type": "string", "enum": ["user", "bot", "system"]}
+      }
+    },
+    "TextPart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "text"],
+      "description": "Readable text: the message's own text, or for a type the core cannot render the adapter's readable description ([file: deck.pptx], [voice message: 3 s]).",
+      "properties": {"type": {"const": "text"}, "text": {"type": "string"}}
+    },
+    "MentionPart": {
+      "type": "object", "additionalProperties": false, "required": ["type"],
+      "description": "A protocol mention fact: userId is the raw platform ID mentioned; all is @everyone.",
+      "properties": {"type": {"const": "mention"}, "userId": {"type": "string", "minLength": 1}, "all": {"type": "boolean"}}
+    },
+    "QuotePart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "messageId"],
+      "description": "The message this one quotes or replies to, with that message's raw sender when the platform says.",
+      "properties": {"type": {"const": "quote"}, "messageId": {"type": "string", "minLength": 1}, "seq": {"type": "string", "pattern": "^[0-9]{1,32}$"}, "senderId": {"type": "string"}}
+    },
+    "AttachmentPart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "kind", "name", "locator"],
+      "description": "A downloadable original. locator is opaque to the core and may carry platform credentials (a signed URL, a file token): the core keeps it in memory only for this ingest, hands it back in download, and never records, renders or logs it.",
+      "properties": {
+        "type": {"const": "attachment"},
+        "kind": {"type": "string", "enum": ["image", "file", "voice", "video"]},
+        "name": {"type": "string", "minLength": 1},
+        "mimeType": {"type": "string"},
+        "sizeBytes": {"type": "integer", "minimum": 0},
+        "durationS": {"type": "integer", "minimum": 0},
+        "locator": {"type": "string", "minLength": 1}
+      }
+    },
+    "CardPart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "fallbackText"],
+      "description": "A structured card the core shows as fallbackText.",
+      "properties": {"type": {"const": "card"}, "title": {"type": "string"}, "fallbackText": {"type": "string"}}
+    },
+    "ContentPart": {"oneOf": [{"$ref": "#/$defs/TextPart"}, {"$ref": "#/$defs/MentionPart"}, {"$ref": "#/$defs/QuotePart"},
+                              {"$ref": "#/$defs/AttachmentPart"}, {"$ref": "#/$defs/CardPart"}]},
+    "EchoFacts": {
+      "type": "object", "additionalProperties": false,
+      "description": "Platform facts that may prove the message is this account's own send: the value of the platform's marker field (an extension field, an invisible comment) whatever it is, whether the platform or connection says this session sent it, and whether the adapter's host recorded another local client sending it. The core decides echo (x-selfEcho); facts are never authority.",
+      "properties": {"marker": {"type": "string"}, "ownConnection": {"type": "boolean"}, "hostSent": {"type": "boolean"}}
+    },
+    "InboundEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "thread", "message", "sender", "parts", "source"],
+      "description": "One platform fact. type message: a new message. edit: target's text changed (parts are the new content; message.id identifies this revision). recall: target was withdrawn (parts empty). eventId is stable and deterministic from platform identity only (never from receipt time or process state), unique within the account: a redelivery repeats it. Delivery is at least once and may be out of order; the core ingests idempotently.",
+      "properties": {
+        "type": {"type": "string", "enum": ["message", "edit", "recall"]},
+        "eventId": {"type": "string", "minLength": 1},
+        "thread": {"$ref": "#/$defs/ThreadRef"},
+        "message": {"$ref": "#/$defs/MessageRef"},
+        "sender": {"$ref": "#/$defs/Sender"},
+        "parts": {"type": "array", "items": {"$ref": "#/$defs/ContentPart"}},
+        "target": {"type": "object", "additionalProperties": false, "required": ["messageId"],
+                   "properties": {"messageId": {"type": "string", "minLength": 1}, "seq": {"type": "string", "pattern": "^[0-9]{1,32}$"}}},
+        "echo": {"$ref": "#/$defs/EchoFacts"},
+        "url": {"type": "string"},
+        "source": {"type": "string", "enum": ["live", "history", "poll"]}
+      }
+    },
+    "EventBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events"],
+      "description": "Events in platform order where the platform has one. checkpoint is adapter-private resume state (a long-poll cursor, per-thread ETags) that the core persists only after every event of the batch was ingested and returns in StartParams: a failed ingest replays the batch, so gaps become duplicates, never losses.",
+      "properties": {
+        "events": {"type": "array", "items": {"$ref": "#/$defs/InboundEvent"}},
+        "checkpoint": {"type": ["object", "null"]}
+      }
+    },
+    "EventBatchAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["results"],
+      "properties": {
+        "results": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["eventId", "outcome"],
+          "properties": {
+            "eventId": {"type": "string"},
+            "outcome": {"type": "string", "enum": ["recorded", "duplicate", "echo", "ignored", "dropped", "disabled", "unsupported"]}
+          }}}
+      }
+    },
+    "OutboundTextPart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "format", "text"],
+      "properties": {"type": {"const": "text"}, "format": {"type": "string", "enum": ["markdown", "plain"]}, "text": {"type": "string", "minLength": 1}}
+    },
+    "OutboundAttachmentPart": {
+      "type": "object", "additionalProperties": false, "required": ["type", "kind", "name", "path", "sizeBytes", "sha256"],
+      "description": "One file sent as its own platform message. path is a private copy the core verified for this attempt; the adapter reads it and nothing else.",
+      "properties": {
+        "type": {"const": "attachment"},
+        "kind": {"type": "string", "enum": ["image", "file"]},
+        "name": {"type": "string", "minLength": 1},
+        "mimeType": {"type": "string"},
+        "path": {"type": "string", "minLength": 1},
+        "sizeBytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "OutboundIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intentId", "idempotencyKey", "thread", "identity", "part"],
+      "description": "Exactly one platform message. intentId is the outbox item ID, or <item>/<n> for its n-th attachment (x-dxAttachments partMarker) and <item>/t<n> for its n-th text chunk; idempotencyKey equals intentId and is what a marker, client ID or platform deduplication carries. identity is the outbound identity the core chose (fallback chain: bot, then self). The core has already applied reply policy, approval, the disclosure label, translation and degradation.",
+      "properties": {
+        "intentId": {"type": "string", "minLength": 1},
+        "idempotencyKey": {"type": "string", "minLength": 1},
+        "thread": {"$ref": "#/$defs/ThreadRef"},
+        "identity": {"type": "string", "enum": ["self", "bot"]},
+        "replyTo": {"type": "object", "additionalProperties": false, "required": ["messageId"],
+                    "properties": {"messageId": {"type": "string", "minLength": 1}, "seq": {"type": "string", "pattern": "^[0-9]{1,32}$"}}},
+        "part": {"oneOf": [{"$ref": "#/$defs/OutboundTextPart"}, {"$ref": "#/$defs/OutboundAttachmentPart"}]}
+      }
+    },
+    "ReceiptStatus": {"type": "string", "enum": ["sent", "accepted", "deferred", "failed", "unknown"],
+                      "description": "sent: the platform has the message. accepted: the platform acknowledged it, but delivery is confirmed only by its echo or the thread history (大象 files). deferred: definitely not sent, send again later (code not_connected or rate_limited, retryAfterMs when the platform names a time). failed: definitely not sent and never retried automatically. unknown: the outcome is unknown; the core reconciles by lookup or history and never re-sends blindly."},
+    "ReceiptCode": {"type": "string", "enum": ["invalid_input", "unsupported_target", "reply_target_not_found", "reply_target_lookup_failed", "sdk_not_found", "auth_failed", "forbidden", "attachment_rejected", "identity_refused", "not_delivered", "not_connected", "rate_limited", "answer_lost", "platform_unavailable", "adapter_failed"],
+                    "description": "failed codes: invalid_input .. not_delivered (identity_refused: the bot identity may not post here; the core falls back to self). deferred codes: not_connected, rate_limited. unknown codes: answer_lost (the request left, no answer came), platform_unavailable (a server failure after the request left), adapter_failed."},
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intentId", "status", "identity"],
+      "properties": {
+        "intentId": {"type": "string", "minLength": 1},
+        "status": {"$ref": "#/$defs/ReceiptStatus"},
+        "identity": {"type": "string", "enum": ["self", "bot"]},
+        "code": {"$ref": "#/$defs/ReceiptCode"},
+        "detail": {"type": "string"},
+        "platformMessageId": {"type": ["string", "null"]},
+        "clientId": {"type": ["string", "null"]},
+        "retryAfterMs": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "LookupQuery": {
+      "type": "object", "additionalProperties": false, "required": ["intentId", "idempotencyKey", "thread", "identity", "attemptedAtMs"],
+      "description": "Did the platform receive this intent? Answered from the platform's own idempotency record (outbound.lookup). An adapter that cannot read a complete record for the key answers an error (platformFailure), never found false.",
+      "properties": {
+        "intentId": {"type": "string"}, "idempotencyKey": {"type": "string"}, "thread": {"$ref": "#/$defs/ThreadRef"},
+        "identity": {"type": "string", "enum": ["self", "bot"]}, "attemptedAtMs": {"type": "integer", "minimum": 0}, "clientId": {"type": ["string", "null"]}
+      }
+    },
+    "LookupResult": {
+      "type": "object", "additionalProperties": false, "required": ["found"],
+      "description": "found true: the platform received the intent (with its IDs). found false is proof of absence from the platform's own complete record, the only answer on which the core may send the intent again; anything less is an error, which leaves the intent unknown (docs/CHANNEL_PROTOCOL.md P4).",
+      "properties": {"found": {"type": "boolean"}, "platformMessageId": {"type": ["string", "null"]}, "clientId": {"type": ["string", "null"]}}
+    },
+    "HistoryQuery": {
+      "type": "object", "additionalProperties": false, "required": ["thread"],
+      "description": "Every message of the thread after a bound, newest bound first: afterSeq (exclusive, the watermark), fromSeq (inclusive, an accepted part's own ID), or sinceMs (platform time, inclusive). The adapter pages through the platform itself; an incomplete walk is an error, never a partial page. The core treats such an error as no evidence: an intent it was reconciling stays unknown, and the read holds no other thread.",
+      "properties": {
+        "thread": {"$ref": "#/$defs/ThreadRef"},
+        "afterSeq": {"type": "string", "pattern": "^[0-9]{1,32}$"},
+        "fromSeq": {"type": "string", "pattern": "^[0-9]{1,32}$"},
+        "sinceMs": {"type": "integer", "minimum": 0}
+      }
+    },
+    "HistoryPage": {
+      "type": "object", "additionalProperties": false, "required": ["events"],
+      "properties": {"events": {"type": "array", "items": {"$ref": "#/$defs/InboundEvent"}}}
+    },
+    "ThreadsQuery": {
+      "type": "object", "additionalProperties": false, "required": ["sinceMs", "untilMs"],
+      "description": "Threads with activity in [sinceMs, untilMs): the catch-up's session list.",
+      "properties": {"sinceMs": {"type": "integer", "minimum": 0}, "untilMs": {"type": "integer", "minimum": 0}}
+    },
+    "ThreadsPage": {
+      "type": "object", "additionalProperties": false, "required": ["threads"],
+      "properties": {"threads": {"type": "array", "items": {
+        "type": "object", "additionalProperties": false, "required": ["thread"],
+        "properties": {"thread": {"$ref": "#/$defs/ThreadRef"}, "updatedMs": {"type": ["integer", "null"], "minimum": 0}}}}}
+    },
+    "DownloadRequest": {
+      "type": "object", "additionalProperties": false, "required": ["locator", "path"],
+      "properties": {"locator": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1,
+                     "description": "A new private file the core chose; the adapter writes the original there."}}
+    },
+    "DownloadResult": {
+      "type": "object", "additionalProperties": false, "required": ["ok"],
+      "properties": {"ok": {"type": "boolean"}, "contentType": {"type": "string"}, "detail": {"type": "string"}}
+    },
+    "AccountIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "description": "The platform account this session is logged in as: the proof material the core binds to the owner (大象 whoami of the MIS the owner chose, GitHub GET /user of the owner's token). Pairing and QR binding happen in the core from inbound facts.",
+      "properties": {"id": {"type": "string", "minLength": 1}, "name": {"type": "string"}, "login": {"type": "string"}}
+    },
+    "InitializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersions", "channel", "account", "coreFeatures"],
+      "description": "Non-secret account configuration only: credentials reach an in-process adapter through the core's vault port per request and an out-of-process adapter through its child environment at spawn; never through a protocol message.",
+      "properties": {
+        "protocolVersions": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
+        "channel": {"$ref": "#/$defs/ChannelName"},
+        "account": {"type": "object", "additionalProperties": {"type": ["string", "integer", "boolean", "null"]}},
+        "coreFeatures": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "InitializeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "adapter", "capabilities"],
+      "properties": {
+        "protocolVersion": {"type": "integer", "minimum": 1},
+        "adapter": {"type": "object", "additionalProperties": false, "required": ["name", "version"],
+                    "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+        "capabilities": {"$ref": "#/$defs/CapabilityDescriptor"}
+      }
+    },
+    "StartParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"checkpoint": {"type": ["object", "null"]}}
+    },
+    "RateLimit": {
+      "type": "object", "additionalProperties": false, "required": ["scope", "limit", "windowMs", "source"],
+      "description": "A platform-documented limit: at most limit sends per windowMs within scope (chat, account, application_path: shared by every server holding one application). source names the document.",
+      "properties": {
+        "scope": {"type": "string", "enum": ["chat", "account", "application_path"]},
+        "limit": {"type": "integer", "minimum": 1},
+        "windowMs": {"type": "integer", "minimum": 1},
+        "source": {"type": "string", "minLength": 1}
+      }
+    },
+    "AttachmentLimit": {
+      "type": "object", "additionalProperties": false, "required": ["suffixes", "sizeBelowBytes"],
+      "description": "The platform's documented upload limits for one kind: accepted file suffixes (lowercase, no dot) and the exclusive size bound.",
+      "properties": {"suffixes": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "sizeBelowBytes": {"type": "integer", "minimum": 1}}
+    },
+    "ReplyWindow": {
+      "type": "object", "additionalProperties": false, "required": ["windowS", "replies"],
+      "properties": {"windowS": {"type": "integer", "minimum": 1}, "replies": {"type": "integer", "minimum": 1}}
+    },
+    "OutboundIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notifiesOwner", "formats", "maxTextBytes", "quoteReply", "markers", "attachments", "rateLimits"],
+      "description": "One outbound identity: self (the owner's own account) or bot (an application or bot account). notifiesOwner: whether the owner's devices notify for a message it posts in the owner's chat (a self message never does on 大象). maxTextBytes: the platform's documented text limit in UTF-8 bytes (null: none documented; the core then sends one message). markers: whether a message can carry the idempotency key invisibly.",
+      "properties": {
+        "notifiesOwner": {"type": "boolean"},
+        "formats": {"type": "array", "items": {"type": "string", "enum": ["markdown", "plain"]}, "minItems": 1},
+        "maxTextBytes": {"type": ["integer", "null"], "minimum": 1},
+        "quoteReply": {"type": "boolean"},
+        "markers": {"type": "boolean"},
+        "attachments": {"type": "object", "additionalProperties": false,
+                        "properties": {"image": {"$ref": "#/$defs/AttachmentLimit"}, "file": {"$ref": "#/$defs/AttachmentLimit"}}},
+        "rateLimits": {"type": "array", "items": {"$ref": "#/$defs/RateLimit"}}
+      }
+    },
+    "CapabilityDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "threadKinds", "commandChat", "inbound", "history", "outbound", "identities"],
+      "description": "What the platform offers, declared truthfully by its adapter at initialize. The core calls optional methods only when declared, degrades content the target identity cannot carry (card -> fallback text, file -> a note naming it, text -> chunks of maxTextBytes) and never lets a feature depend on one chat app. A capability declared true must be implemented.",
+      "properties": {
+        "channel": {"$ref": "#/$defs/ChannelName"},
+        "threadKinds": {"type": "array", "items": {"$ref": "#/$defs/ThreadKind"}, "minItems": 1, "uniqueItems": true},
+        "commandChat": {"type": "boolean", "description": "Whether only the bound owner can author and alter a thread's text, so one private thread can carry owner commands (GitHub comments are editable by maintainers: false)."},
+        "inbound": {
+          "type": "object", "additionalProperties": false,
+          "required": ["mode", "senderKinds", "mentions", "quotes", "edits", "recalls", "attachments", "echoes"],
+          "properties": {
+            "mode": {"type": "string", "enum": ["push", "poll", "long_poll"]},
+            "senderKinds": {"type": "array", "items": {"type": "string", "enum": ["user", "bot", "system"]}, "minItems": 1, "uniqueItems": true},
+            "mentions": {"type": "boolean"},
+            "quotes": {"type": "boolean"},
+            "edits": {"type": "boolean"},
+            "recalls": {"type": "boolean"},
+            "attachments": {"type": "array", "items": {"type": "string", "enum": ["image", "file", "voice", "video"]}, "uniqueItems": true},
+            "echoes": {"type": "boolean", "description": "The platform delivers this account's own sends back as inbound messages."}
+          }
+        },
+        "history": {
+          "type": "object", "additionalProperties": false, "required": ["read", "threads", "byMessageId"],
+          "properties": {"read": {"type": "boolean"}, "threads": {"type": "boolean"}, "byMessageId": {"type": "boolean"}}
+        },
+        "outbound": {
+          "type": "object", "additionalProperties": false, "required": ["lookup", "idempotentResend", "requiresInboundFirst", "replyWindows"],
+          "properties": {
+            "lookup": {"type": "boolean", "description": "The platform answers whether an idempotency key was delivered (method lookup)."},
+            "idempotentResend": {"type": "string", "enum": ["none", "passive_reply_window"],
+                                 "description": "passive_reply_window: within the documented reply window a resend with the same key is answered as a duplicate (QQ msg_seq), so it is safe."},
+            "requiresInboundFirst": {"type": "boolean", "description": "The platform delivers only to a chat that wrote to this account (a reply context)."},
+            "replyWindows": {"type": ["object", "null"], "additionalProperties": {"$ref": "#/$defs/ReplyWindow"}}
+          }
+        },
+        "identities": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {"self": {"$ref": "#/$defs/OutboundIdentity"}, "bot": {"$ref": "#/$defs/OutboundIdentity"}}
+        }
+      }
+    },
+    "JsonRpcRequest": {
+      "type": "object", "additionalProperties": false, "required": ["jsonrpc", "method"],
+      "description": "Stdio binding frame (one per line): a request carries id; a notification has none.",
+      "properties": {"jsonrpc": {"const": "2.0"}, "id": {"type": ["string", "integer"]}, "method": {"type": "string"}, "params": {"type": "object"}}
+    },
+    "JsonRpcResponse": {
+      "type": "object", "additionalProperties": false, "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"}, "id": {"type": ["string", "integer", "null"]},
+        "result": {},
+        "error": {"type": "object", "additionalProperties": false, "required": ["code", "message"],
+                  "properties": {"code": {"type": "integer"}, "message": {"type": "string"}, "data": {"type": "object"}}}
+      }
+    }
+  }
+}

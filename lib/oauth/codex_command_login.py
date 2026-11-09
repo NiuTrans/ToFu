@@ -381,7 +381,12 @@ def _stop(process: subprocess.Popen, reader: threading.Thread | None) -> None:
         reader.join(timeout=1)
     for stream in (process.stdin, process.stdout):
         if stream is not None:
-            stream.close()
+            try:
+                stream.close()
+            except BrokenPipeError as error:
+                # The child is reaped; a failed buffered flush must not replace
+                # the protocol failure or prevent closing the other pipe.
+                _logger.debug('Codex native pipe closed during cleanup: %s', error)
     if reader is not None and reader.is_alive():
         raise _CommandFailure('codex_command_cleanup_failed')
 
@@ -568,6 +573,10 @@ def _protocol(environment: dict, home: Path, *, provenance: str,
             budget = yield {'codex_home': root, 'settings': settings, 'shared_login_issue': ''}
             started = time.monotonic()
             deadline = started + budget
+    except BrokenPipeError as error:
+        if _home_storage_full(environment, home):
+            raise _CommandFailure(_HOME_STORAGE_FULL_ISSUE) from error
+        raise
     finally:
         _stop(process, reader)
 

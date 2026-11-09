@@ -1170,6 +1170,20 @@ Alternatives: larger or launch-derived slot counts retain refusals; capturing ro
 Problem: plain reports could qualify instrumented timings, foreign delivery implementations, absent source witnesses or equal filesystem labels. Decision: acceptance checks requested and observed client/native/delivery profiling at every captured boundary, including productive start. The existing pipeline manifest binds coordinator/benchmark aliases to the full source inventory; direct/pipeline and barrier/queued modes cannot be pooled. Physical authority `stat().st_dev` witnesses must match on this same-host runner.
 Current admission requires identical complete source inventories before/after and against a freshly captured checkout, including the actual executor/resource owners, plus unchanged declared/pinned executable and loaded-library build identities. The source/artifact receipt is a provenance witness, not a new native identity implementation. Stable old binaries/coordinators retain `frozen_build_comparable` diagnostic value but not `current_source_qualified`; missing, contradictory or changed evidence refuses qualification. Unqualified pairs emit no speedup ratios. Alternatives rejected: trusting a wrapper's optimistic verdict, file mtime, the thin executor re-export or equal FUSE labels. `tofudb_benchmark_feedback_20261014.json` remains historical.
 
+Problem: single-report assessment scanned the entire checkout even when a
+missing or unsupported provenance receipt made qualification impossible.
+Decision: `conversation_acceptance.assess` captures current sources only for
+the supported receipt format; otherwise the existing qualifier rejects the
+receipt without that unrelated I/O. A supported receipt still gets a fresh
+complete inventory on every call unless the caller supplies its independent
+snapshot. Capture errors still refuse current qualification, and neither
+source drift nor frozen/current identity rules change. Alternatives rejected:
+caching a prior checkout inventory (could hide local edits), accepting a report's
+own inventory as current, or disabling provenance checks in pipeline tests.
+The acceptance specifications cover early refusal, successive captures that
+observe a newly added source, unreadable sources and all existing identity
+failures. Fixture measurements live in `TESTING_STRATEGY.md`.
+
 Problem. Storage-operation microbenchmarks do not certify interactive capacity. The panel and `tofudb_perf_compare.py` cover at most eight writers; `tofudb_bench.py` covers up to 64 ingestion writers. Settled Turn appends and generic event appends omit the live Attempt/projection/event path.
 A completion/recovery pass alone permits a 47-second stream P99; a throughput geometric mean hides losing tails. The old comparison's authority-directory option only relocated TofuDB; SQLite could remain on the system temp volume.
 
@@ -1417,5 +1431,136 @@ comparison cards and evidence blocks, not generated scripts or filesystem image
 URLs. Full raw windows remain in the adjacent report JSON. Producers may publish
 the payload through the native rich-response tool; publication and owner checks
 are distinct from the offline catalog's measurement identity.
+
+## Production-shaped load test
+
+**Problem:** the comparison harness above measures operation classes on
+synthetic corpora; it cannot answer how the authority behaves when the
+production Agent fleet grows 3-5x, because the fleet's real traffic
+(streamed Turn events with tool rounds and telemetry, durable-worker claims and
+heartbeats, browser sync polling, execution-host bookkeeping reads, sidebar,
+search and pruning) never runs together against one authority.
+
+**Decision:** `scripts/tofudb_load_test.py` starts one isolated authority
+through the production `StorageSupervisor` and drives that mix through the
+application's own storage code (`lib.turn_lifecycle` create/dispatch/start/
+record/settle, `lib.durable_worker.StorageWorkerJobStore`,
+`lib.conversation_sync` changes/snapshot, `lib.conversations` list/search) at
+multiples of a peak measured on production. Its `PRODUCTION_PROFILE` records
+each input next to its source:
+
+- the conversation census (`GET /api/v4/conversations?meta=1`);
+- running attempts (execution-host executor threads);
+- the durable event rate (engine `commitStages` `turn_event_store`);
+- the API-host read mix (`tofu_storage_rpc_seconds` interval deltas);
+- execution-host bookkeeping reads (engine listener request rate minus the API
+  host's share);
+- payload byte shares from inspector exports.
+
+A scale multiplies concurrency and every rate. Agents keep production's
+admission rule of one running Turn per conversation lane. The seed is
+synthetic: same conversation census and per-conversation shape, no user
+content.
+
+**Alternatives rejected:**
+
+- Restoring a production backup (`tofu-db restore`) to get a byte-exact copy.
+  It is not feasible on this host. Restore is a single-threaded traversal with
+  a file fsync plus a directory fsync per block. The backup held ~38M block
+  files, and its newest complete generation was 18 days old (2026-11-08).
+  Restore also writes its pin into the source backup directory.
+- Replaying wire payloads captured from production. No request capture exists.
+  Turn-event payloads carry projection patches and worker-claim fences that
+  are valid only for their original attempt.
+- Driving a full isolated server with a mock model. It adds HTTP and executor
+  noise, and its LLM pacing would not be the measured storage mix.
+
+Run it from a checkout. `--engine` defaults to `$TOFUDB_BIN`; pass the admitted
+production binary to measure the running build. Engine admission requires the
+binary to match the checkout's engine source. To measure an older build, run the
+script from a `git archive <commit> | tar -x` export of the commit it was built
+from.
+
+```sh
+# first run: seed the production census, then 1x/3x/5x for 5 minutes each
+python3 scripts/tofudb_load_test.py --root /tmp/tofudb-load --engine "$TOFUDB_BIN"
+# later runs against the same seeded authority (e.g. before/after a fix)
+python3 scripts/tofudb_load_test.py --root /tmp/tofudb-load --reuse-seed --scales 1,5 --duration 300
+# production medium: a private directory on the dolphinfs mount, outside any checkout
+python3 scripts/tofudb_load_test.py --root /mnt/your-fs --durability normal
+```
+
+Each phase writes `ROOT/results/<run-id>/report.json` and `report.md`:
+
+- exact per-operation n, rate, p50/p90/p99/max and error codes;
+- settlement split: `turn.event.record:terminal` holds Turns that reached their
+  planned length; `turn.event.record:terminal:phase_stop` holds the Turns the
+  phase stop settles all at once (one per agent). That herd waits on the one
+  client process, so it is not per-Turn settlement latency. Reports before
+  2026-11-09 mix both under `turn.event.record:terminal`; at 1x for 180 s, 21
+  of its 29 samples were the herd;
+- event outcomes (carried vs coalesced);
+- engine `system.metrics` interval deltas (authority wait, command execution,
+  WAL and barrier sync, projection materialization);
+- engine CPU and RSS;
+- WAL and block-device bytes per user-visible change (streamed event or
+  settled Turn).
+
+`--durability` pins the WAL tier. It defaults to production's probed `normal`;
+without it a local volume would probe `strict` and compare unlike tiers.
+
+Safety: `ROOT` is created 0700. A root inside a live Tofu data directory is
+refused. The measuring child runs with a scrubbed environment whose data root,
+`HOME` and `TMPDIR` are under `ROOT`, so it neither reads nor writes production
+state. The engine is pinned by copy and SHA-256, and the harness stops the
+authority it started. Delete `ROOT` when done.
+
+Limitations:
+
+- Execution-host traffic it cannot issue with valid domain payloads
+  (`project.dispatch.*`, `integration.workspace.*`, `raw_archive.*`,
+  `swarm.agent.*`, `log_aggregate.flush`) is modelled as equal-rate point
+  reads.
+- The seed reproduces the census, not production's total bytes (about 1 GB
+  against a ~0.5 TB backup), so the cold-read and GC-mark costs of a
+  multi-terabyte catalog are absent.
+- Synthetic events write 52-208 KB of WAL each. Production writes ~290 KB of
+  WAL per event and decodes a ~4 MB checkpoint per event, so 1x is
+  optimistic.
+- All clients share one Python process. The report's `client_cpu_cores`
+  reaches ~1.0 at 3x and 5x: from there the client's GIL bounds the offered
+  load. The production execution host is likewise one process (0.93 cores
+  average on 2026-11-08). At 1x client-measured point reads (1.3-2.0 ms p50)
+  are mostly that queue; the engine serves them in 0.06-0.16 ms.
+- Every agent starts its first Turn at the phase start, so most
+  create/dispatch/claim/start samples of a short phase are one herd too.
+
+Baseline, 2026-11-08 (production engine `892b231a`, WAL `normal`). Columns
+are p50/p99 in ms. 1x is 21 attempts and 15.3 events/s. Seed: 1,177
+conversations and 8,468 Turns. No operation failed in any phase.
+
+| operation | dolphinfs 1x | dolphinfs 3x | dolphinfs 5x | md0 HDD 1x | md0 HDD 3x | md0 HDD 5x |
+|---|---|---|---|---|---|---|
+| turn.event.record | 3.6/275 | 58/492 | 809/2,148 | 17/2,097 | 166/6,123 | 970/3,224 |
+| turn.sync.changes | 12/58 | 88/610 | 847/2,395 | 13/48 | 82/833 | 991/2,724 |
+| point reads (turn.get metadata) | 0.4/12 | 31/407 | 725/1,990 | 0.4/9 | 26/514 | 796/2,162 |
+| worker_job.heartbeat | 0.9/18 | 86/531 | 673/1,963 | 0.7/325 | 147/2,713 | 919/2,172 |
+| turn.create_pair | 17/54 | 48/279 | 90/1,415 | 53/85 | 76/961 | 444/1,685 |
+| worker_job.claim_next | 8/37 | 64/175 | 171/1,652 | 9/70 | 163/747 | 811/2,626 |
+| authority_wait avg (ms) | 0.5 | 1.5 | 13.9 | 47 | 138 | 52 |
+| completed operations/s | 332 | 578 | 224 | 334 | 554 | 206 |
+| events / sync reads, % of target | 97 / 98 | 93 / 79 | 59 / 34 | 91 / 98 | 75 / 75 | 53 / 31 |
+| client CPU (cores) | 0.26 | 1.05 | 1.07 | - | - | - |
+
+At 1x the harness completes ~333 operations/s, close to the ~350 requests/s
+the production engine served at the same time. From 3x the single client
+process is GIL-bound. At 5x completed operations fall below the 1x rate on both
+media and every operation queues. On md0 the WAL barrier sync averages 110 ms,
+against 0.56 ms on dolphinfs, so the local HDD is the worse medium for the
+authority.
+
+Verification: `tests/tofudb/test_tofudb_load_test.py` covers environment
+scrubbing, live-root refusal, exact percentiles, the phase-stop settlement
+split and interval accounting.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

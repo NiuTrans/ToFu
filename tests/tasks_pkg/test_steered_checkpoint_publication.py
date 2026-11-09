@@ -15,7 +15,7 @@ import pytest
 
 from lib import agent_inbox
 from lib.agent_core.events import EventType, build_event
-from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
 from tests.llm.test_llm_round_delivery_acknowledgement import _provider_runtime
 from tests.llm.test_llm_round_delivery_acknowledgement import delivery as delivery_fixture
 from tests.model_routing.test_model_continuation_store import authority as authority_fixture

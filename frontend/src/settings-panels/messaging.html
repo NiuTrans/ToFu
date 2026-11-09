@@ -1,0 +1,52 @@
+<!-- Source: frontend/src/settings-panels/messaging.html. Static delivery is generated; edit this source only.
+     Each platform panel (settingsTab_<platform>) is its own fragment; messaging-platforms.ts moves it into its section. -->
+<div class="settings-tab-panel" id="settingsTab_messaging">
+  <div class="channel-page-heading">
+    <div class="settings-section-title" data-i18n="settings.messaging.title">消息平台</div>
+    <p class="settings-desc" data-i18n="settings.messaging.subtitle">把聊天平台接入 Tofu。只有你本人在指令通道里发的消息会交给总负责人执行，其他人的消息只作参考。点开一个平台查看它的设置。</p>
+  </div>
+  <div class="msg-platforms" id="messagingPlatforms">
+    <details class="msg-platform" id="msgPlatform_feishu" data-platform="feishu">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabFeishu">飞书</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_feishu" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_feishu"></div>
+    </details>
+    <details class="msg-platform" id="msgPlatform_dx" data-platform="dx">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabDx">大象</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_dx" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_dx"></div>
+    </details>
+    <details class="msg-platform" id="msgPlatform_github" data-platform="github">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabGithub">GitHub</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_github" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_github"></div>
+    </details>
+    <details class="msg-platform" id="msgPlatform_wecom" data-platform="wecom">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabWecom">企业微信</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_wecom" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_wecom"></div>
+    </details>
+    <details class="msg-platform" id="msgPlatform_qq" data-platform="qq">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabQq">QQ</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_qq" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_qq"></div>
+    </details>
+    <details class="msg-platform" id="msgPlatform_wechat" data-platform="wechat">
+      <summary class="msg-platform-summary">
+        <span class="msg-platform-name" data-i18n="settings.tabWechat">微信</span>
+        <span class="msg-platform-status" id="msgPlatformStatus_wechat" data-state="unknown" aria-live="polite"></span>
+      </summary>
+      <div class="msg-platform-body" id="msgPlatformBody_wechat"></div>
+    </details>
+  </div>
+</div>

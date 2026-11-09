@@ -2,9 +2,11 @@
 
 Working-tree delivery leaves a task's bytes uncommitted in a checkout other
 writers keep editing. In a repository that opted into automatic commits, the
-delivery receiver records the task's baseline-to-checkpoint delta on the
-current branch without writing any checkout file, so concurrent and borrowed
-uncommitted edits stay exactly where they were.
+delivery receiver records a working-tree delivery's baseline-to-checkpoint
+delta on the current branch without writing any checkout file, so concurrent
+and borrowed uncommitted edits stay exactly where they were. A reviewed
+project delivery there lands as its own commit in its delivery pass
+(tests/project_mod/test_delivery_integrity.py).
 """
 import pytest
 
@@ -116,7 +118,7 @@ def test_busy_index_keeps_the_commit_due_and_is_never_unlocked_by_us(repo, monke
     assert git(root, 'status', '--porcelain') == ''
 
 
-def test_moved_branch_or_staged_delta_path_keeps_the_commit_due(repo, monkeypatch):
+def test_moved_branch_keeps_the_commit_due_and_staged_work_survives(repo, monkeypatch):
     root, _work, _owner = repo
     row = delivered(repo, monkeypatch, lambda work: (work / 'feature.txt').write_text('task\n'))
     original = task_delta_delivery._merge_workspace_delta
@@ -134,17 +136,16 @@ def test_moved_branch_or_staged_delta_path_keeps_the_commit_due(repo, monkeypatc
     monkeypatch.setattr(task_delta_delivery, '_merge_workspace_delta', original)
     moved = git(root, 'rev-parse', 'HEAD')
 
+    # A writer's staged entry on a delta path is preserved, never a reason to wait.
     (root / 'feature.txt').write_text('a writer staged this\n')
     git(root, 'add', 'feature.txt')
-    assert task_delta_delivery.commit_delivered_task_delta(row) is None
-    assert git(root, 'rev-parse', 'HEAD') == moved
-
-    git(root, 'reset', '-q', '--', 'feature.txt')
     ack = task_delta_delivery.commit_delivered_task_delta(row)
     assert ack['status'] == 'committed' and ack['parentSha'] == moved, ack
+    assert ack['indexSynchronized'] is False
     assert git(root, 'show', 'HEAD:feature.txt') == 'task'
+    assert git(root, 'show', ':feature.txt') == 'a writer staged this'
     assert (root / 'feature.txt').read_text() == 'a writer staged this\n'
-    assert git(root, 'status', '--porcelain') == 'M feature.txt'  # unstaged ' M', stripped
+    assert git(root, 'status', '--porcelain') == 'M  feature.txt'
 
 
 def test_contained_checkpoint_is_acknowledged_without_a_new_commit(repo, monkeypatch):
@@ -178,9 +179,13 @@ def test_reviewed_project_delivery_commits_only_with_the_automatic_commit_opt_in
     assert receipt['state'] == 'delivered', receipt
     delivery.resume_pending_workspace_deliveries()
 
-    ack = state.get_workspace(str(root), 'automatic', user_id=owner)['origin']['deliveryCheckpoint']
+    origin = state.get_workspace(str(root), 'automatic', user_id=owner)['origin']
+    assert delivery.canonical_delivery(origin)
     if opted_in:
-        assert ack['status'] == 'committed', ack
+        # The delivery pass lands the commit itself; its receipt is the evidence.
+        assert receipt['publicationMode'] == 'committed', receipt
+        assert receipt['targetSha'] == git(root, 'rev-parse', 'HEAD')
+        assert 'deliveryCheckpoint' not in origin
         assert git(root, 'rev-parse', 'HEAD^') == head
         assert git(root, 'show', 'HEAD:feature.txt') == 'reviewed work'
         assert git(root, 'status', '--porcelain') == ''
@@ -188,7 +193,8 @@ def test_reviewed_project_delivery_commits_only_with_the_automatic_commit_opt_in
         assert 'Tofu-Task: automatic' in message
         assert 'Tofu-Assignment: assignment-1' in message
     else:
-        assert ack == {'status': 'disabled'}
+        assert receipt['publicationMode'] == 'working_tree', receipt
+        assert origin['deliveryCheckpoint'] == {'status': 'disabled'}
         assert git(root, 'rev-parse', 'HEAD') == head
         assert (root / 'feature.txt').read_text() == 'reviewed work\n'
     commit = git(root, 'rev-parse', 'HEAD')

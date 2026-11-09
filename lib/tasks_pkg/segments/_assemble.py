@@ -745,12 +745,23 @@ def assemble_segments(task: dict[str, Any],
                     seg['signature'] = sig
                 segments.append(seg)
             raw_ac = r.get('assistantContent')
+            raw_model_ac = r.get('assistantModelContent')
             ac = raw_ac if isinstance(raw_ac, str) else ''
+            model_ac = (raw_model_ac if isinstance(raw_model_ac, str) else ac)
+            if model_ac and not ac:
+                segments.append({
+                    'type': SEG_TEXT, 'text': '',
+                    'blockId': f'text:{block_suffix}',
+                    'deliverable': False, 'llmRound': lr,
+                    'modelText': model_ac,
+                    **identity_fields,
+                })
             if ac:
                 segments.append({
                     'type': SEG_TEXT, 'text': ac,
                     'blockId': f'text:{block_suffix}',
                     'deliverable': False, 'llmRound': lr,
+                    **({'modelText': model_ac} if model_ac else {}),
                     **identity_fields,
                 })
             batch_emitted_prose = bool(think or ac)

@@ -58,6 +58,12 @@ def tool_name_bytes(tools):
                if name)
 
 
+def _hides_a_name(tools, *, budget_bytes, floor):
+    """Whether fitting ``tools`` to the budget must hide a name outside ``floor``."""
+    return bool(budget_bytes) and tool_name_bytes(tools) > budget_bytes and any(
+        name not in floor for name in map(_provider_tool_name, tools) if name)
+
+
 def fit_tool_name_budget(tools, *, budget_bytes, required_names):
     """Hide the longest optional names until the joined names fit the budget.
 
@@ -108,7 +114,8 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
     # executable catalog in the dispatch pipeline; this only controls what the
     # model sees on the wire.
     from lib.tools.gateway import preserve_background_wire_tools
-    from lib.tools.direct_wire import live_direct_names, preserve_direct_wire_tools
+    from lib.tools.direct_wire import (
+        declared_direct_names, live_direct_names, preserve_direct_wire_tools)
     from lib.tools.poll import BACKGROUND_TOOL_NAMES
     _executable_catalog = body.get('_executable_tool_catalog')
     _background_authority = (
@@ -118,7 +125,13 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         _provider_tool_name(tool) for tool in _background_authority
         if _provider_tool_name(tool) in BACKGROUND_TOOL_NAMES
     }
-    _direct_declarations = body.get('_required_direct_tool_names')
+    _direct_declarations = declared_direct_names(body.get('_required_direct_tool_names'))
+    _choice = body.get('tool_choice')
+    _choice_function = _choice.get('function') if isinstance(_choice, dict) else None
+    if isinstance(_choice_function, dict) and _choice_function.get('name'):
+        # A named choice needs its exact live schema even when discovery or
+        # routing hid it. The authority intersection below prevents re-grants.
+        _direct_declarations.add(str(_choice_function['name']))
     _direct_names = live_direct_names(_background_authority, _direct_declarations)
     _protected_names = _background_names | _direct_names
     if _protected_names:
@@ -133,9 +146,13 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         }
     _tool_search_backend = ''
     _required_direct_names: set[str] = set(_direct_names)
+    _name_budget = provider_tool_name_budget_bytes(
+        api_protocol=api_protocol, base_url=base_url,
+        model=body.get('model') or '')
     if isinstance(_executable_catalog, list):
         from lib.tools.gateway import (
             CODE_CORE_DIRECT_TOOL_NAMES,
+            GATEWAY_TOOL_NAMES,
             full_wire_tools,
             local_wire_tools,
             resolve_tool_search_backend,
@@ -149,13 +166,6 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         _pins = list(body.get('_frontend_selected_tool_names') or ())
         _pin_set = {str(name) for name in _pins}
         _schema_budget = int(body.get('_tool_schema_budget_tokens') or 0)
-        _choice = body.get('tool_choice')
-        if isinstance(_choice, dict):
-            _choice_function = _choice.get('function')
-            if isinstance(_choice_function, dict) \
-                    and _choice_function.get('name'):
-                _pin_set.add(str(_choice_function['name']))
-                _required_direct_names.add(str(_choice_function['name']))
 
         def _wire_catalog_tool(tool):
             if not isinstance(tool, dict):
@@ -218,6 +228,10 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
                 # PTC and multi-agent projection still follow. Reserve any
                 # needed discovery gateway now, but fit exactly once below.
                 apply_schema_budget=False,
+                keep_discovery=_hides_a_name(
+                    _wire_catalog, budget_bytes=_name_budget,
+                    floor=(_required_direct_names | GATEWAY_TOOL_NAMES
+                           | BACKGROUND_TOOL_NAMES)),
                 on_tool_isolated=_request_activity_sink)
         else:
             # ``off`` gets the full catalog, without a discovery primitive.
@@ -375,7 +389,8 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
     _budget_compacted_names: list[str] = []
     _required_names = set(_required_direct_names)
     if _multi_agent_backend != 'off':
-        # Keep the local swarm launch/result pair together. Unified
+        # Protect the launch and any directly exposed result schema from
+        # budget eviction; registry-deferred result recovery stays hidden. Unified
         # poll/kill are already a mandatory budget floor when authorized;
         # never pull the replay-only await_agents into a new wire surface.
         from lib.swarm.tools import (
@@ -409,17 +424,13 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
     # A route's tool-name byte budget is a provider constraint, not a cost
     # target. Hide names only while search_tools/execute_tools stay on the
     # wire, so every hidden tool remains discoverable and executable.
-    _name_budget = provider_tool_name_budget_bytes(
-        api_protocol=api_protocol, base_url=base_url,
-        model=body.get('model') or '')
+    from lib.tools.gateway import GATEWAY_TOOL_NAMES
+    _name_floor = _required_names | GATEWAY_TOOL_NAMES | BACKGROUND_TOOL_NAMES
     _named_wire = body.get('tools')
     if (_name_budget and isinstance(_named_wire, list)
             and _DISCOVERY_PAIR <= set(map(_provider_tool_name, _named_wire))):
-        from lib.tools.gateway import GATEWAY_TOOL_NAMES
         _fitted = fit_tool_name_budget(
-            _named_wire, budget_bytes=_name_budget,
-            required_names=(_required_names | GATEWAY_TOOL_NAMES
-                            | BACKGROUND_TOOL_NAMES))
+            _named_wire, budget_bytes=_name_budget, required_names=_name_floor)
         if _fitted is not _named_wire:
             _kept_names = set(map(_provider_tool_name, _fitted))
             _hidden_names = [name for name in map(_provider_tool_name, _named_wire)
@@ -437,15 +448,15 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         # but this route will not reuse its prompt cache, so say so per request.
         _sent_name_bytes = tool_name_bytes(body['tools'])
         if _sent_name_bytes > _name_budget:
-            _pair_on_wire = _DISCOVERY_PAIR <= set(
-                map(_provider_tool_name, body['tools']))
             logger.warning(
                 '%s [ToolWire] tool-name budget %d bytes NOT met: %d bytes '
                 'sent (%s); this route will not reuse its prompt cache for '
                 'this request', log_prefix, _name_budget, _sent_name_bytes,
-                'required direct tools alone exceed it' if _pair_on_wire
-                else 'no search_tools/execute_tools discovery path, Tool '
-                     f'Search backend={_tool_search_backend or "none"}')
+                'no search_tools/execute_tools discovery path, Tool '
+                f'Search backend={_tool_search_backend or "none"}'
+                if _hides_a_name(body['tools'], budget_bytes=_name_budget,
+                                 floor=_name_floor)
+                else 'required direct tools alone exceed it')
 
     # Wire-contract invariant at the LAST common boundary: whatever shape the
     # tools array arrived in (registry assembly, latched catalogs, headless

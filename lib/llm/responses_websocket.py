@@ -208,21 +208,12 @@ def _websocket_proxy(plan, owner_scope: str):
         if route != 'direct':
             raise ResponsesWebSocketUnavailable(
                 'desktop egress route', expected=True)
-    from lib.proxy import proxies_for, subscription_route_candidates
-    routes = subscription_route_candidates(plan.url)
-    if routes:
-        route = routes[0]
-        if route.mode == 'direct':
-            return None
-        if route.mode == 'proxy':
-            return route.proxy_url or True
-        return True
-    proxies = proxies_for(plan.url) or {}
-    if proxies.get('https'):
-        return proxies['https']
-    if proxies.get('no_proxy') == '*':
-        return None
-    return True
+    from lib.proxy import network_route_candidates
+    routes = network_route_candidates(
+        plan.url, scope=getattr(plan, 'network_scope', None))
+    if not routes:
+        raise ResponsesWebSocketUnavailable('no reachable network route')
+    return routes[0].async_proxy_url()
 
 
 def _open_session(plan, key: str, handshake: dict, owner_scope: str = '') -> _Session:

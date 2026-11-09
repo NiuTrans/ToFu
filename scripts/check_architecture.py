@@ -152,7 +152,7 @@ _MODULE_CLASS_REPLACEMENT_ALLOWED = frozenset({
 # import-time config reads (a second, implicit configuration system). It may
 # only shrink; when it does, tighten these constants in the same change.
 _LIB_INIT = ROOT / "lib" / "__init__.py"
-_LIB_INIT_MAX_LINES = 363
+_LIB_INIT_MAX_LINES = 355
 _LIB_INIT_MAX_ENV_READS = 11
 
 # Loose modules parked directly at lib/ root bypass the domain-package

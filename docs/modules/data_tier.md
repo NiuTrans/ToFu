@@ -15,14 +15,14 @@ owners to the existing performance gates.
 |---|---|---|
 | `lib/storage/` | Web, worker, task, plugin parent | Selected `storage.v1` / native `storage.v2` transport, process-wide response-frame admission, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
 | `lib/storage_authority_sql/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
-| `lib/storage_authority_sql/impact_cache.py` | Landing verifier | Private reconstructible test records and blob fingerprints in an explicit repository cache file; never an application authority or backend fallback |
+| `lib/storage_authority_sql/impact_cache.py` | Landing verifier | Private reconstructible test records and blob fingerprints in an explicit repository cache directory; never an application authority or backend fallback |
 | `lib/storage_authority_sql/native_checkpoint_{config,service}.py`, `lib/storage/checkpoint_control.py` | Selected SQL Sidecar / application client | Explicit pinned scope, lazy joined code lifetime and one-attempt instance-bound RPC; no backend switching or generic receipts |
 | `lib/storage_authority_sql/native_checkpoint_outbox.py` | Selected SQL Sidecar | Shared Rust checkpoint transaction capture, ordered SQL prefix verification and passive replay; existing outbox owns encryption/publication |
 | `lib/storage_authority_sql/adapters/sqlite.py` | Sidecar only | One ordered writer without job-count admission, fair priority lanes, demand-created query-only connections with idle reuse, WAL/full-sync, progress watchdog, result-code retry classification |
 | `lib/storage_authority_sql/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 demand-created connections, isolated read/write lease owners, idle reuse and SQLSTATE retry classification |
 | `packages/tofu-db/` | Supervised Rust authority | CONTROL/WAL engine, owner-scoped semantic operations and resource-budgeted `storage.v2` serving; selection and certification are separate ([native contract](../STORAGE_TOFUDB.md)) |
 | `lib/storage/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
-| `lib/storage/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
+| `lib/agent_core/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
 | `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting and, given a time bound, newest-first message windows for one transcript no response can carry; validated interval-count projection |
 
 | `lib/conversations/diagnostic.py` | Application process | Strict owner/revision/rank/byte-cursor validation for bounded diagnostic reads; no projection hydration or physical storage knowledge |

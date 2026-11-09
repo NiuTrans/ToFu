@@ -66,22 +66,37 @@ def test_other_spawn_failures_stay_generic(isolated_home, monkeypatch):
     assert context == {'shared_login_issue': 'codex_command_unavailable'}
 
 
-def test_early_child_exit_consults_home_capacity(isolated_home, monkeypatch):
+@pytest.mark.parametrize(('exit_before_handshake', 'capacity', 'expected_issue'), [
+    (False, _statvfs(favail=0), 'codex_home_storage_full'),
+    (True, _statvfs(favail=0), 'codex_home_storage_full'),
+    (True, _statvfs(), 'codex_command_unavailable'),
+    (True, _statvfs(files=0, blocks=0), 'codex_command_unavailable'),
+], ids=['exit-observed', 'pipe-closed-full', 'pipe-closed-available', 'pipe-closed-unknown'])
+def test_early_child_exit_consults_home_capacity(
+        isolated_home, monkeypatch, exit_before_handshake, capacity, expected_issue):
+    exit_script = 'exit 3' if exit_before_handshake else 'read -r request; exit 3'
     monkeypatch.setattr(command, '_launch',
-                        lambda environment, home: ['/bin/sh', '-c', 'exit 3'])
+                        lambda environment, home: ['/bin/sh', '-c', exit_script])
     spawned = False
+    children = []
     original_popen = command.subprocess.Popen
     def spawn(*args, **kwargs):
         nonlocal spawned
         process = original_popen(*args, **kwargs)
+        children.append(process)
         spawned = True
+        if exit_before_handshake:
+            assert process.wait() == 3
         return process
     monkeypatch.setattr(command.subprocess, 'Popen', spawn)
     monkeypatch.setattr(command.os, 'statvfs',
-                        lambda path: _statvfs(favail=0 if spawned else 500_000))
-    assert command.command_context(
-        environment=isolated_home['env']) == {'shared_login_issue': 'codex_home_storage_full'}
+                        lambda path: capacity if spawned else _statvfs())
+    context = command.command_context(environment=isolated_home['env'])
     assert spawned
+    assert len(children) == 1
+    assert children[0].returncode == 3
+    assert children[0].stdin.closed and children[0].stdout.closed
+    assert context == {'shared_login_issue': expected_issue}
 
 
 def test_unknown_capacity_filesystem_is_not_full(isolated_home, monkeypatch):

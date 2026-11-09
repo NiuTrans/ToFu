@@ -37,14 +37,13 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import native_module_path, runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_section_path
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-JS_DIR = runtime_sections_dir()
-_SRC = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
+_SRC = runtime_section_path('main/main_folders_mobile.js')
 
 _CONTROLS = native_module_path(
     '.native/folder-config-control.js',
@@ -284,7 +283,7 @@ def test_NC_click_swallow_is_load_bearing():
     )
 
 
-_PANELS_SRC = os.path.join(JS_DIR, 'mobile_panels.js')
+_PANELS_SRC = runtime_section_path('mobile_panels.js')
 
 
 def test_flow_picker_aria_roles_present():

@@ -15,7 +15,7 @@ The fix (``_mod_attribution`` in ``lib/project_mod/write_tools.py``) re-derives
 the owning root from the resolved target, so the journal records the deepest
 matching root (the extra root) and a path relative to it.
 
-Drives the REAL ``tool_write_file`` / ``tool_apply_diff`` / ``tool_insert_content``.
+Drives the REAL ``tool_write_file`` / ``tool_apply_diff`` / ``tool_edit_file``.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from lib.project_mod import config as pm_config  # noqa: E402
 from lib.project_mod.modifications import get_modifications  # noqa: E402
 from lib.project_mod.write_tools import (  # noqa: E402
     tool_apply_diff,
-    tool_insert_content,
+    tool_edit_file,
     tool_write_file,
 )
 
@@ -120,7 +120,7 @@ def test_abs_apply_diff_attributed_to_extra_root():
             _cleanup()
 
 
-def test_abs_insert_content_attributed_to_extra_root():
+def test_abs_edit_file_attributed_to_extra_root():
     with tempfile.TemporaryDirectory() as primary, \
          tempfile.TemporaryDirectory() as extra:
         try:
@@ -133,9 +133,10 @@ def test_abs_insert_content_attributed_to_extra_root():
             with open(abs_path, 'w') as f:
                 f.write('ANCHOR\n')
 
-            res = tool_insert_content(primary, abs_path, 'ANCHOR', 'NEWLINE\n',
-                                      conv_id='conv-3', task_id='task-3')
-            assert res['ok'], res
+            res = tool_edit_file(primary, [{'path': abs_path, 'anchor': 'ANCHOR',
+                                            'content': 'ANCHOR\nNEWLINE'}],
+                                 conv_id='conv-3', task_id='task-3')
+            assert res.startswith('Applied 1/1 edits'), res
 
             mod = _latest_mod(extra, 'conv-3')
             assert mod is not None
@@ -165,6 +166,5 @@ def test_relative_path_attribution_unchanged():
 if __name__ == '__main__':
     test_abs_write_file_attributed_to_extra_root()
     test_abs_apply_diff_attributed_to_extra_root()
-    test_abs_insert_content_attributed_to_extra_root()
     test_relative_path_attribution_unchanged()
     print('All tests passed.')

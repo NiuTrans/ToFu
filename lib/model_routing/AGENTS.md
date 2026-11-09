@@ -60,6 +60,11 @@ RouteCandidateCompiler.resolve_model_id reuses its normalized request indexes;
 only exact unique logical IDs resolve. Display/wire IDs and creator ambiguity
 grant no route. Verify native child-model and canonical routing tests.
 
+`request_authority.py` carries the repository and owner boundary that admitted
+a storage-free run to that run's child invocations as a live reference, never a
+copied table or global default. Verify `test_request_authority.py` and
+`tests/tasks_pkg/test_public_runtime_delegation.py`.
+
 Codex OAuth native routes require an explicit owner/destination credential resolver.
 Verify tenant fencing, private callback disposal, joined model binding, canonical
 cache/replay capabilities and real installed OAuth-route fixtures. Never select

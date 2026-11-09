@@ -31,7 +31,7 @@ struct GatewaySessionProbe: Sendable {
         guard isJSON(response) else { return false }
         let data = Data(response.body.utf8)
         if response.status == 200, let page = try? JSONDecoder().decode(MetadataEnvelope.self, from: data) {
-            return !page.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return !page.meta.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if [401, 403].contains(response.status), let problem = try? JSONDecoder().decode(AuthProblem.self, from: data) {
             return problem.status == response.status && problem.instance == "/api/v4/conversations" &&
@@ -46,11 +46,10 @@ struct GatewaySessionProbe: Sendable {
     }
 
     private struct MetadataEnvelope: Decodable {
-        let requestId: String
         let data: Page
         let meta: Clock
         struct Page: Decodable { let items: [IgnoredValue]; let page: Object }
-        struct Clock: Decodable { let serverTimeMs: Int64 }
+        struct Clock: Decodable { let requestId: String; let serverTimeMs: Int64 }
         struct IgnoredValue: Decodable { init(from decoder: Decoder) throws {} }
         struct Object: Decodable {
             private enum Keys: String, CodingKey { case unused }

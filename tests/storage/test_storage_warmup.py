@@ -82,6 +82,23 @@ class RunWarmupPassTests(unittest.TestCase):
         self.assertEqual(len(stats['warmed']), 4)
         self.assertEqual(stats['skipped'], [])
 
+    def test_probe_never_waits_on_a_live_authority_inside_the_client(self):
+        # A supervised client waits out transient failures while its
+        # authority lives; a fail-soft warm-up probe declines that wait.
+        from lib.storage.retry import observe_storage_wait
+
+        class _StarvedClient(_FakeClient):
+            def query(self, operation, payload, deadline=None):
+                super().query(operation, payload, deadline=deadline)
+                observe_storage_wait(StorageError(
+                    'database_timeout', 'deadline_elapsed'))
+                return {}
+
+        stats = warmup.run_warmup_pass(
+            _StarvedClient(), deadline_seconds=10.0, budget_seconds=600.0)
+        self.assertEqual(stats['warmed'], [])
+        self.assertEqual(len(stats['failed']), 6)
+
     def test_total_budget_skips_unfinished_operations(self):
         # Concurrent contract: every operation is submitted at once and the
         # budget bounds the WAIT — operations that cannot finish inside the

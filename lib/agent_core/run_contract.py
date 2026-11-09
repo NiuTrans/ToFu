@@ -20,7 +20,7 @@ import hashlib
 import time
 
 from lib.ids import short_id
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
@@ -326,7 +326,7 @@ def project_agent_result(
         except ValueError as exc:
             logger.warning(
                 '[agent.run] trajectory flatten failed fmt=%s task=%s: %s',
-                trajectory_fmt, task.get('id', '?')[:8], exc)
+                trajectory_fmt, task_log_tag(task.get('id', '?')), exc)
             result['trajectory_error'] = str(exc)
     return result
 

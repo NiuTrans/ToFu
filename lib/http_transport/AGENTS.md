@@ -6,6 +6,12 @@ map is `docs/modules/infra_runtime.md`; transport policy remains independent of
 routes and storage implementations. `lib/app/app_assembly.py` registers inbound
 owners, and `client.py` owns lazy outbound sessions and joined shutdown.
 
+All application HTTP and SDK sessions use the managed factories in
+`outbound.py` / `outbound_async.py` / `outbound_httpx.py`, including subscription integrations.
+`lib/proxy.py` and `lib/network_routes.py` own the shared route policy
+(`docs/NETWORK.md`). Keep raw transport/probe I/O at this boundary; preserve
+explicit proxy and bypass policy, prepared bodies and connect-only failover.
+
 `plugin_frontend.py` registers the public async `tofu_plugin_assets()` template
 helper. It offloads manifest reads to the existing `lib/vite_assets.py` owner;
 entry identity belongs to `frontend/authoring-inputs.json`. Verify native HTTP

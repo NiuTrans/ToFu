@@ -89,7 +89,7 @@ def validate_engine(document: dict, catalog_names: list[str]) -> None:
         "appendAdmission": "checked-u64-offset-without-maintenance-byte-quota",
         "foregroundMaintenancePolicy": "notify-existing-rotation-driver;never-wait-for-history-encoding-or-publication",
         "recoveryPolicy": "buffered-frame-scan;validate-record-size-before-allocation;preserve-exact-durable-prefix-and-tail-truncation",
-        "maximumRecoveryPackedLocations": 65536,
+        "recoveryLookupPolicy": "all-distinct-selected-wal-references;one-verified-packed-and-history-index-pass;release-after-replay",
         "foregroundMaterializeTargetBytes": 8388608,
         "historyPreparationTargetBytes": 262144,
         "maximumHistoryPreparationBytes": 4194304,
@@ -249,6 +249,7 @@ def validate_engine(document: dict, catalog_names: list[str]) -> None:
     if document.get("blockPayloadReadCache") != expected_block_payload_cache:
         raise ValueError("Tofu-DB block payload read cache policy is incomplete")
     expected_payload_read_cache = {
+        "maximumPersistedHints": 65536,
         "maximumResidentIndexAndFilterBytes": 67108864,
         "maximumResidentSegments": 4096,
         "maximumRecencyRecords": 8192,

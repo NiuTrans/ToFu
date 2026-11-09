@@ -13,6 +13,8 @@ simulation/backtest engines, risk policy, and application UI.
 - Durable access uses the declared `tofu.storage` manifest and explicit owner
   identity. Never import a database driver, select a backend, or open a host
   database directly.
+- Outbound HTTP uses the public `lib.http_transport` host facade. It owns
+  automatic proxy selection and connect-only recovery (`docs/NETWORK.md`).
 - Models propose intent; deterministic risk, permission, idempotency, limit,
   and settlement boundaries authorize execution. Failure defaults to no trade.
 - Read fan-out uses the generated shared demand kernel; worker counts are idle

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +38,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,8 +66,13 @@ import com.tofu.client.session.HealthProbe
 import com.tofu.client.session.ProfileForm
 import com.tofu.client.session.ServerUrl
 import com.tofu.client.session.TofuProbe
+import com.tofu.client.session.UpdateProbe
 import com.tofu.client.ui.theme.TofuButtonShape
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.tofu.client.session.DiagLog
@@ -97,29 +104,49 @@ fun AddEditScreen(
     /** URL / name supplied by a scan, paste, or inbound deep link. */
     prefillUrl: String? = null,
     prefillAlias: String? = null,
+    pendingPrefill: ProfilesViewModel.Prefill? = null,
+    initialDraft: ProfilesViewModel.FormDraft? = null,
+    onDraftChanged: (ProfilesViewModel.FormDraft) -> Unit = {},
+    onPrefillAccepted: (revision: Long) -> Unit = {},
+    onPrefillDismissed: (revision: Long) -> Unit = {},
+    /** Production routes scan/paste through the same observable consent/draft owner as intents. */
+    onConnectOffered: ((DeepLink.Connect) -> Unit)? = null,
+    onFormChanged: () -> Unit = {},
     diagnostics: DiagLog? = null,
     status: UiStatus = UiStatus.Idle,
 ) {
-    var alias by remember { mutableStateOf(editing?.alias ?: prefillAlias.orEmpty()) }
-    var url by remember { mutableStateOf(editing?.baseUrl ?: prefillUrl.orEmpty()) }
+    var dirty by remember { mutableStateOf(initialDraft?.dirty ?: false) }
+    // Pending events are processed again after recreation, never used as an
+    // initializer. Explicit dismissal lives in the ViewModel, not remember.
+    var seenPrefill by remember { mutableStateOf(0L) }
+    var pendingConnect by remember { mutableStateOf<DeepLink.Connect?>(null) }
+    var pendingRevision by remember { mutableStateOf<Long?>(null) }
+    fun changed() { dirty = true; onFormChanged() }
+    var alias by remember { mutableStateOf(initialDraft?.alias ?: editing?.alias ?: prefillAlias.orEmpty()) }
+    var url by remember { mutableStateOf(initialDraft?.url ?: editing?.baseUrl ?: prefillUrl.orEmpty()) }
     // Auth defaults are URL-aware for NEW profiles: a `/proxy/<port>/` URL is
     // behind a code-server password gate → CODE_SERVER_PASSWORD; a bare host →
     // NONE. We track whether the user has manually overridden the picker so we
     // stop auto-following the URL once they do (and never override an edit).
-    var authTouched by remember { mutableStateOf(editing != null) }
+    var authTouched by remember { mutableStateOf(initialDraft?.authTouched ?: (editing != null)) }
     var auth by remember {
         mutableStateOf(
-            editing?.authType ?: ServerUrl.defaultAuthType(url),
+            initialDraft?.auth ?: editing?.authType ?: ServerUrl.defaultAuthType(url),
         )
     }
     var secret by remember { mutableStateOf("") }
     var secretVisible by remember { mutableStateOf(false) }
-    var projectPath by remember { mutableStateOf(editing?.projectPath ?: "") }
+    var projectPath by remember { mutableStateOf(initialDraft?.projectPath ?: editing?.projectPath ?: "") }
     // The project path is what enables remote start/stop, so it is presented as
     // a feature toggle rather than yet another text box the user must decode.
     var manageEnabled by remember {
-        mutableStateOf(!editing?.projectPath.isNullOrBlank())
+        mutableStateOf(initialDraft?.manageEnabled ?: !editing?.projectPath.isNullOrBlank())
     }
+
+    fun retainDraft() {
+        onDraftChanged(ProfilesViewModel.FormDraft(alias, url, auth, authTouched, projectPath, manageEnabled, dirty))
+    }
+    LaunchedEffect(alias, url, auth, authTouched, projectPath, manageEnabled, dirty) { retainDraft() }
 
     // Until the user picks an auth type by hand, keep it in sync with the URL
     // they're typing (add-mode only).
@@ -135,27 +162,74 @@ fun AddEditScreen(
 
     val context = LocalContext.current
     fun applyConnect(connect: DeepLink.Connect) {
+        onFormChanged()
         url = connect.url
-        if (alias.isBlank()) alias = connect.alias ?: ServerUrl.displayLabel(connect.url)
-        // Let the auth picker re-derive from the newly supplied URL.
-        authTouched = false
+        if (editing == null) alias = connect.alias ?: ServerUrl.displayLabel(connect.url)
+        else if (alias.isBlank()) alias = connect.alias ?: ServerUrl.displayLabel(connect.url)
+        secret = ""
+        // An explicit saved auth choice survives URL import while editing.
+        if (editing == null && !authTouched) auth = ServerUrl.defaultAuthType(url)
+        retainDraft()
     }
+    fun offerConnect(connect: DeepLink.Connect, revision: Long? = null) {
+        if (revision == null && onConnectOffered != null) {
+            onConnectOffered(connect)
+            return
+        }
+        onFormChanged()
+        if (ProfileForm.mayAutofill(editing = editing != null, dirty = dirty)) {
+            if (revision != null) onPrefillAccepted(revision) else applyConnect(connect)
+        } else { pendingConnect = connect; pendingRevision = revision }
+    }
+    LaunchedEffect(pendingPrefill?.revision) {
+        val incoming = pendingPrefill
+        if (incoming != null && incoming.revision != seenPrefill) {
+            seenPrefill = incoming.revision
+            incoming.url?.let { offerConnect(DeepLink.Connect(it, incoming.alias), incoming.revision) }
+        } else if (incoming == null && pendingRevision != null) {
+            pendingConnect = null
+            pendingRevision = null
+        }
+    }
+    val offeredConnect = pendingConnect
+    val offeredRevision = pendingRevision
+    fun clearOffer() {
+        if (pendingConnect == offeredConnect && pendingRevision == offeredRevision) {
+            pendingConnect = null
+            pendingRevision = null
+        }
+    }
+    fun keepForm() {
+        offeredRevision?.let(onPrefillDismissed)
+        clearOffer()
+    }
+    if (offeredConnect != null) AlertDialog(
+        onDismissRequest = { keepForm() },
+        title = { Text(stringResource(R.string.prefill_confirm_title)) },
+        text = { Text(stringResource(R.string.prefill_confirm_message)) },
+        confirmButton = { TextButton(onClick = {
+            if (offeredRevision != null) onPrefillAccepted(offeredRevision)
+            else applyConnect(offeredConnect)
+            clearOffer()
+        }) { Text(stringResource(R.string.prefill_use_link)) } },
+        dismissButton = { TextButton(onClick = { keepForm() }) { Text(stringResource(R.string.prefill_keep_form)) } },
+    )
     val scanQr = rememberQrScanner { payload ->
         val connect = DeepLink.parse(payload)
         if (connect != null) {
-            applyConnect(connect)
+            offerConnect(connect)
         } else {
             Toast.makeText(
-                context, context.getString(R.string.toast_bad_qr), Toast.LENGTH_LONG,
+                context, context.getString(R.string.toast_invalid_connection), Toast.LENGTH_LONG,
             ).show()
         }
     }
     fun pasteLink() {
         val connect = DeepLink.parse(clipboardText(context))
         if (connect != null) {
-            applyConnect(connect)
+            offerConnect(connect)
         } else {
-            Toast.makeText(context, context.getString(R.string.toast_no_link), Toast.LENGTH_LONG).show()
+            Toast.makeText(context, context.getString(R.string.toast_invalid_connection), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -196,7 +270,7 @@ fun AddEditScreen(
                 FormSection(stringResource(R.string.section_identity)) {
                     TofuField(
                         value = alias,
-                        onValueChange = { alias = it },
+                        onValueChange = { changed(); alias = it; retainDraft() },
                         label = stringResource(R.string.field_name),
                         placeholder = stringResource(R.string.field_name_placeholder),
                         error = validation.errors["alias"],
@@ -205,7 +279,7 @@ fun AddEditScreen(
                     )
                     TofuField(
                         value = url,
-                        onValueChange = { url = it },
+                        onValueChange = { changed(); url = it; retainDraft() },
                         label = stringResource(R.string.field_url),
                         placeholder = stringResource(R.string.field_url_placeholder),
                         error = validation.errors["baseUrl"],
@@ -241,11 +315,11 @@ fun AddEditScreen(
                 }
 
                 FormSection(stringResource(R.string.section_access)) {
-                    AuthTypePicker(auth) { authTouched = true; auth = it }
+                    AuthTypePicker(auth) { changed(); authTouched = true; auth = it; retainDraft() }
                     AnimatedVisibility(auth == AuthType.CODE_SERVER_PASSWORD) {
                         TofuField(
                             value = secret,
-                            onValueChange = { secret = it },
+                            onValueChange = { changed(); secret = it; retainDraft() },
                             label = stringResource(
                                 when {
                                     secretAlreadyStored -> R.string.field_password_keep
@@ -298,14 +372,16 @@ fun AddEditScreen(
                         subtitle = stringResource(R.string.toggle_manage_subtitle),
                         checked = manageEnabled,
                         onCheckedChange = {
+                            changed()
                             manageEnabled = it
                             if (!it) projectPath = ""
+                            retainDraft()
                         },
                     )
                     AnimatedVisibility(manageEnabled) {
                         TofuField(
                             value = projectPath,
-                            onValueChange = { projectPath = it },
+                            onValueChange = { changed(); projectPath = it; retainDraft() },
                             label = stringResource(R.string.field_project_path),
                             placeholder = stringResource(R.string.field_project_path_placeholder),
                             helper = stringResource(R.string.field_project_path_helper),
@@ -474,19 +550,42 @@ private fun ConnectionTest(url: String, auth: AuthType, hasSecret: Boolean, diag
     val probe = remember { HealthProbe(diagnostics = diagnostics) }
     var testing by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<HealthProbe.Outcome?>(null) }
-    LaunchedEffect(url) { outcome = null }
+    var probeJob by remember { mutableStateOf<Job?>(null) }
+    var probeGeneration by remember { mutableStateOf(0L) }
+    DisposableEffect(probe) {
+        onDispose {
+            probeGeneration++
+            val ownedJob = probeJob
+            ownedJob?.cancel()
+            if (ownedJob == null) probe.close()
+            else ownedJob.invokeOnCompletion { probe.close() }
+        }
+    }
+    LaunchedEffect(url) {
+        probeGeneration++
+        probeJob?.cancel()
+        testing = false
+        outcome = null
+    }
     Column {
         TextButton(
-            enabled = !testing && ServerUrl.parse(url) != null,
-            onClick = {
-                scope.launch {
-                    testing = true
-                    outcome = try {
-                        withContext(Dispatchers.IO) { probe.probe(url.trim()) }
+            enabled = !testing && UpdateProbe.acceptsRemoteUrl(url),
+            onClick = probeClick@{
+                val requestedUrl = url.trim()
+                // This is a remote URL form, not the local adapter's authorized
+                // health check. Refuse both cookie hosts before invoking a probe.
+                if (!UpdateProbe.acceptsRemoteUrl(requestedUrl)) return@probeClick
+                val generation = ++probeGeneration
+                testing = true
+                probeJob = scope.launch(start = CoroutineStart.LAZY) {
+                    try {
+                        val result = probe.probeCancellable(requestedUrl)
+                        currentCoroutineContext().ensureActive()
+                        if (generation == probeGeneration) outcome = result
                     } finally {
-                        testing = false
+                        if (generation == probeGeneration) testing = false
                     }
-                }
+                }.also { it.start() }
             },
         ) {
             Text(

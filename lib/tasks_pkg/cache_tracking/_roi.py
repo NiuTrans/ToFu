@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from lib.cost import normalize_usage, split_input_tokens
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.tasks_pkg.cache_tracking._policy import MIN_CACHEABLE_PROMPT_TOKENS
 from lib.tasks_pkg.cache_tracking._state import (
     CacheState,
@@ -224,7 +224,7 @@ def _emit_l2_roi(conv_id: str, roi: dict, *, user_id: int,
         _net = (_dropped - int(cache_write_rebilled)) if _observed else None
         details = dict(
             user_id=user_id,
-            conv_id=conv_id[:12],
+            conv_id=conv_id,
             outcome='paired' if _observed else 'no_following_round',
             tokens_dropped=_dropped,
             tokens_before=int(roi.get('tokens_before', 0)),
@@ -250,7 +250,7 @@ def _emit_l2_roi(conv_id: str, roi: dict, *, user_id: int,
         logger.info(
             '[CacheTrack] conv=%s L2 ROI (%s): dropped=%d tokens, '
             're-billed=%s + busted read=%d → net=%s%s',
-            conv_id[:8], 'paired' if _observed else 'no_following_round',
+            conv_id, 'paired' if _observed else 'no_following_round',
             _dropped,
             (str(int(cache_write_rebilled)) if _observed else 'UNOBSERVED'),
             _read_lost, (str(_net) if _net is not None else 'n/a'),
@@ -389,8 +389,8 @@ def log_round_cache_stats(
     logger.info(
         '[CacheStats] %s conv=%s R%d model=%s '
         'input=%d cache_w=%d cache_r=%d hit=%d%% key=%s retries=%d trace=%s%s',
-        tid[:8] if tid else '???',
-        conv_id[:8] if conv_id else '???',
+        task_log_tag(tid) if tid else '???',
+        conv_id if conv_id else '???',
         round_num + 1, model,
         total_input, cache_write, cache_read, hit_pct, _key, _retries,
         _trace or '-', _cold,

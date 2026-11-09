@@ -29,7 +29,8 @@ isolation, queue activation and commit-fault replay. Operations and growth
 measurement live in `docs/STORAGE_OPERATIONS.md`.
 
 `turn/recovery_index.rs` keeps live direct edits and recovery byte evidence
-atomic. Legacy steer repair requires the latest retained event, exact revision
+atomic (the per-Turn `frameWitness` that full Turn reads verify is a different
+check, owned by `turn/execution_frame/`). Legacy steer repair requires the latest retained event, exact revision
 gap and canonical pending suffix; verify `turn_recovery_bytes_tests.rs` and
 the steer commit-fault campaign. Unexplained mismatches remain integrity errors.
 
@@ -81,7 +82,7 @@ embedded_checkpoint.rs binds the existing EmbeddedRuntime close guard.
 daemon_checkpoint.rs binds the same authority to authenticated storage.v2
 control frames and existing joined listener workers; its runtime UUID fences
 stale capability IDs. No automatic retry or ordinary semantic dispatch is added.
-Normal daemons already own the shared WAL barrier via Engine::start_wal_flusher.
+Daemons of both tiers attach their daemon-owned buffered WAL barrier (`daemon.rs`).
 Verify Strict/Normal shared-WAL waits outside writer, failed/current replay,
 source ACK, owner/close/reopen and close joining before driver retirement. The
 opt-in lifecycle guard creates no worker/authority; closed/disarmed calls refuse.
@@ -124,6 +125,11 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   WAL barrier worker. The actual authority VFS must opt in; encryption stays on
   the original append path. `wal_buffer_tests.rs` covers failed write/sync,
   gaps, real close/drain and source reads. Contract: `contracts/storage_v2.json`.
+  Both durability tiers queue frames; responses wait in
+  `WalBarrier::wait_acknowledged` (Strict: synced, Normal: written by the
+  `tofu-db-wal-writer` thread), durable dependents in `wait_witness`. No
+  authority holder may perform a physical WAL write; verify
+  `server_liveness_tests.rs` and `tests/tofudb/test_wal_stall_liveness.py`.
 
 - Rejected current-WAL payload-prefix caching and its source/recovery boundaries:
   `docs/TOFUDB_PUBLICATION_LATENCY.md#rejected-current-wal-carried-payload-prefix-witnesses`.
@@ -268,11 +274,18 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `src/history_payload.rs` owns immutable history offset indexes and bounded-level
   routing pages; publication belongs to Engine/CONTROL. Point reads verify content
   hashes; backup/GC retain all metadata and pruning relocates old-reader payloads.
-  Retirement uses authenticated SegmentIndex locations to reuse unaffected
-  routing pages; verify `history_payload::tests::pruning_*` and compaction faults.
+  Automatic retirement writes no routing page: `Catalog` lookups answer only
+  sources the manifest retains and `RoutingRoot::append` merges drop retired
+  locations (hash-ordered pages interleave every source, so removing them
+  eagerly rewrote the whole table). Verify `engine::tests::history_retirement`,
+  the `history_payload::tests` merge/lookup specifications and compaction faults.
   Authority prunes only outside the entity root's durable replay boundary;
   the first deferred write publishes that cursor atomically with its delta.
-  Protocol and downgrade boundaries live in `docs/STORAGE_TOFUDB.md`.
+  Protocol and downgrade boundaries live in `docs/STORAGE_TOFUDB.md`; the
+  downgrade converter (`rewrite-history-routing`, `Engine::rewrite_history_routing`)
+  and its rollback procedure in `docs/STORAGE_OPERATIONS.md`. A change to the
+  routing-root encoding must keep a version-1 rewrite path and rerun the
+  rollback rehearsal against the previous certified binary.
 - `src/engine_history_compaction.rs` reserves the physical publication lane,
   promotes retired history into payload segments off the authority mutex, and
   publishes CONTROL and prepares payload routes off that mutex, then reconciles
@@ -381,22 +394,28 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   Only a stop or `WouldBlock` from that lane abandons an epoch; other lane
   errors are recorded in `segment_lane_failures`/`segment_lane_error`.
   Every collector hold that waits for the authority (loose victims, copies,
-  orphan segment removals, consolidation and rewrite publishes) goes
-  through `SingleFileHolds::attempt`: a contended or refused hold is
-  retried with the run's backoff, never ends a pass or fails an epoch, and
-  a built segment is discarded only when `WouldBlock` or a stop proves no
-  publish happened. Epoch errors other than a stop are kept in
-  `failed_epochs`/`epoch_error`. Online loose victims are admitted by count
-  only. Verify `tests_reclaim_throughput`.
+  orphan segment removals, compaction, consolidation and rewrite publishes)
+  goes through `SingleFileHolds::attempt`: a contended hold waits for the
+  mutex and a refused one is retried with the run's backoff; neither ends a
+  pass or fails an epoch, and a built segment is discarded only when
+  `WouldBlock` or a stop proves no publish happened. Epoch errors other than a stop are kept in
+  `failed_epochs`/`epoch_error`. Online loose victims are unlinked during the
+  scan once their shard is listed, with no count; a scan lane's error closes
+  only that lane and the epoch then ends, before any catalog publication,
+  with the scan's first error. Verify `tests_reclaim_throughput`.
   Loose block files vanish only under the authority mutex, one per hold:
   each garbage victim and each loose copy of a catalogued block (a compacted
   segment's copies and the redundant copies a scan finds) is validated
-  and unlinked under its own short `try_lock` hold; shard barriers and a
-  pause at least as long as the previous hold run off the mutex (the 50%
-  duty rule, no constant), a contended or refused attempt retries after at
-  least as long as the run has already been retrying (geometric backoff, no
-  constant) and never blocks in `lock()`, and a stop ends the run. Verify
-  `tests_short_holds`.
+  and unlinked under its own short hold; shard barriers and a pause at least
+  as long as the previous hold run off the mutex (the 50% duty rule, no
+  constant), the hold then waits in `lock()` (never sampled with `try_lock`:
+  a mostly-held mutex made the doubling backoff's expected wait diverge), a
+  refused attempt retries after at least as long as the run has already been
+  refused (geometric backoff, no constant), and a stop ends the run, also
+  one raised while a hold waits: the attempt re-checks it under the mutex and
+  `stop_and_join` unparks a paused run. Only the epoch's capture stays a
+  `try_lock` that defers the epoch. Verify `tests_short_holds`
+  (`deletion_holds_wait_for_an_authority_held_at_every_attempt_instead_of_backing_off`).
   Every loose-victim hold first makes both CONTROL slots name the current
   physical roots (`ControlFile::slots_name_only_physical_roots`, rule S8),
   and a copy's hold re-checks that both slots name the installed catalog,
@@ -431,7 +450,10 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   table and reuse a current one; the maintenance worker's overlay poll starts
   each later derivation, the authority's and the open search index's, on its
   own thread (`advance_catalog_locations`; installs hold the owning mutex,
-  derivations never do). Cold reads, writer dedupe probes and GC membership probes
+  derivations never do). A derivation writes into the table the published
+  one replaced (`retired_catalog_locations`) once no reader holds it, so two
+  allocations alternate instead of one fresh table per publication; a held
+  spare is left to its reader. Cold reads, writer dedupe probes and GC membership probes
   resolve through `resolve_in_published_catalog` before their exact paths.
   Each install recomputes in its catalog swap which table segments the new
   catalog still names (`live_segments`): a stale table locates blocks only
@@ -442,6 +464,7 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   `stale_location_tables_locate_kept_segments_and_never_prove_absence`,
   `dedupe_and_membership_probes_resolve_through_the_published_table`,
   `derived_catalog_locations_equal_a_fresh_build_of_each_publication`,
+  `derivations_write_into_the_retired_table_once_no_reader_holds_it`,
   `a_current_location_table_sends_uncatalogued_blocks_to_their_loose_copy`,
   `traversal_readers_share_the_current_published_location_table`,
   `the_first_catalog_location_table_is_built_once`,
@@ -562,8 +585,26 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
 - `src/turn/text_tail.rs` owns revision-fenced live text pages under the existing
   projection head. Contract: `docs/STORAGE_TURN_TEXT.md`; bounds come from the
   native IR generator. Preserve exact replay, owner/CAS fences, snapshot readers
-  and atomic head retirement. Verify its tests and the application storage parity
+  and atomic head retirement. `close_into_chain` turns an open tail into one
+  chain patch per revision before a structural patch; chain positions must stay
+  equal to projection revisions (older readers and the per-revision diagnostic
+  depend on it). Verify its tests and the application storage parity
   suite; ordinary correctness does not establish conversation-capacity SLOs.
+- `src/turn/projection_residency.rs` owns committed live-head projections kept
+  between event commits. Entries are published only by `AuthorityDatabase::commit`
+  from the transaction's pending changes and validated by the complete stored
+  Turn header; every Turn document write goes through
+  `metadata_summary::put_document`, which forgets the key, and an IR step that is
+  not an event clears pending publications. A new Turn writer that bypasses
+  `put_document` must forget the key itself. Verify `turn::reuse_specs`,
+  `turn::residency_tests`, the adjacent-event tests and the opt-in
+  `turn::event_load_tests` harness (decision: `docs/TOFUDB_JSON_MATERIALIZATION.md#committed-live-head-residency`).
+- `src/turn/projection_page.rs` owns `turn.projection.page`: frame-bounded pages
+  of one public Turn, planned with the accounting of
+  `lib/storage/turn_projection_pages.py`. Contract and rollout:
+  `docs/STORAGE.md#paged-turn-storage`. Verify its tests,
+  `tests/storage/test_turn_projection_pages.py` on all three authorities and
+  the `turn projection page` differential script.
 - `src/turn/sync_attempt_reference.rs` owns compact canonical Attempt-event
   references in the replay journal. Contract: `docs/STORAGE_EVENT_REPLAY.md`.
   Preserve complete live replay, same-owner source/version checks and atomic
@@ -757,7 +798,10 @@ application integration tests.
 
 On the dolphinfs FUSE checkout an in-tree `cargo build` can fail repeatedly
 with `Device or resource busy` while renaming `target/release/deps` files.
-Build with `CARGO_TARGET_DIR` on local disk, certify the binary with
+Build with `CARGO_TARGET_DIR` on local disk and the flags `native_engine.py`
+uses (`cargo build --release --locked`, plus `--features embedded-mimalloc` on
+Linux; without it certification refuses the embedded library allocator),
+certify the binary with
 `python3 -m serverctl_pkg.native_engine --project <checkout> --prepare-only
 <new-dir> --candidate <binary>`, and point native test lanes at the certified
 copy with `TOFU_TEST_TOFUDB_BIN`.
@@ -807,7 +851,8 @@ Keep the asset layout (exactly one engine binary per archive) and the
 - `src/turn/model_context.rs` owns main-lane context proof reads; keep it in parity
   with `contracts/model_context_v1.schema.json` and `tests/model_routing/test_model_context_read.py`.
   Owned normalization, exact byte accounting and selected-response evidence follow
-  `docs/TOFUDB_CONTEXT_READ.md`; verify parser fallback and multi-page parity.
+  `docs/TOFUDB_CONTEXT_READ.md`; verify parser fallback, multi-page parity and
+  paged-Turn heads (`projection_page::paged_head`).
 
 WAL worker scheduling and nested page-read probes: `docs/TOFUDB_WAL_BARRIER_SCHEDULING.md`.
 

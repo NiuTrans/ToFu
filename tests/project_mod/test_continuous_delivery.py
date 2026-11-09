@@ -2,6 +2,7 @@
 from pathlib import Path
 import threading
 import json
+import time
 
 import jsonschema
 import pytest
@@ -103,6 +104,111 @@ def test_restart_and_unrelated_edits_do_not_repeat_conflict_merge(repo, monkeypa
     assert receipt(root)['retry'] is None
     assert (root / 'new.txt').read_text() == 'publish together\n'
     assert (root / 'unrelated.txt').read_text() == 'other task\n'
+
+
+def count_claims_leases(monkeypatch):
+    counted = []
+    original = task_delta_delivery.workspace_claims_lease
+
+    def counting(claims, **kwargs):
+        counted.append(len(claims))
+        return original(claims, **kwargs)
+    monkeypatch.setattr(task_delta_delivery, 'workspace_claims_lease', counting)
+    return counted
+
+
+def settle_timestamps():
+    """Move past the filesystem timestamp resolution of the files just written."""
+    time.sleep(task_delta_delivery._TIMESTAMP_RESOLUTION_SECONDS + 1.1)
+
+
+def test_held_conflict_is_rechecked_when_an_input_changes_not_on_every_pass(repo, monkeypatch):
+    """2026-11-08: every pass rechecked each held conflict under its whole-delta
+    claims lease (26% of the execution host's GIL with ~1,100-path deltas)."""
+    root, _work = setup_conflict(repo, monkeypatch)
+    monkeypatch.setattr(task_delta_delivery, '_UNCHANGED_HOLDS', {})
+    held = automatic_settle(repo)
+    assert held['state'] == 'blocked' and held['retry']['condition'] == 'conflict_inputs_changed'
+    leases, merges = count_claims_leases(monkeypatch), spy_merges(monkeypatch)
+    settle_timestamps()
+    task_delta_delivery._UNCHANGED_HOLDS.clear()  # A fresh process remembers nothing.
+    for _ in range(3):
+        assert not delivery.resume_pending_workspace_deliveries()
+    # Only the first pass rechecked, under the lease; it remembered its inputs.
+    assert len(leases) == 1 and merges == [] and receipt(root) == held
+    (root / 'unrelated.txt').write_text('another session\n')
+    assert not delivery.resume_pending_workspace_deliveries()
+    assert len(leases) == 1, 'a file outside the delta is not an input'
+    # HEAD moving is an input: one recheck, and the unchanged hold is remembered again.
+    git(root, 'add', 'unrelated.txt')
+    git(root, 'commit', '-m', 'unrelated commit')
+    for _ in range(2):
+        assert not delivery.resume_pending_workspace_deliveries()
+    assert len(leases) == 2 and receipt(root)['reason'] == held['reason']
+    # Rewriting a delta path is an input even when its bytes stay the same.
+    (root / 'base.txt').write_text('canonical version\n')
+    assert not delivery.resume_pending_workspace_deliveries()
+    assert len(leases) == 3
+    # A change that lifts the conflict publishes the whole delta at once.
+    (root / 'base.txt').write_text('base\n')
+    assert delivery.resume_pending_workspace_deliveries()
+    assert receipt(root)['state'] == 'delivered' and len(merges) == 1
+    assert (root / 'new.txt').read_text() == 'publish together\n'
+    assert task_delta_delivery._UNCHANGED_HOLDS == {}
+
+
+def canonical_captures(monkeypatch, root):
+    """Record every whole-checkout staging of the canonical tree."""
+    calls = []
+    original = ic._git
+
+    def spy(checkout, args, **kwargs):
+        if Path(checkout) == root and list(args) == ['add', '-A', '--', '.']:
+            calls.append(tuple(args))
+        return original(checkout, args, **kwargs)
+
+    monkeypatch.setattr(ic, '_git', spy)
+    return calls
+
+
+def test_boot_pass_rechecks_settled_conflicts_without_recapturing_the_canonical_tree(
+        repo, monkeypatch):
+    """2026-11-06: each pass re-captured the whole checkout once per settled conflict."""
+    root, _, owner = repo
+    tasks = ('one', 'two', 'three')
+    for task in tasks:
+        (root / f'{task}.txt').write_text('base\n')
+    git(root, 'add', '.')
+    git(root, 'commit', '-m', 'one file per task')
+    for task in tasks:
+        work = automatic_workspace(repo, monkeypatch, task)
+        (work / f'{task}.txt').write_text(f'task {task}\n')
+    for task in tasks:
+        (root / f'{task}.txt').write_text(f'canonical {task}\n')
+    for task in tasks:
+        delivery.settle_task_workspace(str(root), task, user_id=owner, outcome='completed')
+
+    def receipts():
+        return {task: state.get_workspace(str(root), task, user_id=owner)['origin']['delivery']
+                for task in tasks}
+
+    settled = receipts()
+    assert {task: value['state'] for task, value in settled.items()} == dict.fromkeys(tasks, 'blocked')
+    captures, merges = canonical_captures(monkeypatch, root), spy_merges(monkeypatch)
+    delivery._RECOVERY_CURSOR = 0  # A fresh process: its boot pass revisits every conflict.
+    assert not delivery.resume_pending_workspace_deliveries(retained=True)
+    (root / 'unrelated.txt').write_text('another session\n')
+    assert not delivery.resume_pending_workspace_deliveries()
+    assert captures == [], 'unchanged conflict inputs re-captured the whole canonical tree'
+    assert merges == [] and receipts() == settled
+    # Changed inputs invalidate exactly their own settled conflict.
+    (root / 'two.txt').write_text('base\n')
+    assert delivery.resume_pending_workspace_deliveries()
+    assert len(merges) == 1
+    latest = receipts()
+    assert latest['two']['state'] == 'delivered'
+    assert (root / 'two.txt').read_text() == 'task two\n'
+    assert (latest['one'], latest['three']) == (settled['one'], settled['three'])
 
 
 def test_landed_checkpoint_is_no_change_even_after_overlapping_target_edits(repo, monkeypatch):
@@ -223,6 +329,30 @@ def test_release_hint_only_wakes_existing_authorized_worker(monkeypatch, armed, 
     before = ic._worker_generation()
     assert ic.notify_workspace_write_released() is expected
     assert ic._worker_generation() == before + int(expected)
+
+
+def test_a_delivery_lanes_release_does_not_wake_the_worker_that_queued_it(monkeypatch):
+    """A lane releasing the lease of an unchanged recheck must not start another
+    pass that requeues the same rows; its receipt commits wake the worker."""
+    monkeypatch.setattr(ic, '_WORKER', AliveWorker())
+    monkeypatch.setattr(ic, '_WORKER_AUTHORITY_ARMED', True)
+    monkeypatch.setattr(ic, '_WORKER_STOP_REQUESTED', False)
+    before = ic._worker_generation()
+    woke = []
+    lane = delivery._ProjectLane()
+    lane.pending[1] = {'id': 1}
+
+    def resume(row):
+        woke.append(ic.notify_workspace_write_released())
+    monkeypatch.setattr(delivery, '_resume_row', resume)
+    thread = threading.Thread(target=delivery._drain_project_lane, args=('/project', lane))
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert woke == [False] and ic._worker_generation() == before
+    # Any other releasing thread still wakes it.
+    assert ic.notify_workspace_write_released() is True
+    assert ic._worker_generation() == before + 1
 
 
 def test_release_wake_runs_after_exclusion_and_registry_release(tmp_path, monkeypatch):

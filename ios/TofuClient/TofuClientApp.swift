@@ -36,6 +36,7 @@ struct TofuClientApp: App {
         WindowGroup {
             RootView(model: model)
                 .task { await model.reload() }
+                .onOpenURL { model.receiveConnection($0.absoluteString) }
         }
     }
 }

@@ -118,7 +118,8 @@ def end(r, row, status='completed', delivered=True):
         # A Worker checkout is registered under its assignment's work id.
         work_id = row['execution']['taskId']
         r.workspaces[work_id] = {'task_id': work_id, 'user_id': 7, 'project_root': '/project',
-            'origin': {admission.KEY: r.c.repo.admission(row['id']), 'delivery': {'state': 'delivered'}}}
+            'origin': {admission.KEY: r.c.repo.admission(row['id']),
+                       'delivery': {'state': 'delivered', 'taskOutcome': 'completed'}}}
 
 
 def activate(r):
@@ -174,7 +175,7 @@ def test_continuation_can_delegate_and_review_without_becoming_human(run):
     second = delegate(r, 'second')
     assert second['request']['delegation'] == first['request']['delegation']
     review = r.call('review_project_work', assignment_id=first['id'], result_revision=1, decision='accept', note='Verified')
-    assert review['review']['actor'] == 'coordinator', review
+    assert review['decision'] == 'accept', review
     page = r.call('get_project_workers', limit=1)
     assert len(page['workers']) == 1 and page['next_cursor'] == first['id']
     assert r.call('get_project_workers', after_id=page['next_cursor'])['workers'][0]['assignment_id'] == second['id']
@@ -245,7 +246,7 @@ def test_finish_requires_exact_review_delivery_and_published_report(run):
     r = run; first = ready(r); activate(r); args = report(r)
     assert 'Unfinished/unreviewed' in r.call('finish_project_request', **args)['error']
     reviewed = r.call('review_project_work', assignment_id=first['id'], result_revision=1, decision='accept', note='Verified')
-    assert reviewed['review']['decision'] == 'accept'
+    assert reviewed['decision'] == 'accept'
     task = first['execution']['taskId']
     r.workspaces[task]['origin']['delivery']['state'] = 'blocked'
     assert 'delivery' in r.call('finish_project_request', **args)['error']
@@ -404,6 +405,88 @@ def test_shutdown_interrupted_settlement_leaves_successors_to_startup_recovery(
     assert calls == ([] if abort_reason else ['queue_depth', 'background', 'dispatch_recovery'])
 
 
+def _restart_pause(r, turn_id, attempt_id):
+    """What restart settlement leaves: the exact Attempt and its Turn interrupted by the restart."""
+    r.attempts[attempt_id]['status'] = 'interrupted'
+    r.turns[turn_id].update(status='interrupted', currentAttemptId=attempt_id, projectionRevision=4,
+        settlement={'cause': 'server_restart', 'resumeOptions': [{'operation': 'continue', 'anchor': {}}]})
+
+
+def test_a_restart_paused_coordinator_wake_continues_in_place_instead_of_a_new_wake(run, monkeypatch):
+    """A restart interrupted the Coordinator's continuation Turn: it resumes from its
+    checkpoint in the same Turn under the same grant, like a restart-paused Worker,
+    instead of a fresh 'Continue the original project request' Turn that re-reads every
+    Worker (2026-11-08 16:55: both Coordinators got a new wake)."""
+    r = run
+    ready(r)
+    [row] = controls(r)
+    turn_id, attempt_id = row['execution']['turnId'], row['execution']['attemptId']
+    _restart_pause(r, turn_id, attempt_id)
+    resumed = []
+
+    def resume_turn(conversation, turn, owner, body, **kwargs):
+        successor = 'continued-' + attempt_id
+        r.attempts[successor] = {'attemptId': successor, 'conversationId': conversation, 'turnId': turn,
+                                 'taskId': r.attempts[attempt_id]['taskId'], 'status': 'running',
+                                 'createdAt': 1_003_000}
+        r.turns[turn].update(status='running', currentAttemptId=successor)
+        kwargs['trusted_dispatch'].continue_execution(turn, successor)
+        resumed.append((conversation, turn, owner, deepcopy(body)))
+        return SimpleNamespace(value={})
+    monkeypatch.setattr(r.service.commands, 'resume_turn', resume_turn, raising=False)
+    assert r.wake() == ['accepted']
+    assert len(controls(r)) == 1, 'no second wake Turn'
+    [(conversation, turn, owner, body)] = resumed
+    assert (conversation, turn, owner) == ('coordinator', turn_id, 7)
+    assert body['operation'] == 'continue' and body['expectedProjectionRevision'] == 4
+    assert body['commandId'] == f'project-dispatch-resume:{row["id"]}:{attempt_id}'
+    assert controls(r)[0]['execution']['attemptId'] == 'continued-' + attempt_id
+    # The continued Attempt owns follow-through; a repeated pass starts nothing.
+    assert r.wake() == [] and len(resumed) == 1
+
+
+def test_a_restart_paused_human_request_continues_in_place_instead_of_a_new_wake(run, monkeypatch):
+    """The Coordinator's own human request Turn was interrupted before any wake: it
+    continues in place through the ordinary resume command (the one the restart resume
+    pass uses, so whichever runs first wins and the other replays). No wake is minted
+    while that continued Attempt runs; once it settles, Worker results wake the request."""
+    from lib.conversations import restart_resume
+    r = run
+    worker = delegate(r)
+    end(r, worker)
+    _restart_pause(r, 'coordinator-turn', 'coordinator-attempt')
+    resumed = []
+
+    def resume_conversation(owner, conversation_id):
+        resumed.append((owner, conversation_id))
+        r.attempts['resumed-attempt'] = {**r.attempts['coordinator-attempt'], 'attemptId': 'resumed-attempt',
+                                         'status': 'running', 'createdAt': 1_003_000}
+        r.turns['coordinator-turn'].update(status='running', currentAttemptId='resumed-attempt')
+        return {'outcome': 'resumed'}
+    monkeypatch.setattr(restart_resume, 'resume_conversation', resume_conversation)
+    assert r.wake() == ['resumed'] and controls(r) == []
+    assert resumed == [(7, 'coordinator')]
+    # The continued Attempt owns follow-through: no wake, no second resume.
+    assert r.wake() == [] and controls(r) == [] and len(resumed) == 1
+    r.attempts['resumed-attempt']['status'] = 'completed'
+    r.turns['coordinator-turn'].update(status='completed')
+    assert r.wake() == ['accepted'] and len(controls(r)) == 1
+    assert len(resumed) == 1
+
+
+def test_a_request_turn_the_owner_continued_owns_follow_through_until_it_settles(run):
+    """Any in-place continuation of the request Turn (here the owner's Continue)
+    keeps the Turn's current Attempt in charge: no wake races it."""
+    r = run
+    worker = delegate(r)
+    end(r, worker)
+    r.attempts['coordinator-attempt']['status'] = 'interrupted'
+    r.attempts['continued-by-owner'] = {**r.attempts['coordinator-attempt'], 'attemptId': 'continued-by-owner',
+                                        'status': 'running', 'createdAt': 1_003_000}
+    r.turns['coordinator-turn'].update(status='running', currentAttemptId='continued-by-owner')
+    assert r.wake() == [] and controls(r) == []
+
+
 @pytest.mark.parametrize('source', ['human', 'continuation'])
 def test_superseded_input_does_not_restart_old_request(run, source):
     r = run
@@ -458,6 +541,26 @@ def test_issued_continuation_core_is_direct_with_exact_grant_ceiling(run, narrow
         assert not names(body['tools']) - set(row['request']['profile']['tools'])
         assert body['_programmatic_tool_calling'] == 'off'
     assert r.task['_principalContext']['kind'] == 'system' and not r.task['_attended']
+
+
+def test_continuation_surface_goes_whole_on_the_claude_name_budget_route(run):
+    """A grant's tools fit the Sankuai Claude tool-name budget, so none is hidden and no
+    discovery pair is added (docs/LLM_COST_OPTIMIZATION.md section 6)."""
+    from lib.llm.tool_wire import SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES, tool_name_bytes
+    from lib.tasks_pkg.coordinator_policy import COORDINATOR_DIRECT_TOOLS
+    from tests.router.test_router_tool_name_budget import _wire
+    from tests.tasks_pkg.test_coordinator_tool_surface import assemble
+
+    r = run
+    ready(r)
+    activate(r)
+    tools = assemble(r.task)
+    body, projection = _wire(r.task, tools)
+    names = [tool['function']['name'] for tool in tools]
+    assert [tool['function']['name'] for tool in body['tools']] == names
+    assert tool_name_bytes(body['tools']) <= SANKUAI_ANTHROPIC_TOOL_NAME_BUDGET_BYTES
+    assert not projection.budget_dropped_names
+    assert set(names) <= COORDINATOR_DIRECT_TOOLS
 
 
 def test_continuation_admitted_before_a_tool_flag_retirement_keeps_its_grant(run):

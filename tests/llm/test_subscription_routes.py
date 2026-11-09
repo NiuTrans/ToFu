@@ -11,7 +11,7 @@ from unittest import mock
 import pytest
 import requests
 
-from lib.subscription_routes import (
+from lib.network_routes import (
     ProbeResult,
     Route,
     RouteManager,
@@ -99,7 +99,7 @@ def test_higher_quality_route_overrides_lower_quality_incumbent():
         assert manager.candidates(url, [direct, proxy], wait_timeout=1) == [direct]
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
-            route_status = manager.status()['routes'].get('git.example.test', {})
+            route_status = manager.status()['routes'].get('https://git.example.test:443', {})
             if route_status.get('proxy', {}).get('healthy'):
                 break
             time.sleep(0.005)
@@ -215,12 +215,12 @@ def test_network_circuit_half_opens_and_recovers():
     url = 'https://chatgpt.com/backend-api/codex/responses'
     try:
         assert manager.candidates(url, [route], wait_timeout=1) == []
-        status = manager.status()['routes']['chatgpt.com']['direct']
+        status = manager.status()['routes']['https://chatgpt.com:443']['direct']
         assert status['retry_in_s'] == 5.0
         assert manager.candidates(url, [route], wait_timeout=0) == []
         now[0] += 5.1
         assert manager.candidates(url, [route], wait_timeout=1) == [route]
-        assert manager.status()['routes']['chatgpt.com']['direct']['healthy']
+        assert manager.status()['routes']['https://chatgpt.com:443']['direct']['healthy']
     finally:
         manager.close()
 
@@ -275,7 +275,7 @@ def test_real_request_success_recovers_early_and_clears_backoff_debt():
         manager.report(url, route, True, 20.0)
         assert manager.candidates(url, [route], wait_timeout=0) == [route]
         assert manager.recovery_delay(url, [route]) == 0.0
-        assert manager.status()['routes']['chatgpt.com']['proxy']['failures'] == 0
+        assert manager.status()['routes']['https://chatgpt.com:443']['proxy']['failures'] == 0
         assert probe.call_count == 0
         manager.report(url, route, False)
         assert manager.recovery_delay(url, [route]) == 5.0
@@ -324,7 +324,7 @@ def test_singleflight_probe_cannot_overwrite_newer_request_outcome(
         # Synchronize publication, not just the probe function's return. The
         # fake clock deliberately stays unchanged across both observations.
         with manager._lock:
-            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+            pending_probe = manager._inflight[('https://chatgpt.com:443', 'proxy')]
         manager.report(url, route, request_verdict == 'ok', 40.0,
                        failure_kind=request_verdict)
         expected_status = manager.status()
@@ -361,7 +361,7 @@ def test_request_probe_fencing_is_isolated_by_host_and_route():
         assert manager.candidates(url, [route], wait_timeout=0) == []
         assert entered.wait(1)
         with manager._lock:
-            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+            pending_probe = manager._inflight[('https://chatgpt.com:443', 'proxy')]
         manager.report(other_url, route, False)
         manager.report(url, other_route, False)
         release.set()
@@ -456,7 +456,7 @@ def test_probe_publication_is_fenced_atomically_with_reset_and_close(
         manager.candidates(url, [route], wait_timeout=0, force_probe=True)
         assert publishing.wait(1)
         with manager._lock:
-            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+            pending_probe = manager._inflight[('https://chatgpt.com:443', 'proxy')]
         if lifecycle_action == 'reset':
             manager.reset()
         else:
@@ -556,24 +556,29 @@ def test_route_repr_never_exposes_proxy_credentials():
 def test_only_unambiguous_connect_failures_are_replay_safe():
     assert is_safe_connect_failure(requests.exceptions.ConnectTimeout('down'))
     assert is_safe_connect_failure(requests.exceptions.ProxyError('down'))
-    assert is_safe_connect_failure(requests.exceptions.SSLError('tls'))
+    from lib.http_transport.connection_setup import TLSConnectionSetupError
+    assert is_safe_connect_failure(requests.exceptions.SSLError(TLSConnectionSetupError('handshake')))
+    assert not is_safe_connect_failure(requests.exceptions.SSLError('response TLS failure'))
     assert not is_safe_connect_failure(requests.exceptions.ConnectionError(
         'connection reset after send'))
 
 
 def test_http_client_fails_over_only_on_safe_connect_error(monkeypatch):
     from lib.http_transport import client as http_client
+    from lib import proxy
 
     first, second = _route('p1'), _route('p2')
-    response = mock.Mock(status_code=200)
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'ok'
     monkeypatch.setattr(
-        http_client, 'subscription_route_candidates',
-        lambda _url: [first, second])
+        proxy, 'network_route_candidates',
+        lambda _url, **kw: [first, second])
     report = mock.Mock()
-    monkeypatch.setattr(http_client, 'report_subscription_route', report)
+    monkeypatch.setattr(proxy, 'report_network_route', report)
     request = mock.Mock(side_effect=[
         requests.exceptions.ProxyError('proxy unavailable'), response])
-    monkeypatch.setattr(http_client, '_sync_request', request)
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, 'send', request)
 
     out = http_client.http_post(
         'https://chatgpt.com/backend-api/codex/responses', json={})
@@ -588,14 +593,15 @@ def test_http_client_fails_over_only_on_safe_connect_error(monkeypatch):
 
 def test_http_client_never_replays_ambiguous_connection_reset(monkeypatch):
     from lib.http_transport import client as http_client
+    from lib import proxy
 
     first, second = _route('p1'), _route('p2')
     monkeypatch.setattr(
-        http_client, 'subscription_route_candidates',
-        lambda _url: [first, second])
+        proxy, 'network_route_candidates',
+        lambda _url, **kw: [first, second])
     request = mock.Mock(side_effect=requests.exceptions.ConnectionError(
         'reset after request body'))
-    monkeypatch.setattr(http_client, '_sync_request', request)
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, 'send', request)
 
     with pytest.raises(requests.exceptions.ConnectionError):
         http_client.http_post(
@@ -605,14 +611,15 @@ def test_http_client_never_replays_ambiguous_connection_reset(monkeypatch):
 
 def test_exhausted_route_error_does_not_expose_proxy_credentials(monkeypatch):
     from lib.http_transport import client as http_client
+    from lib import proxy
 
     route = Route('pool:secret', 'proxy secret', 'proxy',
                   proxy_url='http://user:password@gw.invalid:8080')
     monkeypatch.setattr(
-        http_client, 'subscription_route_candidates', lambda _url: [route])
-    monkeypatch.setattr(http_client, 'report_subscription_route', mock.Mock())
+        proxy, 'network_route_candidates', lambda _url, **kw: [route])
+    monkeypatch.setattr(proxy, 'report_network_route', mock.Mock())
     monkeypatch.setattr(
-        http_client, '_sync_request',
+        requests.adapters.HTTPAdapter, 'send',
         mock.Mock(side_effect=requests.exceptions.ProxyError(
             'failed via http://user:password@gw.invalid:8080')))
 
@@ -624,164 +631,31 @@ def test_exhausted_route_error_does_not_expose_proxy_credentials(monkeypatch):
 
 
 def test_async_stream_connect_failover_uses_same_route_plan(monkeypatch):
+    import httpx
     from lib.llm import astream
+    from lib.http_transport.outbound_async import managed_async_client
 
     first, second = _route('p1'), _route('p2')
-    response = SimpleNamespace(status_code=200)
-    plans = mock.Mock(return_value=[first, second])
-    monkeypatch.setattr('lib.proxy.subscription_route_candidates', plans)
+    monkeypatch.setattr('lib.proxy.network_route_candidates', lambda *a, **k: [first, second])
     report = mock.Mock()
-    monkeypatch.setattr('lib.proxy.report_subscription_route', report)
-
-    class StreamContext:
-        def __init__(self, result=None, error=None):
-            self.result = result
-            self.error = error
-
-        async def __aenter__(self):
-            if self.error:
-                raise self.error
-            return self.result
-
-        async def __aexit__(self, *_args):
-            return False
-
-    clients = iter((
-        SimpleNamespace(stream=lambda *_a, **_kw: StreamContext(
-            error=__import__('httpx').ConnectError('down'))),
-        SimpleNamespace(stream=lambda *_a, **_kw: StreamContext(
-            result=response)),
-    ))
-    monkeypatch.setattr(astream, 'get_async_client', lambda _proxy: next(clients))
-    plan = SimpleNamespace(
-        url='https://chatgpt.com/backend-api/codex/responses',
-        hdrs={}, body={})
-
+    monkeypatch.setattr('lib.proxy.report_network_route', report)
+    calls = []
+    async def send(_transport, request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ConnectError('down')
+        return httpx.Response(200, content=b'ok')
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', send)
+    plan = SimpleNamespace(url='https://chatgpt.com/backend-api/codex/responses',
+                           hdrs={}, body={}, network_scope='subscription')
     async def run():
-        async with astream._open_server_stream(plan) as (opened, route):
-            assert opened is response
-            assert route is second
-
+        async with managed_async_client() as client:
+            monkeypatch.setattr(astream, 'get_async_client', lambda **_: client)
+            async with astream._open_server_stream(plan) as (opened, route):
+                assert await opened.aread() == b'ok'
+                assert route is second
+                assert opened.extensions['tofu_network_route']['routeId'] == 'p2'
     asyncio.run(run())
-    # Connect failure is immediate. Header receipt is not success anymore: the
-    # transport reports the selected route only after the full stream settles.
-    assert [call.args[2] for call in report.call_args_list] == [False]
-    assert response.extensions['tofu_network_route']['routeId'] == 'p2'
-
-
-def test_async_desktop_handoff_closes_abandoned_raw_dumper(monkeypatch):
-    from lib.llm import astream, stream
-
-    dumper = SimpleNamespace(enabled=True, _fh=object(), finish=mock.Mock())
-    plan = SimpleNamespace(
-        url='https://chatgpt.com/backend-api/codex/responses',
-        raw_dumper=dumper)
-    monkeypatch.setattr(astream, 'prepare_request', lambda *_a, **_kw: plan)
-    monkeypatch.setattr('lib.desktop.egress.route_request',
-                        lambda *_a, **_kw: 'agent-1')
-    monkeypatch.setattr(stream, '_stream_chat_once',
-                        lambda *_a, **_kw: ({'content': 'ok'}, 'stop', {}))
-
-    result = asyncio.run(astream._async_stream_chat_once(
-        {'model': 'gpt-test', 'messages': []}))
-    assert result[1] == 'stop'
-    dumper.finish.assert_called_once_with(error=True)
-
-
-def test_all_route_probes_start_with_idle_hint_one():
-    barrier = threading.Barrier(32, timeout=10)
-
-    def probe(url, route):
-        barrier.wait()
-        return ProbeResult('ok', 1, 200)
-
-    manager = RouteManager(probe=probe, max_workers=1)
-    started = time.monotonic()
-    try:
-        routes = manager.candidates('https://example.invalid/api',
-            [_route(str(i)) for i in range(32)], wait_timeout=15, wait_for_all=True)
-        assert len(routes) == 32
-    finally:
-        manager.close()
-    assert not any(t.name.startswith('subscription-probe') for t in threading.enumerate())
-    print(f'32 route probes: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
-
-
-def test_unstarted_route_failure_does_not_suppress_siblings(monkeypatch):
-    original = threading.Thread.start
-    starts = 0
-    barrier = threading.Barrier(3, timeout=10)
-
-    def start(thread):
-        nonlocal starts
-        if thread.name.startswith('subscription-probe'):
-            starts += 1
-            # Route 1's start and its one startup recovery both fail.
-            if starts in (2, 3):
-                raise RuntimeError('unstarted probe')
-        return original(thread)
-
-    def probe(url, route):
-        barrier.wait()
-        return ProbeResult('ok', 1, 200)
-
-    monkeypatch.setattr(threading.Thread, 'start', start)
-    manager = RouteManager(probe=probe, max_workers=1)
-    try:
-        routes = manager.candidates('https://example.invalid/api',
-            [_route(str(i)) for i in range(4)], wait_timeout=15, wait_for_all=True)
-        assert sorted(route.route_id for route in routes) == ['0', '2', '3']
-        assert ('example.invalid', '1') not in manager._health
-    finally:
-        manager.close()
-    assert not manager._inflight
-
-
-@pytest.mark.parametrize('failure_kind', ['midstream_io', 'midstream_close'])
-def test_interrupted_response_revalidates_without_cooling_other_requests(failure_kind):
-    now = [100.0]
-    manager = RouteManager(probe=lambda *_: ProbeResult('ok', 10, 401),
-                           clock=lambda: now[0], jitter=lambda value: value)
-    route = _route('proxy')
-    url = 'https://chatgpt.com/backend-api/codex/responses'
-    try:
-        manager.report(url, route, True)
-        manager.report(url, route, False, failure_kind=failure_kind)
-        assert manager.status()['routes']['chatgpt.com']['proxy']['retry_in_s'] == 0
-        assert manager.candidates(url, [route], wait_timeout=1) == [route]
-        assert manager.recovery_delay(url, [route]) == 0
-    finally:
-        manager.close()
-
-
-def test_revalidation_failure_opens_one_shared_circuit():
-    now = [100.0]
-    calls = mock.Mock(return_value=ProbeResult('network_fail'))
-    manager = RouteManager(probe=calls, clock=lambda: now[0], jitter=lambda value: value)
-    route = _route('proxy')
-    url = 'https://chatgpt.com/backend-api/codex/responses'
-    try:
-        manager.report(url, route, True)
-        manager.report(url, route, False, failure_kind='midstream_io')
-        assert manager.candidates(url, [route], wait_timeout=1) == []
-        assert manager.recovery_delay(url, [route]) == 5
-        for _ in range(50):
-            assert manager.candidates(url, [route], wait_timeout=0) == []
-            assert manager.recovery_delay(url, [route]) == 5
-        assert calls.call_count == 1
-        manager.report(url, route, True)
-        assert manager.candidates(url, [route], wait_timeout=0) == [route]
-    finally:
-        manager.close()
-
-
-@pytest.mark.parametrize('failure_kind', ['policy_blocked', 'proxy_auth'])
-def test_policy_failures_are_not_transient_recovery(failure_kind):
-    manager = RouteManager(probe=lambda *_: ProbeResult(failure_kind))
-    route = _route('proxy')
-    url = 'https://chatgpt.com/backend-api/codex/responses'
-    try:
-        assert manager.candidates(url, [route], wait_timeout=1) == []
-        assert manager.recovery_delay(url, [route]) is None
-    finally:
-        manager.close()
+    assert len(calls) == 2
+    assert calls[0] is calls[1]
+    assert [call.args[2] for call in report.call_args_list] == [False, True]

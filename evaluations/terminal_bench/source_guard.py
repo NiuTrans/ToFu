@@ -72,10 +72,6 @@ GUEST_LOG_DIR = "/logs/agent"
 CLAUDE_CODE_HOOK_FILE = "claude-benchmark-guard.sh"
 PI_EXTENSION_FILE = "pi-benchmark-guard.mjs"
 TOFU_SERVER_CONFIG_FILE = "tofu-server-config.json"
-# Product default of ``search.skip_domains`` (lib._DEFAULT_SKIP_DOMAINS); a saved
-# list replaces the default, so the evaluation keeps it and adds the answer hosts.
-TOFU_DEFAULT_SKIP_DOMAINS = ("youtube.com", "youtu.be", "twitter.com", "x.com", "facebook.com",
-                             "instagram.com", "tiktok.com", "linkedin.com", "discord.com")
 _LITERAL = re.compile(r"^[a-z0-9._/:-]+$")
 
 
@@ -194,7 +190,7 @@ def tofu_skip_domains() -> list[str]:
     containing the marker. Answer hosts stay host rules, plus path rules for
     proxies that carry the answer host's URL in their own path.
     """
-    entries = set(TOFU_DEFAULT_SKIP_DOMAINS) | set(ANSWER_HOSTS)
+    entries = set(ANSWER_HOSTS)
     for host in ANSWER_HOSTS:
         entries.update((f"*/**/{host}", f"*/**/*.{host}"))
     # The product matcher lower-cases URLs and entries alike, so the

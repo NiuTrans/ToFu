@@ -22,7 +22,8 @@ interfaces and explicit compatibility adapters. The API constitution is
 | MCP integration | `lib/mcp/`, MCP routes |
 | Desktop bridge | `lib/desktop/`, desktop routes |
 | Feishu bot bridge and its sender authority | `lib/feishu/`, `lib/feishu/authority.py` |
-| External channels (大象, GitHub): ingress, subscriptions, outbox, 大象 bridge, GitHub poller | `lib/channels/`, `routes/api_v1/channels.py` — [`../CHANNELS.md`](../CHANNELS.md); tests `tests/channels/` |
+| External channels (大象, GitHub, 企业微信, QQ, 微信): ingress, subscriptions, outbox, 大象 bridge, GitHub poller, bot platform sessions | `lib/channels/`, `routes/api_v1/channels.py` — [`../CHANNELS.md`](../CHANNELS.md); tests `tests/channels/` |
+| Channel protocol: envelopes, intents and receipts, capability descriptors, typed health, the in-process and stdio bindings | `lib/channels/protocol/` — [`../CHANNEL_PROTOCOL.md`](../CHANNEL_PROTOCOL.md); tests `tests/channels/conformance/` |
 | SDKs | `clients/python/`, `clients/typescript/` |
 
 ## Dependency direction

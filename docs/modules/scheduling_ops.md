@@ -15,16 +15,16 @@ click, so authority, idempotency, and blast-radius controls are contractual.
 | Conversation dispatch | `lib/scheduler/conversation_dispatch.py` |
 | Proactive decisions | `lib/scheduler/proactive.py` |
 | Process runner | `lib/scheduler/process_runner.py` |
-| Daily report | `lib/daily_report/` |
+| Daily report (archived day recap) | `lib/daily_report/` |
+| My Day goals, items, progress, request evidence | `lib/myday/`, [contract](../../contracts/myday_goals_v1.schema.json) |
 | Optimizer analysis/proposals | `lib/optimizer/analyzer/`, `proposer.py` |
 | Optimizer application policy | `lib/optimizer/applier.py`, `actions/` |
 | Durable state | owner-scoped Sidecar scheduler/optimizer operations |
-| HTTP adapters | `routes/api_v1/automations.py`, `scheduler.py`, `daily_report.py`, `optimizer.py` |
-| Browser My Day TODO/stream mutation policy | `frontend/src/features/myday/task-actions.ts` |
-| Browser My Day suggestion launcher | `frontend/src/features/myday/quick-action-launcher.ts` |
+| HTTP adapters | `routes/api_v1/automations.py`, `scheduler.py`, `daily_report.py`, `myday.py`, `optimizer.py` |
+| Browser My Day goal board and day recap | `frontend/src/features/myday/goal-board.ts`, `goal-model.ts` |
 | Browser My Day owner-scoped read cache | `frontend/src/features/myday/report-cache.ts` |
 | Browser My Day digest/reminder lifecycle | `frontend/src/features/myday/background-controller.ts`, composed by `features/background.ts` |
-| Browser My Day panel presentation | `frontend/src/runtime/sections/myday.js` (migration boundary) |
+| Browser My Day shell, date navigation, calendar | `frontend/src/runtime/sections/myday.js` (migration boundary) |
 
 Already-cancelled subprocess jobs return typed cancellation without launch; success requires zero exit code without timeout, cancellation or error. Checking only after launch was rejected because termination cannot undo startup effects; cancellation during launch still joins process-tree cleanup. Scheduled subprocess output is drained in 8 KiB nonblocking reads, retaining at most 50,000 stdout and 10,000 stderr characters before accumulation. Continuous output still observes cancellation and the deadline, without extra reader threads. POSIX timeout/cancellation terminates the process group even after its leader exits, grants at most two seconds for graceful exit, then kills surviving descendants. `tests/scheduler/test_scheduler_process_runner.py` measures parent heap under a 16 MiB dual-stream flood (<2 MiB peak).
 
@@ -187,7 +187,10 @@ during migration; new operation payloads have no owner default. In distributed
 mode structured audit evidence is filtered to the run owner and unowned raw
 application/error logs are excluded. The current file-backed
 `block_search_domain` action is personal-only, so distributed runs stage it for
-review instead of mutating deployment-global configuration.
+review instead of mutating deployment-global configuration. It writes
+`search.fetch_skip_domains`, a fetch-quality skip rather than an operator ban:
+search listings, the browser tools and `run_command` still reach the domain
+(`docs/contracts/TOOL_EXECUTION_POLICY.md`).
 
 Optimizer package and HTTP discovery do not initialize the analysis pipeline.
 The route retains only its narrow storage/action authorities; analyzer,
@@ -199,7 +202,7 @@ consumer cannot accidentally initialize autonomous execution.
 
 Daily provider detection: see [model registration](../MODEL_REGISTRATION.md#daily-provider-detection).
 
-Daily-report readers gather owner-scoped state. Historical extraction bounds candidates before hydration, then derives statistics and its 800-character transcript once with a 128-turn retained prefix; lazy failure drops the day. Calendar/day counts send explicit local intervals; storage projects Turn timestamp scalars, bounds frozen decoding, and returns only distinct counts. Reports commit idempotently; the durable owner reconstructs `reports:maintain`. Its reconstructible LLM analysis uses the same strict billing-stop admission; the same finite actual-429 allowance applies. Explicit scheduler prompts, timer/proactive polls, and attended Agent calls do not inherit either narrower policy.
+Daily-report readers gather owner-scoped state. Historical extraction bounds candidates before hydration, then derives statistics and its 800-character transcript once with a 128-turn retained prefix; lazy failure drops the day. Calendar/day counts send explicit local intervals; storage projects Turn timestamp scalars, bounds frozen decoding, and returns only distinct counts. The calendar month overview (`lib/daily_report/calendar_overview.py`) runs one shielded computation per owner month: concurrent requests await it, a departed request cancels nothing, and report or cost invalidation detaches it so its result is never cached. Its costs come from the per-Turn usage projection `conversation.turn_usage` ([STORAGE.md](../STORAGE.md#per-turn-usage-projection)), never from transcripts; settled past days persist in `daily_cost`. Reports commit idempotently; the durable owner reconstructs `reports:maintain`. Its reconstructible LLM analysis uses the same strict billing-stop admission; the same finite actual-429 allowance applies. Explicit scheduler prompts, timer/proactive polls, and attended Agent calls do not inherit either narrower policy.
 
 Daily-report route discovery likewise keeps storage readers, cost aggregation,
 conversation/todo collectors, LLM generation, and scheduler integration
@@ -209,7 +212,84 @@ owner and principal through the call. Its dynamic exports have unknown types,
 not module-object types, so request adapters retain callable/list contracts
 without eagerly importing every domain owner.
 
-The browser loads My Day write policy with the lazy feature chunk. Its typed controller receives the selected report, render/cache seams, and daily API as explicit ports. TODO toggles and deletes update optimistically and restore the same item/order on rejection; successful stream cycles adopt the server's resolved status, and a created task adopts the returned authoritative report. Quick actions use a separate typed intent controller: it fills the composer before creating the conversation so project/tool state remains armed, then applies each declared tool mode through an injected presentation port. The typed report repository is an owner-scoped, reconstructible read cache: 96 reports of at most 512 KiB plus 24 month overviews of at most 128 KiB bound estimated storage at 51 MiB. Schema v3 discards the former unscoped/unbounded cache instead of migrating it across owners. The idle background feature owns one cache-first digest revalidation and one three-hour reminder timer; its owner/date ledger retains at most 16 entries and `beforeunload` destroys both timers. The retained panel now owns presentation only.
+The typed report repository is an owner-scoped, reconstructible read cache: 96 reports of at most 512 KiB plus 24 month overviews of at most 128 KiB bound estimated storage at 51 MiB. Schema v3 discards the former unscoped/unbounded cache instead of migrating it across owners. The idle background feature owns one cache-first digest revalidation and one three-hour reminder timer; its owner/date ledger retains at most 16 entries and `beforeunload` destroys both timers. The retained panel writes only the month cache.
+
+## My Day goals
+
+**Problem:** My Day generated a daily report from the day's conversations and
+asked the owner to work from it. The owner's verdict (2026-11-08): the page
+went the wrong way. He wants to write what he means to get done, see it broken
+into small items, and see roughly how far along each goal is: which items are
+done, in progress or not started. Unfinished items continue the next day, and
+he checks items off himself.
+
+**Decision:** the page is a goal tracker (`lib/myday/`,
+`contracts/myday_goals_v1.schema.json`, HTTP `routes/api_v1/myday.py`).
+
+- One portable record CAS per goal (`myday.goal.v1`, key `<owner>:<goalId>`)
+  holds the goal's items. Goals are not dated: an unfinished item stays open
+  across days, so carry-over needs no copy and nothing is reset per day. The
+  day view is derived from item timestamps (`startedAt`, `completedAt`).
+- Items keep stable IDs: `i-` random for owner items, `a-` derived from the
+  goal and normalized text for suggestions, `w-` derived from the assignment
+  for Worker evidence. Item status uses the checklist and task-board
+  vocabulary (`pending`, `in_progress`, `completed`), with `statusChangedAt`,
+  `startedAt`, `completedAt` and a `manual` flag.
+- Provenance: `origin` owner, agent or evidence. An agent suggestion is a
+  proposal (`proposal` pending, accepted or dismissed). A pending or dismissed
+  proposal never counts. Any owner action on it (accept, set status, edit)
+  adopts it; dismissing it keeps a tombstone so it is not proposed again.
+- Manual state is authoritative: neither regeneration nor evidence changes an
+  item the owner set. Regeneration (`record_decomposition`) matches proposals
+  by normalized text and derived ID. It never adds an item that exists in any
+  state, keeps every adopted, owner, evidence and dismissed item as stored, and
+  replaces only untouched pending proposals. One run per goal per process: a
+  reload joins it, a client disconnect never cancels it. The model call uses
+  this page's optional-analysis policy (strict billing-stop admission, the
+  optional 429 allowance, `dispatch_chat` defaults). A failed call changes
+  nothing.
+- Progress is an estimate with one explainable formula:
+  `percent = floor(100 * completed / counted)`, null when nothing counts.
+  Counted items are owner items, adopted suggestions, and Worker evidence that
+  is not cancelled; every counted item weighs the same. Floor means 100 only
+  when everything counted is done. The server computes it on every view.
+- A goal can map to one Coordinator request (`link`: project, Coordinator,
+  `request.delegation.attemptId`, the owner's request Turn). Its Workers are
+  evidence items read fresh on every view, through one bounded source-cohort
+  read (`ProjectDispatchRepository.request_rows`) and the owner's live-task
+  set. No attempt, delivery or transcript is read: grant revoked → cancelled;
+  reworked by a later Worker → cancelled (superseded); Coordinator review
+  accept → completed; no execution → pending; live task → in progress
+  (running); review rework or reject → in progress; otherwise in progress
+  (awaiting review). A settled request is reported as such and is not turned
+  into done items. The owner's status on a Worker item is stored as an
+  override (`origin` evidence, `manual`); "follow Worker" removes it.
+- Bounded load (DB measurement 2026-11-08: 249 concurrent calendar scans
+  stalled the API host): one in-flight view load per owner and write
+  generation on the server, and one in-flight goal load and one month load
+  per page. The browser joins a running decomposition instead of starting
+  another, and a load that started before a local change never overwrites that
+  goal. Rendering the calendar never fetches.
+
+**Migration: archive.** The generated reports stay byte-identical under
+`data/config/daily_reports/<owner>/` and render read-only as a past day's
+recap beside that day's goal progress. Nothing is converted: every legacy
+TODO of the owner was model-generated (203 reports, 1,137 TODOs, 0 manual on
+2026-11-08), so converting them would have planted 1,137 stale proposals. The
+report generator and its backfill built-in are unchanged; whether to retire
+them is a separate owner decision.
+
+**Alternatives rejected:** a goal per day copied forward (duplicates items and
+loses their identity); one record per owner (unbounded growth and contention
+on every click); a weighted formula giving partial credit for items in
+progress (a tuned constant, not an explainable count); mirroring Workers into
+stored items at link time (stale as the Coordinator keeps delegating);
+per-Worker attempt and delivery reads (about two storage calls per Worker on
+every open); writing the Coordinator task board (model-authored and owned by
+the Coordinator; it is a summary, not evidence); converting the archive.
+
+Bounds: goal text up to 1,000 characters; up to 128 items of 200 characters
+per goal; about 200 KB per record at the worst case, 1–5 KB in practice.
 
 ## Failure semantics
 
@@ -231,10 +311,11 @@ The browser loads My Day write policy with the lazy feature chunk. Its typed con
   and recovery semantics. Retry loops are capped and never duplicate completed
   side effects. Optimizer writes are allow-listed, reversible, and post-verified.
 - Notifications reflect stored outcomes; they do not define completion.
-- My Day optimistic writes roll back visibly; the browser never invents a
-  stream-cycle result or treats its local report cache as authority.
-- A My Day quick action prefills before conversation creation; tool modes and
-  send-button reconciliation cross explicit UI ports.
+- My Day item state belongs to the owner: a manual status is never changed by
+  regeneration or evidence; adopted, dismissed and completed items are never
+  removed or recreated; pending suggestions never count toward progress.
+- My Day check-offs are optimistic and adopt the server's goal view; on
+  failure the board re-reads the server instead of keeping its guess.
 - My Day cache keys require a resolved positive owner, cache bytes/entries are
   bounded, and the retained panel cannot recreate its own IndexedDB or timer.
 
@@ -246,8 +327,9 @@ The browser loads My Day write policy with the lazy feature chunk. Its typed con
 | Poll/claim behavior | timer poll/state modules | multi-worker/idempotency |
 | New scheduled action | action catalogue + focused service | owner, input bounds, retry |
 | Daily report input | focused reader | owner isolation, period idempotency |
-| My Day browser mutation | `features/myday/task-actions.ts` | payload period, optimistic rollback, server status, cache-after-ack |
-| My Day quick action | `features/myday/quick-action-launcher.ts` | prefill-before-create, selected item, explicit tool intent |
+| My Day goal rule or record | `lib/myday/goals.py`, contract | carry-over, manual authority, idempotent regeneration, progress formula, restart |
+| My Day request evidence | `lib/myday/evidence.py` | worker state mapping, one cohort read, unavailable evidence |
+| My Day board | `features/myday/goal-board.ts` | one load per page, stale-load guard, joined decomposition, read-only recap |
 | My Day cache/background | `features/myday/{report-cache,background-controller}.ts` | owner isolation, byte/entry ceilings, single probe/reminder, teardown |
 | Optimizer signal | analyzer | proposal determinism |
 | Auto-applied action | `actions/`, applier | write set, rollback, verification |
@@ -262,7 +344,8 @@ pytest -q tests/scheduler/test_scheduled_agent_condition_contract.py tests/sched
   tests/scheduler/test_proactive_status_budget.py
 pytest -q tests/conversation/test_daily_report.py tests/daily_report/test_daily_report_storage.py \
   tests/startup/test_daily_report_startup_boundary.py
-pytest -q tests/myday/test_myday_background.py tests/myday/test_myday_task_actions.py
+pytest -q tests/myday/ tests/api/test_api_v4_myday_goals.py
+npx vitest run frontend/src/features/myday/
 pytest -q tests/optimizer/test_optimizer.py tests/optimizer/test_optimizer_sidecar_storage.py \
   tests/startup/test_optimizer_startup_boundary.py tests/conversation/test_optional_llm_billing_admission.py
 ```

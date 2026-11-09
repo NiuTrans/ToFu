@@ -458,6 +458,7 @@ const toolInjectionPresentation = createToolInjectionPresentation({
   renderMarkdown: (source) => renderMarkdown(source),
   iconHtml,
   resolveConversationTitle: (conversationId) => convTitleById(conversationId),
+  resolveMediaUrl: (url) => (url.startsWith('/') ? apiUrl(url) : url),
 });
 const { renderInjectionHtml: renderToolInjectionHtml } =
   toolInjectionPresentation;

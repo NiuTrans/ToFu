@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 from lib.llm_sanitize import _UNNAMED_TOOL_NAME
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
@@ -190,6 +190,47 @@ def publish_tool_call_entry(task, round_entry, event_payload, name, number):
         task['_swarmRoundNum'] = number
 
 
+def _stamp_thinking(round_entry: dict, event_payload: dict | None, value: str, *,
+                    key: str = 'thinking') -> None:
+    round_entry[key] = value
+    if event_payload is not None:
+        event_payload[key] = value
+
+
+def _stamp_round_prose(round_entry: dict, event_payload: dict | None,
+                                model_text: str, public_text: str) -> None:
+    """Keep the provider's authored text beside the public text, once per round.
+
+    Public prose strips a silence control token; the provider replay keeps the
+    original so Continue never loses the declaration it must echo.
+    """
+    if model_text:
+        round_entry['assistantModelContent'] = model_text
+    if public_text:
+        round_entry['assistantContent'] = public_text
+        if event_payload is not None:
+            event_payload['assistantContent'] = public_text
+
+
+def _stamp_round_state(round_entry: dict, event_payload: dict | None, state: dict) -> None:
+    """Stamp the first tool entry of a round with its prose, thinking and replay state.
+
+    Thinking/signature are captured independently of public prose: a reasoning
+    model may emit thinking and call a tool with no interstitial text.
+    """
+    _stamp_round_prose(round_entry, event_payload, state['model_text'], state['public_text'])
+    if state['thinking']:
+        _stamp_thinking(round_entry, event_payload, state['thinking'])
+    if state['signature']:
+        _stamp_thinking(round_entry, event_payload, state['signature'], key='thinkingSignature')
+    if state['responses_items']:
+        # Opaque encrypted/server-compaction state persists for stateless
+        # Responses replay; the live UI event payload omits it.
+        round_entry['_responsesItems'] = state['responses_items']
+    if state['anthropic_blocks']:
+        round_entry['_anthropicContentBlocks'] = state['anthropic_blocks']
+
+
 def parse_tool_calls(
     assistant_msg: dict[str, Any],
     task: dict[str, Any],
@@ -234,7 +275,7 @@ def parse_tool_calls(
         7-tuples: ``(tc, fn_name, tc_id, fn_args, rn, round_entry,
         _args_parse_error)``.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     raw_tool_calls = assistant_msg.get('tool_calls')
     if isinstance(raw_tool_calls, list):
         tool_calls = raw_tool_calls
@@ -275,7 +316,22 @@ def parse_tool_calls(
         raw_assistant_content.strip()
         if isinstance(raw_assistant_content, str) else ''
     )
+    _assistant_model_content = _assistant_content
+    if _assistant_content:
+        from lib.tasks_pkg.stream_handler._intent_stall import strip_silent_turn_marker
+        _assistant_content = strip_silent_turn_marker(_assistant_content)
     _ac_tagged = False  # only tag the first entry per round
+
+    def _round_state() -> dict:
+        return {'model_text': _assistant_model_content, 'public_text': _assistant_content,
+                'thinking': _assistant_thinking, 'signature': _assistant_thinking_signature,
+                'responses_items': _assistant_responses_items,
+                'anthropic_blocks': _assistant_anthropic_blocks}
+
+    def _has_round_thinking() -> bool:
+        return bool(_assistant_model_content or _assistant_thinking
+                    or _assistant_thinking_signature or _assistant_responses_items
+                    or _assistant_anthropic_blocks)
     # Capture per-round reasoning/thinking text so Continue can replay it
     #   against APIs that accept thinking continuity (Claude extended-thinking).
     #   Currently sourced from OpenAI-compat `reasoning_content`; if an upstream
@@ -571,7 +627,7 @@ def parse_tool_calls(
         elif _repair_log:
             logger.debug(
                 '[Task %s] tool=%s tc_id=%s: repaired %d arg(s) %s',
-                tid, fn_name, tc_id[:12], len(_repair_log), _repair_log,
+                tid, fn_name, tc_id, len(_repair_log), _repair_log,
             )
 
         # ── Build a UI-facing repair summary (None when nothing was fixed) ──
@@ -691,21 +747,8 @@ def parse_tool_calls(
             #   whole block on content dropped that round's thinking, which then
             #   vanished from the settled turn (assemble_segments reads
             #   round['thinking'] when producing its projection).
-            if not _ac_tagged and (_assistant_content or _assistant_thinking
-                                   or _assistant_thinking_signature
-                                   or _assistant_responses_items
-                                   or _assistant_anthropic_blocks):
-                if _assistant_content:
-                    round_entry['assistantContent'] = _assistant_content
-                if _assistant_thinking:
-                    round_entry['thinking'] = _assistant_thinking
-                if _assistant_thinking_signature:
-                    round_entry['thinkingSignature'] = _assistant_thinking_signature
-                if _assistant_responses_items:
-                    round_entry['_responsesItems'] = _assistant_responses_items
-                if _assistant_anthropic_blocks:
-                    round_entry['_anthropicContentBlocks'] = (
-                        _assistant_anthropic_blocks)
+            if not _ac_tagged and _has_round_thinking():
+                _stamp_round_state(round_entry, None, _round_state())
                 _ac_tagged = True
             # Preserve Gemini thought_signature (and any other vendor-specific
             #   extra_content) so the frontend can round-trip it on Continue.
@@ -715,7 +758,7 @@ def parse_tool_calls(
             if tc.get('extra_content'):
                 round_entry['extraContent'] = tc['extra_content']
             logger.debug('[Task %s] Reusing early-announced tool_start for '
-                         '%s tc_id=%s rn=%d', tid, fn_name, tc_id[:8], rn)
+                         '%s tc_id=%s rn=%d', tid, fn_name, tc_id, rn)
             # Swarm tools need extra bookkeeping
             if fn_name in SWARM_TOOL_NAMES:
                 task['_swarmRoundNum'] = rn
@@ -773,27 +816,8 @@ def parse_tool_calls(
         #   interstitial prose) must still stamp its reasoning, or it is lost at
         #   finalization (assemble_segments reads round['thinking'] when
         #   producing the authoritative turn projection).
-        if not _ac_tagged and (_assistant_content or _assistant_thinking
-                               or _assistant_thinking_signature
-                               or _assistant_responses_items
-                               or _assistant_anthropic_blocks):
-            if _assistant_content:
-                round_entry['assistantContent'] = _assistant_content
-                event_payload['assistantContent'] = _assistant_content
-            if _assistant_thinking:
-                round_entry['thinking'] = _assistant_thinking
-                event_payload['thinking'] = _assistant_thinking
-            if _assistant_thinking_signature:
-                round_entry['thinkingSignature'] = _assistant_thinking_signature
-                event_payload['thinkingSignature'] = _assistant_thinking_signature
-            if _assistant_responses_items:
-                # Opaque encrypted/server-compaction state is persisted for
-                # stateless Responses replay, but deliberately omitted from
-                # the live UI event payload.
-                round_entry['_responsesItems'] = _assistant_responses_items
-            if _assistant_anthropic_blocks:
-                round_entry['_anthropicContentBlocks'] = (
-                    _assistant_anthropic_blocks)
+        if not _ac_tagged and _has_round_thinking():
+            _stamp_round_state(round_entry, event_payload, _round_state())
             _ac_tagged = True
         # Preserve Gemini thought_signature on the persisted tool round.
         #   Captured off the assistant tool_call entry by lib.llm's

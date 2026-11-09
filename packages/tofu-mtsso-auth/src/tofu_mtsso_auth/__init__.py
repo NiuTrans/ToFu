@@ -27,6 +27,9 @@ _TIMEOUT = 30
 # expires_in, SDK default 120 s) plus SDK refresh, introspection and exchange.
 _LOGIN_TIMEOUT = 180
 _NODE_PROBE_BUDGET = 5
+# engines.node of @mtfe/mtsso-auth-official (">=20"). An older Node still
+# answers --version, but cannot load the ESM bridge: exit 1 without output.
+_OFFICIAL_NODE_MAJOR = 20
 _CACHE = OrderedDict()
 _FAILURES = OrderedDict()
 _SUBJECTS = OrderedDict()
@@ -451,10 +454,13 @@ def _run(argv, *, timeout=None, input_data=None):
 
 
 def _node_command(executable):
-    """Resolve a runnable Node for the official Node shebang, within five seconds.
+    """Resolve a compatible Node for the official Node shebang, within five seconds.
 
     Explicit MTSSO_NODE_EXECUTABLE is authoritative. Automatic selection only
     probes installed PATH candidates; it never installs or changes credentials.
+    The first candidate in PATH order that runs and meets the official engine
+    floor wins. Each probe may use the whole remaining budget, so a slow cold
+    start under load never hands the choice to a later, older Node.
     Non-Node executable overrides retain their original launch contract.
     """
     try:
@@ -482,16 +488,17 @@ def _node_command(executable):
         if remaining <= 0:
             break
         try:
-            status, stdout, stderr = _run([candidate, "--version"], timeout=min(2, remaining))
+            status, stdout, stderr = _run([candidate, "--version"], timeout=remaining)
         except OfficialAuthError:
             continue
-        if status == 0 and stdout.strip().startswith("v"):
+        version = re.match(r"v(\d+)\.", stdout.strip()) if status == 0 else None
+        if version and int(version.group(1)) >= _OFFICIAL_NODE_MAJOR:
             return [candidate, executable]
-        incompatible = incompatible or ("GLIBC_" in stderr and "not found" in stderr)
+        incompatible = incompatible or bool(version) or ("GLIBC_" in stderr and "not found" in stderr)
     code = "SSO_NODE_RUNTIME_INCOMPATIBLE" if incompatible else "SSO_NODE_UNAVAILABLE"
     raise OfficialAuthError(code,
-        "官方 SSO 命令的 Node 运行环境不可用。请安装兼容主机的 Node，"
-        "通过 MTSSO_NODE_EXECUTABLE 指定其路径，或将其加入 MCP 的 PATH；无需重复登录。")
+        "官方 SSO 命令的 Node 运行环境不可用（需要 Node " + str(_OFFICIAL_NODE_MAJOR) + "+）。"
+        "请安装兼容主机的 Node，通过 MTSSO_NODE_EXECUTABLE 指定其路径，或将其加入 MCP 的 PATH；无需重复登录。")
 
 
 def _parse(exit_code, stdout, stderr=""):

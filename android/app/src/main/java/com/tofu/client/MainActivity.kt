@@ -2,12 +2,20 @@ package com.tofu.client
 
 import android.content.Intent
 import android.os.Bundle
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -15,7 +23,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import androidx.room.Room
 import com.tofu.client.data.OnboardingStore
 import com.tofu.client.data.ProfileDatabase
@@ -51,16 +67,15 @@ import com.tofu.client.ui.theme.TofuTheme
  *
  * It also owns the two Activity-level entry points the shell adds on top of the
  * SPA: inbound `tofu://` deep links (which pre-fill the add form) and the
- * one-shot update check.
+ * cooldown-bounded update check.
  */
 class MainActivity : ComponentActivity() {
 
     private lateinit var diag: DiagLog
-    private lateinit var db: ProfileDatabase
-    private lateinit var secrets: SecretStore
-    private lateinit var session: SessionManager
     private lateinit var store: OnboardingStore
     private lateinit var vm: ProfilesViewModel
+    private val session: SessionManager get() = vm.session
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,30 +86,53 @@ class MainActivity : ComponentActivity() {
         diag = (application as TofuApplication).diagnostics
         diag.record("I", "Activity", "create restored=${savedInstanceState != null}")
         try {
-            db = Room.databaseBuilder(
-                applicationContext, ProfileDatabase::class.java, "tofu-profiles.db",
-            ).addMigrations(*ProfileDatabase.ALL_MIGRATIONS).build()
-            secrets = SecretStore(applicationContext)
-            store = OnboardingStore(applicationContext)
-            // One process-wide diagnostic ring, shared by every screen so a report
-            // from the list carries the events leading up to it (logins, failures)
-            // and the WebView's own console output.
-            val dao = db.profileDao()
-            session = SessionManager(dao, secrets, appVersionCode = BuildConfig.VERSION_CODE, diagnostics = diag)
-            val kernels = KernelControllers(
-                remoteUrl = UrlKernelController(SupervisorClient(diagnostics = diag), login = session::login),
-                local = com.tofu.client.session.localKernelController(applicationContext, diag),
-                ssh = com.tofu.client.ssh.SshKernelController.forApp(applicationContext, dao, secrets),
-            )
-            val controller = SessionController(dao, secrets, session, kernels, report = { diag.record("I", "Profiles", it) })
-            vm = ProfilesViewModel(
-                dao, secrets, controller, kernels,
-                updateChecker = UpdateChecker(BuildConfig.VERSION_NAME, UpdateProbe(diagnostics = diag)::advertised),
-                diagnostics = diag,
-            )
+            val appContext = applicationContext
+            store = OnboardingStore(appContext)
+            val diagnostics = diag
+            // The factory runs only for a NEW ViewModelStore entry. Rotation
+            // reuses its graph, navigation and owned cancellable operations.
+            val factory = object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    require(modelClass == ProfilesViewModel::class.java)
+                    val database = Room.databaseBuilder(
+                        appContext, ProfileDatabase::class.java, "tofu-profiles.db",
+                    ).addMigrations(*ProfileDatabase.ALL_MIGRATIONS).build()
+                    var sessionOwner: SessionManager? = null
+                    var updateOwner: UpdateProbe? = null
+                    fun releaseGraph() {
+                        try { updateOwner?.close() }
+                        finally { try { sessionOwner?.close() } finally { database.close() } }
+                    }
+                    try {
+                        val secrets = SecretStore(appContext)
+                        val dao = database.profileDao()
+                        val session = SessionManager(dao, secrets, appVersionCode = BuildConfig.VERSION_CODE, diagnostics = diagnostics)
+                        sessionOwner = session
+                        val kernels = KernelControllers(
+                            remoteUrl = UrlKernelController(SupervisorClient(diagnostics = diagnostics), login = session::login),
+                            local = com.tofu.client.session.localKernelController(appContext, diagnostics),
+                            ssh = com.tofu.client.ssh.SshKernelController.forApp(appContext, dao, secrets),
+                        )
+                        val probe = UpdateProbe(diagnostics = diagnostics)
+                        updateOwner = probe
+                        val controller = SessionController(dao, secrets, session, kernels, report = { diagnostics.record("I", "Profiles", it) })
+                        return ProfilesViewModel(
+                            dao, secrets, controller, kernels, session = session,
+                            updateChecker = UpdateChecker(BuildConfig.VERSION_NAME, probe::advertisedCancellable),
+                            diagnostics = diagnostics, release = ::releaseGraph,
+                        ) as T
+                    } catch (error: Exception) {
+                        try { releaseGraph() }
+                        catch (closing: Exception) { diagnostics.record("E", "Startup", "graph cleanup failed: ${closing.javaClass.simpleName}") }
+                        throw error
+                    }
+                }
+            }
+            vm = ViewModelProvider(this, factory)[ProfilesViewModel::class.java]
             // A cold launch straight from a deep link (e.g. a scanned/clicked
             // `tofu://connect?url=…`) opens the add form pre-filled.
-            handleDeepLink(intent)
+            if (savedInstanceState == null) handleDeepLink(intent)
         } catch (error: Exception) {
             diag.exception("Startup", error)
             setContent { TofuTheme { StartupFailureScreen(diag) } }
@@ -111,6 +149,20 @@ class MainActivity : ComponentActivity() {
                     val activeKernel by vm.activeKernel.collectAsState()
                     val status by vm.status.collectAsState()
                     val update by vm.update.collectAsState()
+                    val prefill by vm.addPrefill.collectAsState()
+                    val pendingPrefill by vm.pendingPrefill.collectAsState()
+                    BackHandler(enabled = screen is Screen.AddEdit || screen is Screen.AddEditSsh ||
+                        (screen is Screen.List && status is UiStatus.LoggingIn)) { vm.backToList() }
+                    // One timer only while the list is visible; the ViewModel
+                    // gates network work by failure/success cooldown.
+                    LaunchedEffect(screen, profiles.map { it.baseUrl }) {
+                        if (screen is Screen.List) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                            while (isActive) {
+                                vm.checkForUpdate()
+                                delay(ProfilesViewModel.UPDATE_RETRY_INTERVAL_MS)
+                            }
+                        }
+                    }
                     LaunchedEffect(screen) { diag.record("I", "Screen", screen::class.simpleName.orEmpty()) }
                     var onboardingDone by remember { mutableStateOf(store.isDone()) }
 
@@ -163,7 +215,7 @@ class MainActivity : ComponentActivity() {
                                 onCheckUpdate = vm::checkForUpdate,
                             )
                         }
-                        is Screen.AddEdit -> {
+                        is Screen.AddEdit -> key(s.formId) {
                             val editing = vm.editing
                             AddEditScreen(
                                 editing = editing,
@@ -172,30 +224,39 @@ class MainActivity : ComponentActivity() {
                                 existingAliases = profiles.map { it.alias }.toSet(),
                                 secretAlreadyStored =
                                     editing != null && vm.secretStoredFor(editing.alias),
-                                onCancel = vm::backToList,
+                                onCancel = { vm.backToList(s.formId) },
                                 onSubmit = { alias, url, auth, secret, projectPath ->
-                                    if (editing == null) vm.submitAdd(alias, url, auth, secret, projectPath)
-                                    else vm.submitEdit(editing, alias, url, auth, secret, projectPath)
+                                    if (editing == null) vm.submitAdd(alias, url, auth, secret, projectPath, s.formId)
+                                    else vm.submitEdit(editing, alias, url, auth, secret, projectPath, s.formId)
                                 },
                                 reusableHostLookup = { url, excludeAlias ->
                                     vm.reusableSecretHost(url, excludeAlias)
                                 },
-                                prefillUrl = vm.addPrefill?.url,
-                                prefillAlias = vm.addPrefill?.alias,
+                                prefillUrl = prefill?.url,
+                                prefillAlias = prefill?.alias,
+                                pendingPrefill = pendingPrefill,
+                                initialDraft = vm.formDraft,
+                                onDraftChanged = { vm.retainFormDraft(it, s.formId) },
+                                onPrefillAccepted = { revision -> vm.acceptPrefill(s.formId, revision) },
+                                onPrefillDismissed = { revision -> vm.dismissPrefill(s.formId, revision) },
+                                onFormChanged = { vm.formChanged(s.formId) },
+                                onConnectOffered = { connect -> vm.offerConnect(connect, s.formId) },
                             )
                         }
-                        is Screen.AddEditSsh -> SshKernelScreen(
-                            editing = vm.editing,
-                            existingAliases = profiles.map { it.alias }.toSet(),
-                            onCancel = vm::backToList,
-                            onSubmit = vm::submitSsh,
-                            status = status,
-                            publicKey = vm.sshPublicKey.collectAsState().value,
-                            passwordStored = vm.editing?.let { vm.secretStoredFor(it.alias) } == true,
-                            hostKeyToTrust = vm.hostKeyToTrust,
-                            onTrust = vm::trustHostKey,
-                            kernelState = kernelState,
-                        )
+                        is Screen.AddEditSsh -> key(s.formId) {
+                            SshKernelScreen(
+                                editing = vm.editing,
+                                existingAliases = profiles.map { it.alias }.toSet(),
+                                onCancel = { vm.backToList(s.formId) },
+                                onSubmit = { alias, endpoint, password -> vm.submitSsh(alias, endpoint, password, s.formId) },
+                                status = status,
+                                publicKey = vm.sshPublicKey.collectAsState().value,
+                                passwordStored = vm.editing?.let { vm.secretStoredFor(it.alias) } == true,
+                                hostKeyToTrust = vm.hostKeyToTrust,
+                                onTrust = { vm.trustHostKey(s.formId) },
+                                kernelState = kernelState,
+                            )
+                        }
                         is Screen.Web -> WebScreen(
                             profile = s.profile,
                             session = session,
@@ -204,13 +265,60 @@ class MainActivity : ComponentActivity() {
                             onBack = vm::backToList,
                         )
                     }
+                    // A remote connect link cannot silently displace an SSH
+                    // form or the live kernel. Keep it as metadata until the
+                    // user deliberately selects the new URL review form.
+                    if (screen !is Screen.AddEdit) pendingPrefill?.let { incoming ->
+                        val formId = (screen as? Screen.AddEditSsh)?.formId
+                        AlertDialog(
+                            onDismissRequest = { vm.dismissPrefill(formId = formId, revision = incoming.revision) },
+                            title = { Text(stringResource(R.string.prefill_confirm_title)) },
+                            text = { Text(stringResource(R.string.prefill_confirm_message)) },
+                            confirmButton = { TextButton(onClick = { vm.acceptPrefill(formId = formId, revision = incoming.revision) }) {
+                                Text(stringResource(R.string.prefill_use_link))
+                            } },
+                            dismissButton = { TextButton(onClick = { vm.dismissPrefill(formId = formId, revision = incoming.revision) }) {
+                                Text(stringResource(R.string.prefill_keep_form))
+                            } },
+                        )
+                    }
                 }
             }
         }
     }
 
-    override fun onStart() { super.onStart(); if (::diag.isInitialized) diag.record("I", "Activity", "foreground") }
-    override fun onStop() { if (::diag.isInitialized) diag.record("I", "Activity", "background"); super.onStop() }
+    override fun onStart() {
+        super.onStart()
+        if (::diag.isInitialized) diag.record("I", "Activity", "foreground")
+        if (!::vm.isInitialized) return
+        vm.checkForUpdate()
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            private var validated = false
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                val available = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                val owner = this
+                if (available && !validated) lifecycleScope.launch {
+                    if (networkCallback === owner && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+                        vm.onNetworkRestored()
+                }
+                validated = available
+            }
+            override fun onLost(network: Network) { validated = false }
+        }
+        try { manager.registerDefaultNetworkCallback(callback); networkCallback = callback }
+        catch (error: Exception) { diag.record("W", "UpdateNetwork", "observer unavailable: ${error.javaClass.simpleName}") }
+    }
+
+    override fun onStop() {
+        networkCallback?.let { callback ->
+            try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback) }
+            catch (error: Exception) { diag.record("W", "UpdateNetwork", "observer release failed: ${error.javaClass.simpleName}") }
+        }
+        networkCallback = null
+        if (::diag.isInitialized) diag.record("I", "Activity", "background")
+        super.onStop()
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -221,8 +329,15 @@ class MainActivity : ComponentActivity() {
     /** Pre-fill the add form when the app is opened via a `tofu://` link. */
     private fun handleDeepLink(intent: Intent?) {
         val payload = intent?.data?.toString() ?: return
+        // Consume the external URI; never keep a rejected credential-bearing
+        // payload as the Activity's recreation initializer.
+        intent.data = null
         if (!::vm.isInitialized) { diag.record("W", "DeepLink", "ignored while startup failed"); return }
-        val connect = DeepLink.parse(payload) ?: run { diag.record("W", "DeepLink", "invalid connect link"); return }
+        val connect = DeepLink.parse(payload) ?: run {
+            diag.record("W", "DeepLink", "invalid or credential-bearing connect link")
+            vm.rejectConnectLink()
+            return
+        }
         diag.record("I", "DeepLink", "connect ${com.tofu.client.session.ClientReport.safeUrl(connect.url)}")
         vm.startAdd(connect.url, connect.alias)
     }

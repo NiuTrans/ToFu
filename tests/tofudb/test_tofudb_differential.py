@@ -115,13 +115,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 import zlib
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable
@@ -147,6 +148,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _TEST_SECRET = b'tofudb-differential-test-secret-0001'  # 34 ASCII bytes
 _OWNER_ID = 11
 _TENANT_ID = 7
+_PAYMENT_TIE_SCRIPT = 'billing payment list breaks same-created_at ties by id descending'
+_PAYMENT_TIE_USER = 'billing-payment-tie-fixture'
 
 # Wall-clock fields both sides fill from their own clock; compare presence
 # and type, never equality.  Conversation header timestamps are NOT here:
@@ -402,9 +405,25 @@ def tofudb_binary() -> Path:
     return _resolve_tofudb_binary()
 
 
+def _payment_tie_documents(request) -> list[dict[str, Any]]:
+    callspec = getattr(request.node, 'callspec', None)
+    if callspec is None or callspec.params.get('script_name') != _PAYMENT_TIE_SCRIPT:
+        return []
+    # Record operations own their clocks. Restore a real tie before either
+    # authority starts, with insertion order different from both id orders.
+    return [
+        dict(id=f'pay-tie-{letter}', user_id=_PAYMENT_TIE_USER,
+             provider='stripe', provider_id=f'prov-tie-{letter}',
+             amount_minor=amount, currency='USD', credit_micro=amount // 10,
+             status='pending', created_at=100, settled_at=0, raw={})
+        for letter, amount in (('b', 100), ('a', 200), ('c', 300))
+    ]
+
+
 @pytest.fixture()
-def tofudb_daemon(tofudb_binary: Path):
+def tofudb_daemon(tofudb_binary: Path, request):
     """Run one fresh-authority ``tofu-db serve`` until the test ends."""
+    payment_tie_documents = _payment_tie_documents(request)
     data_dir = Path(tempfile.mkdtemp(prefix='tofudb-diff-authority-'))
     search_projection_parent = Path(tempfile.mkdtemp(
         prefix='tofudb-diff-search-projection-parent-',
@@ -413,10 +432,26 @@ def tofudb_daemon(tofudb_binary: Path):
     # directory is deliberately treated as an invalid/corrupt authority.
     search_projection_dir = search_projection_parent / 'projection'
     try:
-        subprocess.run(
+        initialized = subprocess.run(
             [str(tofudb_binary), 'init', '--data-dir', str(data_dir)],
             check=True, capture_output=True, text=True, timeout=120,
         )
+        if payment_tie_documents:
+            from lib.storage_authority_sql.migration import tofudb_migration_import as importer
+            from lib.storage_authority_sql.migration.tofudb_migration_target import OfflineMigrationSession
+
+            authority_uuid = next(
+                word.split('=', 1)[1] for word in initialized.stdout.split()
+                if word.startswith('authority_uuid='))
+            with OfflineMigrationSession(
+                tofudb_binary, data_dir, authority_uuid,
+                owner_id=_OWNER_ID, tenant_id=_TENANT_ID,
+            ) as session:
+                for document in payment_tie_documents:
+                    assert importer._command(
+                        session, 'migration.billing.payment.restore',
+                        {'document': document},
+                    ) == {'inserted': True}
         with _running_tofudb_owner(
             tofudb_binary, data_dir, _OWNER_ID,
             search_projection_dir=search_projection_dir,
@@ -484,11 +519,31 @@ def integration_owner_daemon(tofudb_binary: Path):
 
 
 @pytest.fixture()
-def legacy_driver(tmp_path):
+def legacy_driver(tmp_path, request):
     # Both sides begin with a fresh authority; global library/reclamation reads
     # must not observe rows left by an earlier differential script.
     from lib.storage import StorageSupervisor
-    supervisor = StorageSupervisor(project_root=tmp_path / 'legacy-authority', backend='sqlite', startup_timeout=60)
+    payment_tie_documents = _payment_tie_documents(request)
+    project_root = tmp_path / 'legacy-authority'
+    if payment_tie_documents:
+        from lib.storage_authority_sql import schema
+        from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+
+        data_dir = project_root / 'data'
+        data_dir.mkdir(parents=True)
+        with closing(sqlite3.connect(data_dir / 'tofu.db')) as connection:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                schema.initialize_schema(SQLiteSession(connection))
+                connection.executemany(
+                    'INSERT INTO billing_payments(id, user_id, provider, provider_id, '
+                    'amount_minor, currency, credit_micro, status, created_at, settled_at, raw) '
+                    'VALUES(:id, :user_id, :provider, :provider_id, :amount_minor, :currency, '
+                    ':credit_micro, :status, :created_at, :settled_at, :raw)',
+                    [{**document, 'raw': json.dumps(document['raw'])}
+                     for document in payment_tie_documents],
+                )
+    supervisor = StorageSupervisor(project_root=project_root, backend='sqlite', startup_timeout=60)
     supervisor.start()
     try:
         yield LegacyDriver(supervisor.client)
@@ -2342,6 +2397,44 @@ def _turn_live_injection_scripts(*, build, read, defaults, attempt_clock, edited
                 'conversation_id': f'{ns}_conv', 'user_id': user,
                 'after': 0, 'limit': 10,
             }, ignore_fields=edited),
+        ]),
+        'turn steer commit stores the steered images on the pending record': build(lambda ns: [
+            Step('turn.create_pair', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'command_id': f'{ns}_pair_command',
+                'input_projection': {'content': 'steer with a screenshot'},
+                'config': {'model': 'steer-differential'},
+                'now': _TURN_TS + 1000,
+                'conversation_defaults': defaults(),
+            }, command=True),
+            Step('turn.attempt.bind', {
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'task_id': f'{ns}_task', 'user_id': user,
+            }, command=True, ignore_fields=attempt_clock),
+            Step('turn.steer.commit', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'command_id': f'{ns}_steer_images',
+                'text': 'the page looks like this',
+                'images': [
+                    {'preview': '/api/images/shot.png', 'url': '/api/images/shot.png',
+                     'sizeKB': 96},
+                    {'preview': 'data:image/png;base64,iVBORw0KGgo=', 'caption': 'inline'},
+                ],
+                'author': {'actor': 'human', 'text': 'the page looks like this'},
+            }, command=True, ignore_fields=edited),
+            # Anything but a list carries no images on either authority.
+            Step('turn.steer.commit', {
+                'conversation_id': f'{ns}_conv', 'user_id': user,
+                'attempt_id': _Ref(0, ('attempt', 'attemptId')),
+                'command_id': f'{ns}_steer_not_a_list',
+                'text': 'images must be a list',
+                'images': '/api/images/shot.png',
+            }, command=True, ignore_fields=edited),
+            read(
+                'turn.get', f'{ns}_conv', edited,
+                turn_id=_Ref(0, ('turn', 'turnId')),
+            ),
         ]),
         'turn related announce bridges one live root revision and replay event': build(lambda ns: [
             Step('turn.create_pair', {
@@ -7714,35 +7807,17 @@ def _billing_scripts() -> dict[str, list[Step]]:
                 'since_ts': 501,
             }),
         ],
-        'billing payment list breaks same-created_at ties by id descending': [
-            Step('billing.payment.record', {
-                'id': f'pay-tie-b-{suffix}', 'user_id': user,
-                'provider': 'stripe', 'provider_id': f'prov-tie-b-{suffix}',
-                'amount_minor': 100, 'currency': 'USD', 'credit_micro': 10,
-                'status': 'pending', 'raw': {},
-            }, command=True, ignore_fields=frozenset({'created_at'})),
-            Step('billing.payment.record', {
-                'id': f'pay-tie-a-{suffix}', 'user_id': user,
-                'provider': 'stripe', 'provider_id': f'prov-tie-a-{suffix}',
-                'amount_minor': 200, 'currency': 'USD', 'credit_micro': 20,
-                'status': 'pending', 'raw': {},
-            }, command=True, ignore_fields=frozenset({'created_at'})),
-            Step('billing.payment.record', {
-                'id': f'pay-tie-c-{suffix}', 'user_id': user,
-                'provider': 'stripe', 'provider_id': f'prov-tie-c-{suffix}',
-                'amount_minor': 300, 'currency': 'USD', 'credit_micro': 30,
-                'status': 'pending', 'raw': {},
-            }, command=True, ignore_fields=frozenset({'created_at'})),
-            # Same-second created_at on both engines; ids must order DESC
-            # rather than following insertion or byte order.
+        _PAYMENT_TIE_SCRIPT: [
+            # Both fresh authorities restore the same-created_at documents
+            # before serving. Keep their timestamps in the full comparison.
             Step('billing.payment.list', {
-                'user_id': user, 'provider': '', 'status': '',
+                'user_id': _PAYMENT_TIE_USER, 'provider': '', 'status': '',
                 'limit': 10, 'offset': 0,
-            }, ignore_fields=frozenset({'created_at', 'settled_at'})),
+            }),
             Step('billing.payment.list', {
-                'user_id': user, 'provider': 'stripe', 'status': 'pending',
+                'user_id': _PAYMENT_TIE_USER, 'provider': 'stripe', 'status': 'pending',
                 'limit': 2, 'offset': 1,
-            }, ignore_fields=frozenset({'created_at', 'settled_at'})),
+            }),
         ],
         'billing wallet and ledger preserve atomic money invariants': [
             Step('billing.wallet.get', {'user_id': user}),
@@ -8862,6 +8937,90 @@ def _conversation_diagnostic_scripts() -> dict[str, list[Step]]:
     ]}
 
 
+def _turn_projection_page_scripts() -> dict[str, list[Step]]:
+    """One Turn page read: head, member slices, stale fence and bounds."""
+    ns = f'diff_{uuid.uuid4().hex[:8]}'
+    turn = {'conversation_id': f'{ns}_conv', 'user_id': _OWNER_ID,
+            'turn_id': f'{ns}_page_turn'}
+    return {'turn projection page reads are revision fenced': [
+        Step('turn.append_settled', turn | {
+            'actor': 'assistant', 'status': 'completed',
+            'projection': {
+                'content': '回答 🚀 "quoted"\n\x01',
+                'thinking': 'plan',
+                'toolRounds': [{
+                    'toolCallId': 'call-1', 'toolName': 'read_file',
+                    'toolArgs': {'path': 'a.py'}, 'toolContent': 'print(1)',
+                    'status': 'done',
+                }],
+                'apiRounds': [{'round': 0, 'inputTokens': 3}],
+            },
+            'lane_id': 'main', 'command_id': f'{ns}_page_command',
+            'created_at': _TURN_TS + 1000, 'now': _TURN_TS + 1000,
+            'conversation_defaults': {'allowCreate': True, 'title': 'Turn pages',
+                                      'createdAt': _TURN_TS},
+        }, command=True),
+        Step('turn.projection.page', turn | {'page': 0}),
+        Step('turn.projection.page', turn | {'page': 0, 'projection_revision': 1}),
+        Step('turn.projection.page', turn | {'page': 0, 'projection_revision': 2}),
+        Step('turn.projection.page', turn | {'page': 1, 'projection_revision': 1}),
+        Step('turn.projection.page', turn | {'page': -1}),
+        Step('turn.projection.page', turn | {'turn_id': f'{ns}_missing', 'page': 0}),
+    ]}
+
+
+def _conversation_turn_usage_scripts() -> dict[str, list[Step]]:
+    """Per-Turn usage rows: Turn-time window, attribution fields, bounds."""
+    ns = f'diff_{uuid.uuid4().hex[:8]}'
+    conversation = f'{ns}_usage'
+
+    def settle(index, actor, projection, created_at, title='Usage'):
+        names_route = any(key in projection
+                          for key in ('model', 'providerId', 'provider_id'))
+        return Step('turn.append_settled', {
+            'conversation_id': conversation, 'user_id': _OWNER_ID,
+            'turn_id': f'{ns}_usage_turn_{index}', 'actor': actor,
+            'status': 'completed', 'projection': projection, 'lane_id': 'main',
+            'command_id': f'{ns}_usage_command_{index}',
+            'created_at': created_at, 'now': created_at,
+            'conversation_defaults': {'allowCreate': True, 'title': title,
+                                      'createdAt': _TURN_TS},
+        }, command=True, expect_divergence=(
+            'turn.append_settled legacy route snapshot synthesis'
+            if names_route else ''))
+
+    def usage(**extra):
+        return {'user_id': _OWNER_ID, 'conv_id': conversation,
+                'timestamp_gte': _TURN_TS + 1500,
+                'timestamp_lt': _TURN_TS + 5000} | extra
+
+    return {'conversation turn_usage projects priced turns in a window': [
+        settle(0, 'human', {'content': 'the first question of this chat',
+                            'timestamp': _TURN_TS + 1000}, _TURN_TS + 1000),
+        settle(1, 'assistant', {
+            'content': 'answer ' * 64, 'timestamp': _TURN_TS + 2000,
+            'usage': {'prompt_tokens': 7, 'completion_tokens': 3,
+                      'cache_read_tokens': 2},
+            'apiRounds': [{'round': 1, 'usage': {'prompt_tokens': 7}}],
+            'model': 'model-x', 'providerId': 'provider-y',
+        }, _TURN_TS + 2000),
+        settle(2, 'assistant', {'content': 'no usage', 'usage': {},
+                                'timestamp': _TURN_TS + 2500}, _TURN_TS + 2500),
+        settle(3, 'assistant', {'usage': {'prompt_tokens': 9}, 'preset': 'opus',
+                                'timestamp': _TURN_TS + 9000}, _TURN_TS + 2600),
+        # No projection time: the Turn's creation time places it.
+        settle(4, 'assistant', {'usage': {'prompt_tokens': 11},
+                                'provider_id': 'snake'}, _TURN_TS + 3000),
+        Step('conversation.turn_usage', usage()),
+        Step('conversation.turn_usage', usage(title_fallback_characters=12)),
+        Step('conversation.turn_usage', usage(timestamp_gte=_TURN_TS + 2600)),
+        Step('conversation.turn_usage', usage(conv_id=f'{ns}_missing')),
+        Step('conversation.turn_usage', usage(timestamp_lt=_TURN_TS + 1500)),
+        Step('conversation.turn_usage', usage(timestamp_gte=True)),
+        Step('conversation.turn_usage', usage(title_fallback_characters=257)),
+    ]}
+
+
 def _all_scripts() -> dict[str, list[Step]]:
     scripts = _record_scripts()
     scripts.update(_project_dispatch_scripts())
@@ -8873,6 +9032,8 @@ def _all_scripts() -> dict[str, list[Step]]:
     scripts.update(_conversation_diagnostic_scripts())
     scripts.update(_artifact_scripts())
     scripts.update(_turn_scripts())
+    scripts.update(_turn_projection_page_scripts())
+    scripts.update(_conversation_turn_usage_scripts())
     scripts.update(_provider_scripts())
     scripts.update(_model_routing_scripts())
     scripts.update(_system_scripts())
@@ -8941,6 +9102,13 @@ _ACTIVE_TASK_RESULTS_SCRIPTS = (
 # rationale; the suite asserts the divergence still exists so this manifest
 # ratchets to zero as the engines converge.
 KNOWN_DIVERGENCES: dict[str, str] = {
+    'turn.append_settled legacy route snapshot synthesis': (
+        'when an ingested settled projection names a model or provider, the '
+        'SQL authority adds a synthesized legacy routeSnapshot '
+        '(tofu.route-snapshot/v2, legacy, degradation legacy_turn_projection) '
+        'to the stored projection; Tofu-DB stores the projection as given. '
+        'Found 2026-11-08 while adding conversation.turn_usage, whose '
+        'compared output carries no routeSnapshot and matches exactly.'),
     'turn.domain foreign-owner payload identity': (
         'the legacy sidecar is a shared multi-owner process: a payload whose '
         'user_id names another owner is filtered by the operation itself and '
@@ -9307,6 +9475,16 @@ def test_operation_matches_legacy_authority(
     tofu_outcomes = _run_script(script, tofudb_daemon)
     for outcomes in (legacy_outcomes, tofu_outcomes):
         _assert_management_outcomes(script_name, outcomes)
+
+    if script_name == _PAYMENT_TIE_SCRIPT:
+        for outcomes in (legacy_outcomes, tofu_outcomes):
+            assert all(outcome.ok for _, outcome in outcomes)
+            assert [row['id'] for row in outcomes[0][1].value] == [
+                'pay-tie-c', 'pay-tie-b', 'pay-tie-a']
+            assert [row['id'] for row in outcomes[1][1].value] == [
+                'pay-tie-b', 'pay-tie-a']
+            assert all(row['created_at'] == 100
+                       for _, outcome in outcomes for row in outcome.value)
 
     if script_name == 'task_results reused identity admits only the current bound attempt':
         for outcomes in (legacy_outcomes, tofu_outcomes):
@@ -9700,6 +9878,45 @@ def test_integration_delivery_denial_survives_empty_patch_and_reregister(
         observed.append({key: value for key, value in
                          _integration_call(driver, 'get', registration).items()
                          if key != 'id'})
+    assert observed[0] == observed[1]
+
+
+@pytest.mark.parametrize('intent', ['cancelled', 'failed', 'stopped'])
+def test_integration_delivery_denial_binds_its_executor_generation(
+    legacy_driver, tofudb_daemon, intent,
+):
+    """A later attempt's fresh working receipt opens a new generation; stale writers drop."""
+    observed = []
+    for driver in (legacy_driver, tofudb_daemon):
+        registration = _integration_registration(
+            _OWNER_ID, f'/diff/delivery-generation/{intent}', 'project-worker:assignment',
+            f'/diff/delivery-generation/{intent}/checkout')
+        _integration_call(driver, 'register', registration, command=True)
+        _integration_call(driver, 'save_checkpoint', {
+            **registration, 'checkpoint_sha': 'b' * 40, 'now': 2.0,
+        }, command=True)
+
+        def meta(delivery, now):
+            return _integration_call(driver, 'set_meta', {
+                **registration, 'patch_json': json.dumps({'delivery': delivery}), 'now': now,
+            }, command=True)['origin']['delivery']
+
+        denied = {'taskOutcome': intent, 'state': 'preserved', 'executorTaskId': 'attempt-1'}
+        assert meta(denied, 3.0) == denied
+        for stale in ({'executorTaskId': 'attempt-1', 'taskOutcome': '', 'state': 'working'},
+                      {'executorTaskId': 'attempt-2', 'taskOutcome': 'completed', 'state': 'pending'},
+                      {'executorTaskId': 'attempt-2', 'taskOutcome': None, 'state': 'blocked'},
+                      {'executorTaskId': 7, 'taskOutcome': '', 'state': 'working'},
+                      {'taskOutcome': '', 'state': 'working'}):
+            assert meta(stale, 4.0) == denied
+        opened = {'executorTaskId': 'attempt-2', 'taskOutcome': None, 'state': 'working'}
+        assert meta(opened, 5.0) == opened
+        assert meta({**denied, 'reason': 'late'}, 6.0) == opened
+        settled = {**opened, 'taskOutcome': 'completed', 'state': 'pending'}
+        assert meta(settled, 7.0) == settled
+        _integration_call(driver, 'submit', {**registration, 'now': 8.0}, command=True)
+        observed.append({key: value for key, value in
+                         _integration_call(driver, 'get', registration).items() if key != 'id'})
     assert observed[0] == observed[1]
 
 

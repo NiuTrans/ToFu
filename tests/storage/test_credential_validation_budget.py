@@ -132,6 +132,36 @@ def test_failed_audit_touch_does_not_deny_or_create_a_retry_storm(
     assert len(writes.calls) == 1
 
 
+def test_audit_touch_never_waits_on_a_live_authority(monkeypatch, validation_module):
+    """Best-effort audit metadata declines the client's in-call wait.
+
+    The request authority was already validated; a slow writer defers the
+    touch instead of holding the authenticated request.
+    """
+    from lib.storage.retry import observe_storage_wait
+
+    class _StarvedWriteClient(_WriteClient):
+        def command(self, operation, payload, command_id, priority='user', deadline=None):
+            super().command(operation, payload, command_id, priority, deadline)
+            observe_storage_wait(StorageError('database_timeout', 'deadline_elapsed'))
+            return {'touched': True}
+
+    reads = _ReadClient(_row())
+    writes = _StarvedWriteClient()
+    _install_clients(monkeypatch, validation_module, reads, writes)
+    monkeypatch.setattr(validation_module.time, 'time', lambda: 1_000.0)
+    # The second request arrives after the failed-touch retry window but
+    # inside the ordinary touch interval.
+    monotonic_values = iter((100.0, 111.0))
+    monkeypatch.setattr(
+        validation_module.time, 'monotonic', lambda: next(monotonic_values))
+
+    assert validation_module.validate_token('tofu_live_valid') is not None
+    assert validation_module.validate_token('tofu_live_valid') is not None
+    # Each declined touch is deferred like a failed one and retried later.
+    assert len(writes.calls) == 2
+
+
 def test_recent_database_touch_suppresses_the_first_process_local_write(
     monkeypatch, validation_module,
 ):

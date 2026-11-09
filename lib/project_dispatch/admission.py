@@ -6,6 +6,8 @@ Coordinator grants carry no spend ceiling: occurrences are recorded and missing
 receipts stay lower bounds. Earlier finite grants keep their recorded ceilings.
 """
 from __future__ import annotations
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -18,8 +20,11 @@ from lib.log import get_logger
 from lib.tools.execution_timing import timing_phase
 
 KEY = '_projectDispatchAdmission'
+# A Coordinator follow-up's witness: the settled attempt whose association it continues.
+FOLLOW_UP_KEY = '_projectDispatchFollowUp'
 WORKSPACE_TASK_KEY = '_projectDispatchWorkspaceTaskId'
 ROOT_TASK_KEY = '_projectDispatchRootTask'
+ROLE_KEY = '_projectDispatchRole'
 logger = get_logger(__name__)
 
 
@@ -94,7 +99,7 @@ def stop_on_authority_failure(task, error):
     if event is not None:
         event.set()
     logger.warning('[ProjectDispatch] authority stopped task=%s reason=%s: %s',
-                   str(task.get('id') or '?')[:8], reason, error)
+                   str(task.get('id') or '?'), reason, error)
 
 
 def repository_for(binding):
@@ -169,6 +174,61 @@ def requires_isolated_workspace(task):
     return profile_for(assignment)['mode'] in ('files', 'project')
 
 
+class DispatchAdmission:
+    """One live validation of a bound dispatch root, shared by every gate of one admission.
+
+    ``admit_dispatch`` makes it. A tool batch hands it to the calls it admitted
+    and ``admitted_call`` to one call's nested gates; a gate passes it back to
+    ``validated_dispatch``, which rechecks the task's in-memory carrier, identity
+    and account against its row and reads no storage. It is never stored on a
+    task or reused by a later admission: the tool intent (the effect fence),
+    model intents, descriptor I/O and every new admission validate live.
+    """
+    __slots__ = ('root', 'binding', 'assignment', '_workspace')
+
+    def __init__(self, root, binding, assignment):
+        self.root = root
+        self.binding = deepcopy(binding)
+        self.assignment = assignment
+        self._workspace = None
+
+    def covers(self, task):
+        """Whether this admission validated ``task``'s own root and its unchanged carrier."""
+        return (dispatch_root(task) is self.root
+                and (self.root.get('config') or {}).get(KEY) == self.binding)
+
+    def registered_workspace(self, task):
+        """The root's registered workspace row, resolved at most once per admission."""
+        if self._workspace is None:
+            self._workspace = owned_workspace(task, self.binding)
+        return self._workspace
+
+
+_CALL_ADMISSION = ContextVar('project_dispatch_call_admission', default=None)
+
+
+@contextmanager
+def admitted_call(admission):
+    """Make ``admission`` the one every dispatch gate nested in this call decides from."""
+    token = _CALL_ADMISSION.set(admission)
+    try:
+        yield admission
+    finally:
+        _CALL_ADMISSION.reset(token)
+
+
+def call_admission(task):
+    """The admission of the call executing now, when it validated ``task``'s own root."""
+    admission = _CALL_ADMISSION.get()
+    if admission is None or not isinstance(task, dict) or not is_dispatch_task(task):
+        return None
+    try:
+        return admission if admission.covers(task) else None
+    except AbortedError:
+        # A sub-agent that no longer shares its Worker validates live and fails there.
+        return None
+
+
 def owned_workspace(task, binding=None):
     """Neither config, cwd nor a cached receipt can transfer a worktree."""
     task = dispatch_root(task)
@@ -201,21 +261,44 @@ def owned_workspace(task, binding=None):
 class WorkerWorkspaceUnavailable(ValueError):
     """The project root cannot host the isolated Git checkout every worker needs.
 
-    The refusal stays true until the human changes the project, so it carries
-    its own Coordinator recovery instead of the generic retry advice.
+    The refusal stays true until the human acts, so it carries its own
+    Coordinator recovery instead of the generic retry advice. ``code`` and
+    ``details`` (the owner's question for ``ambiguous_project_root``) reach the
+    Coordinator in its tool result.
     """
     execution_started = False
-    recovery = ('No worker was created. Delegating again fails the same way until the human '
-                'changes the project root; report this blocker and its remedy to the human '
-                'instead of retrying.')
+    _RECOVERY = {
+        'ambiguous_project_root': (
+            'No worker was created and nothing was written into the folder. Only the owner '
+            'can answer this: ask them the question in details (recommended answer: shared) '
+            'and report it as a blocker; once Tofu has prepared the folder with their answer, '
+            'delegate again. Delegating before that fails the same way.'),
+        'volume_stalled': (
+            'No worker was created. The project folder\'s storage stopped responding while Tofu '
+            'prepared it; delegate again once it responds, and preparation resumes where it '
+            'stopped. If it keeps stalling, report the blocker to the human.'),
+    }
+
+    def __init__(self, message: str, *, code: str = 'unsupported_root', details: dict | None = None):
+        super().__init__(message)
+        self.code, self.details = code, details
+        self.recovery = self._RECOVERY.get(code, (
+            'No worker was created. Delegating again fails the same way until the human '
+            'changes the project root; report this blocker and its remedy to the human '
+            'instead of retrying.'))
 
 
-def require_isolated_worker_root(project_path):
-    """Refuse delegation before any worker conversation or grant exists."""
+def require_isolated_worker_root(project_path, *, cancel=None, progress=None):
+    """Refuse delegation before any worker conversation or grant exists.
+
+    Preparing the root can take as long as a large folder's volume needs;
+    ``progress`` observes each advance and ``cancel`` is the caller's Stop.
+    """
     from lib.tasks_pkg.workspace_delivery import isolated_workspace_refusal
-    refusal = isolated_workspace_refusal(project_path)
+    refusal = isolated_workspace_refusal(project_path, cancel=cancel, progress=progress)
     if refusal is not None:
-        raise WorkerWorkspaceUnavailable(refusal.message())
+        raise WorkerWorkspaceUnavailable(refusal.message(), code=refusal.code,
+                                         details=refusal.details)
 
 
 
@@ -262,8 +345,14 @@ def unbounded_dispatch(assignment):
 
 @dataclass(frozen=True)
 class TrustedDispatch:
-    """Internal keyword-only authority; a public config cannot instantiate it."""
+    """Internal keyword-only authority; a public config cannot instantiate it.
+
+    ``follows`` pins a Coordinator follow-up: the exact settled association
+    (``execution``) its new Turn continues from, and the predecessor attempt
+    (``source``) its accepted config carries as the account's witness.
+    """
     binding: dict
+    follows: dict | None = None
 
     def checked(self):
         return repository_for(self.binding).validate(self.binding)
@@ -294,6 +383,8 @@ class TrustedDispatch:
             'model': assignment['request']['model'], 'executionLimits': execution_limits(assignment),
             'planMode': False, 'autopilot': False, 'activeFlow': '', 'humanGuidanceEnabled': asks_human(profile),
             'autoTranslate': False})
+        if self.follows is not None:
+            config[FOLLOW_UP_KEY] = deepcopy(self.follows['source'])
         if profile['mode'] != 'project':
             config['tools'] = {**config.get('tools', {}), 'programmaticCalling': 'off'}
         if profile['mode'] not in ('project', 'coordinator'):
@@ -316,8 +407,10 @@ class TrustedDispatch:
             return self.bind_execution(turn_id, attempt_id)
         if execution['attemptId'] == attempt_id and execution['turnId'] == turn_id:
             return assignment
+        # A follow-up advances only from the association its Coordinator read.
+        previous = execution if self.follows is None else self.follows['execution']
         return repository_for(self.binding).continue_execution(
-            self.binding['assignmentId'], execution, turn_id, attempt_id)
+            self.binding['assignmentId'], previous, turn_id, attempt_id)
 
     @property
     def repository(self):
@@ -334,6 +427,51 @@ class TrustedDispatch:
             if predecessor and predecessor.get('taskId'):
                 return predecessor['taskId']
         return 'project-worker:' + self.binding['assignmentId']
+
+
+# A dispatch birth's command id is ``project-dispatch:<assignment>``; storage
+# names its output Turn's presentation after it (service._dispatch).
+DISPATCH_OUTPUT_PRESENTATION = ('project-dispatch:', ':output')
+
+
+def turn_dispatch(conversation_id, turn, accepted_config, *, user_id):
+    """The grant a new Attempt of ``turn`` runs under, or ``None`` for an ordinary Turn.
+
+    A dispatched Attempt carries its grant in its accepted config. An Attempt
+    that ran unbound (a browser Continue accepted before the UI path bound
+    Worker Turns) does not, yet its Turn is still the assignment's bound output
+    Turn: the birth's presentation locates the assignment, and only an
+    association naming this exact Turn of this recipient conversation lends its
+    grant. A locator never grants authority; callers still validate the grant.
+    """
+    carried = accepted_config.get(KEY) if isinstance(accepted_config, Mapping) else None
+    if isinstance(carried, Mapping):
+        return TrustedDispatch(deepcopy(dict(carried)))
+    prefix, suffix = DISPATCH_OUTPUT_PRESENTATION
+    presentation = turn.get('presentationId') if isinstance(turn, Mapping) else None
+    if (not isinstance(presentation, str) or not presentation.startswith(prefix)
+            or not presentation.endswith(suffix)
+            or len(presentation) <= len(prefix) + len(suffix)):
+        return None
+    from lib.conversations.project_identity import normalize_project_path
+    from lib.conversations.repository import ConversationRepository
+    from .repository import ProjectDispatchRepository
+    snapshot = ConversationRepository().get(conversation_id, user_id=user_id, include_messages=False)
+    metadata = getattr(snapshot, 'metadata', snapshot)
+    settings = metadata.get('settings') if isinstance(metadata, Mapping) else None
+    project = ((settings.get('canonicalProjectPath') or settings.get('projectPath'))
+               if isinstance(settings, Mapping) else None)
+    if not isinstance(project, str) or not project.strip():
+        return None
+    repository = ProjectDispatchRepository(user_id, normalize_project_path(project.strip()))
+    assignment_id = presentation[len(prefix):-len(suffix)]
+    # Absence means an ordinary Turn; every read failure still propagates.
+    assignment = next((row for row in repository.list() if row['id'] == assignment_id), None)
+    execution = (assignment or {}).get('execution') or {}
+    if (assignment is None or assignment['request']['recipientId'] != conversation_id
+            or execution.get('turnId') != turn.get('turnId')):
+        return None
+    return TrustedDispatch(repository.admission(assignment_id))
 
 
 def continue_recovered_execution(config, turn_id, attempt_id):
@@ -356,12 +494,17 @@ def restore_dispatch_identity(config, *, task=None):
     return principal, attended
 
 
-def _restored_identity(config, *, task=None):
-    """The restored identity plus the assignment row its one live validation returned."""
+def _restored_identity(config, *, task=None, admission=None):
+    """The restored identity plus the assignment row its one live validation returned.
+
+    With ``admission`` the row and the registered workspace are that admission's;
+    only the config fences below run again.
+    """
     binding = config.get(KEY)
     if not isinstance(binding, dict):
         raise PermissionError('Malformed project dispatch authorization')
-    assignment = repository_for(binding).validate(binding)
+    assignment = (repository_for(binding).validate(binding) if admission is None
+                  else admission.assignment)
     runtime_path = config.get('projectPath')
     profile = profile_for(assignment)
     if (config.get('_turnOwnerUserId') != binding['owner']
@@ -379,7 +522,10 @@ def _restored_identity(config, *, task=None):
     if runtime_path != binding['projectPath']:
         if task is None or profile['mode'] not in ('files', 'project'):
             raise PermissionError('Project dispatch project path differs from its accepted grant')
-        owned_workspace(task, binding)
+        if admission is None:
+            owned_workspace(task, binding)
+        else:
+            admission.registered_workspace(task)
     if profile['mode'] in ('project', 'coordinator'):
         original = assignment['request']['delegation']['policy']['config']
         # humanGuidanceEnabled is fenced exactly above: the shared policy config
@@ -394,11 +540,11 @@ def _restored_identity(config, *, task=None):
     return principal_for(binding), False, assignment
 
 
-def is_file_dispatch_task(task):
+def is_file_dispatch_task(task, *, admission=None):
     """Only descriptor-confined file grants use the fixed first-party handler."""
     if not is_dispatch_task(task):
         return False
-    _, assignment = validated_dispatch(task)
+    _, assignment = validated_dispatch(task, admission=admission)
     return profile_for(assignment)['mode'] == 'files'
 
 
@@ -409,22 +555,27 @@ def is_dispatch_task(task):
             and str(payload.get('subject_id', '')).startswith('project-dispatch:'))
 
 
-def validate_task(task, *, require_account=True):
+def validate_task(task, *, require_account=True, admission=None):
     """Re-establish the bound authority; a failure also stops the task with its cause."""
-    validated = validated_dispatch(task, require_account=require_account)
+    validated = validated_dispatch(task, require_account=require_account, admission=admission)
     return None if validated is None else validated[0]
 
 
-def validated_dispatch(task, *, require_account=True):
+def validated_dispatch(task, *, require_account=True, admission=None):
     """``validate_task`` that also returns the assignment row its single validation read.
 
-    The row serves only the caller's current decision (its immutable request and
+    The row serves only the caller's current admission (its immutable request and
     execution association); it is never retained, so every later admission
-    validates live authority again.
+    validates live authority again. ``admission`` is the ``DispatchAdmission``
+    this same admission already made: deciding from it rechecks the task's
+    in-memory carrier, identity and account and reads no storage. Without one,
+    or for a task or carrier it did not validate, the grant is validated live.
     """
     if not is_dispatch_task(task):
         return None
     try:
+        if admission is not None and admission.covers(task):
+            return _validated_binding(task, require_account=require_account, admission=admission)
         with timing_phase('dispatch_authority'):
             return wait_for_dispatch(task,
                 lambda: _validated_binding(task, require_account=require_account),
@@ -434,19 +585,37 @@ def validated_dispatch(task, *, require_account=True):
         raise
 
 
-def _validated_binding(task, *, require_account):
+def admit_dispatch(task):
+    """One live validation of ``task``'s grant, shared by every gate of this admission.
+
+    Returns the ``DispatchAdmission`` (``None`` for a task without dispatch
+    authority); a failure stops the task with its cause, as ``validated_dispatch``.
+    """
+    validated = validated_dispatch(task)
+    if validated is None:
+        return None
+    binding, assignment = validated
+    return DispatchAdmission(dispatch_root(task), binding, assignment)
+
+
+def _validated_binding(task, *, require_account, admission=None):
+    """``(binding, assignment)`` of one validation.
+
+    ``admission`` (one that covers ``task``) supplies the row, registered
+    workspace and bound-executor verdict; every in-memory fence below still runs.
+    """
     config = task.get('config') or {}
     if not is_dispatch_task(task):
         return None
     root = dispatch_root(task)
     if root is not task:
-        return _validated_binding(root, require_account=require_account)
+        return _validated_binding(root, require_account=require_account, admission=admission)
     if KEY not in config:
         raise AbortedError('Project dispatch lost its accepted grant carrier')
     try:
         # The validated row is current evidence: its association is immutable once
         # bound, and binding precedes executor birth, so a reread cannot differ.
-        principal, attended, assignment = _restored_identity(config, task=task)
+        principal, attended, assignment = _restored_identity(config, task=task, admission=admission)
     except Exception as error:
         raise AbortedError(f'Project dispatch authority is no longer available: {error}') from error
     execution = assignment['execution']
@@ -457,7 +626,8 @@ def _validated_binding(task, *, require_account):
             or task.get('convId') != config[KEY]['recipientId']
             or task.get('_parentTaskId') or task.get('aborted')):
         raise AbortedError('Project dispatch task identity is no longer authorized')
-    if require_account:
+    # An admission validated its bound executor live (admit_dispatch requires the account).
+    if require_account and admission is None:
         repository = repository_for(config[KEY])
         if repository.attempt_get is None:
             from lib.turn_lifecycle import get_attempt
@@ -476,12 +646,43 @@ def _validated_binding(task, *, require_account):
     return config[KEY], assignment
 
 
+def granted_coordinator_scope(task):
+    """``(bound, scope)``: the Coordinator scope the grant ``bind_account`` validated fixed.
+
+    ``bound`` is False for a task that never bound its account. The scope (None
+    for a Worker, consultation or file grant) comes from request and grant
+    fields no mutation can change, so it reads no storage; live authority stays
+    with the admissions that fence effects (model dispatch intents, tool
+    admission). A carrier that no longer matches the bound grant is lost
+    authority and stops the task.
+    """
+    role = task.get(ROLE_KEY)
+    if role is None:
+        return False, None
+    if (task.get('config') or {}).get(KEY) != role['binding']:
+        error = AbortedError('Project dispatch lost its accepted grant carrier')
+        stop_on_authority_failure(task, error)
+        raise error
+    return True, (None if role['coordinatorScope'] is None else dict(role['coordinatorScope']))
+
+
+def _granted_role(binding, assignment):
+    request, grant = assignment['request'], assignment['grant']
+    scope = None
+    if profile_for(assignment)['mode'] == 'coordinator':
+        scope = {'project_path': request['projectPath'], 'binding_revision': grant['bindingRevision'],
+                 'conversation_id': request['coordinatorId'], 'user_id': grant['owner']}
+    return {'binding': deepcopy(binding), 'coordinatorScope': scope}
+
+
 def bind_account(task):
-    binding = validate_task(task, require_account=False)
-    if binding is None:
+    validated = validated_dispatch(task, require_account=False)
+    if validated is None:
         return
+    binding, validated_row = validated
 
     task['_projectDispatchBinding'] = deepcopy(binding)
+    task[ROLE_KEY] = _granted_role(binding, validated_row)
     from lib.agent_core.execution_budget import _ensure_execution_budget
     budget = _ensure_execution_budget(task)
 
@@ -497,7 +698,11 @@ def bind_account(task):
     work_id = repository_for(binding).workspace_task_id(assigned)
     task[WORKSPACE_WORK_ID_KEY] = work_id
 
-    resume = (task.get('config') or {}).get('_resumeSource') or {}
+    # A Coordinator follow-up starts a new Turn, so storage issues it no
+    # _resumeSource; its accepted witness names the settled predecessor instead.
+    config = task.get('config') or {}
+    follow_up = config.get(FOLLOW_UP_KEY) if not config.get('_resumeSource') else None
+    resume = config.get('_resumeSource') or follow_up or {}
     account_nonce = next((row['account_nonce'] for row in assigned.get('modelAttempts', [])
                           if row.get('account_nonce')), None) if resume else None
     if account_nonce is None and resume:
@@ -507,20 +712,23 @@ def bind_account(task):
         account_nonce = uuid.uuid4().hex
     shared_id = assigned['request'].get('delegation', {}).get('policy', {}).get('requestBudgetId')
     limited = not unbounded_dispatch(assigned)
-    # An admitted restart Continue of this same root continues its stored ordinals.
+    # Every successor Attempt of the bound Turn continues the assignment's one
+    # account, whatever settled its predecessor. task_start supplies the
+    # authority-issued _resumeSource through restore_accepted_attempt_config.
     execution = assigned.get('execution') or {}
-    restarted = ((task.get('config') or {}).get('_turnOperation') in (
-                     'continue', 'checkpoint_resume', 'answer_guidance')
-                 and resume.get('cause') == 'server_restart'
-                 and bool(resume.get('attemptId'))
-                 and resume.get('attemptId') != execution.get('attemptId'))
-    if restarted:
+    continued = bool(resume.get('attemptId')) and resume.get('attemptId') != execution.get('attemptId')
+    if continued:
+        from lib.turn_lifecycle import LIVE_ATTEMPT_STATUSES
         predecessor = repository_for(binding).get_attempt(resume['attemptId'])
         if (not isinstance(predecessor, Mapping)
-                or predecessor.get('turnId') != execution.get('turnId')
+                or predecessor.get('attemptId') != resume['attemptId']
+                or predecessor.get('taskId') != resume.get('taskId')
+                or predecessor.get('turnId') != (resume.get('turnId') if follow_up else execution.get('turnId'))
                 or predecessor.get('conversationId') != assigned['request']['recipientId']
-                or predecessor.get('status') != 'interrupted'):
-            raise AbortedError('Project dispatch resume source is not its interrupted predecessor')
+                or not predecessor.get('status') or predecessor['status'] in LIVE_ATTEMPT_STATUSES
+                or predecessor.get('status') != resume.get('status')):
+            raise AbortedError('Project dispatch %s source differs from its settled predecessor'
+                               % ('follow-up' if follow_up else 'resume'))
 
     def observe_reservation(event):
         validate_task(task)
@@ -542,7 +750,7 @@ def bind_account(task):
             stored = row.get('toolReservations')
             if stored is None:
                 row['toolReservations'] = counter
-            elif stored != counter and not (restarted and {**stored, 'count': 0} == counter):
+            elif stored != counter and not (continued and {**stored, 'count': 0} == counter):
                 raise AbortedError('Worker tool reservations cannot be replenished')
         registered = wait_for_dispatch(task,
             lambda: repository_for(binding).mutate(binding['assignmentId'], register_counter),
@@ -597,8 +805,10 @@ def bind_account(task):
     active_tools = set()
 
     def observe_tool(event):
+        from .repository import DispatchGrantRevoked
         if event['phase'] == 'intent':
-            validate_task(task)
+            # The call's own admission decided this effect; recheck the live task only.
+            validate_task(task, admission=call_admission(task))
         selected = {key: event[key] for key in ('tool_ordinal', 'task_id',
                     'tool_call_id', 'tool_name', 'phase')}
         selected.update(root_task_id=work_id, account_nonce=account_nonce)
@@ -619,6 +829,12 @@ def bind_account(task):
                     raise AbortedError('Tool occurrence is already terminal')
                 old.update(deepcopy(selected))
             elif selected['phase'] == 'intent':
+                # Exact invalidation of the shared admission, keyed to this
+                # authoritative row: no intent is recorded under a revised grant.
+                if row['grant']['revoked'] or row['grant']['revision'] != binding['revision']:
+                    raise DispatchGrantRevoked(
+                        f'Grant revoked (assignment {row["id"]}, Coordinator conversation '
+                        f'{row["request"]["coordinatorId"]})')
                 # Distinct refusals: a Coordinator must not read an unconfirmed
                 # effect as a call budget (none exists unless maxToolCalls is set).
                 if selected['tool_name'] not in granted_tools(profile):
@@ -648,23 +864,30 @@ def bind_account(task):
                 lambda: repository_for(binding).mutate(binding['assignmentId'], record),
                 label='project dispatch tool occurrence',
                 cancellable=event['phase'] == 'intent')
+        except DispatchGrantRevoked as error:
+            stop_on_authority_failure(task, error)
+            raise AbortedError(f'Project dispatch authority is no longer available: {error}') from error
         finally:
             if event['phase'] != 'intent':
                 active_tools.discard(event['tool_ordinal'])
         if event['phase'] == 'intent':
+            # The effect fence: one live validation once the intent is durable.
             validate_task(task)
             active_tools.add(event['tool_ordinal'])
     budget.bind_model_attempt_observer(observe, tool_observer=observe_tool,
         tool_reservation_observer=observe_reservation if shared_id else None)
-    if restarted:
+    if continued:
         tokens, _, complete = holder_consumption(assigned)
         ordinal = max([0, *[row['attempt_ordinal'] for row in assigned.get('modelAttempts', [])],
                        *assigned.get('settledModelUsage', {}).get('watermarks', {}).values()])
-        budget.restore_model_account(
-            root_task_id=task['id'], consumed_tokens=tokens,
-            last_attempt_ordinal=ordinal, usage_complete=complete)
         tool_ordinal = max([0, *[row['tool_ordinal'] for row in assigned.get('toolAttempts', [])],
                             *assigned.get('settledToolUsage', {}).get('watermarks', {}).values()])
-        budget.restore_tool_account(root_task_id=task['id'], last_tool_ordinal=tool_ordinal,
-                                    last_reservation_ordinal=reservations)
+        # An account with no recorded occurrence has nothing to continue; it
+        # starts like a first attempt, so a finite legacy cap is not refused.
+        if tokens or ordinal or tool_ordinal or reservations or not complete:
+            budget.restore_model_account(
+                root_task_id=task['id'], consumed_tokens=tokens,
+                last_attempt_ordinal=ordinal, usage_complete=complete)
+            budget.restore_tool_account(root_task_id=task['id'], last_tool_ordinal=tool_ordinal,
+                                        last_reservation_ordinal=reservations)
     task['_projectDispatchAccountId'] = id(budget)

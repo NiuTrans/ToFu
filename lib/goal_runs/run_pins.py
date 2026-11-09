@@ -59,14 +59,14 @@ def clear_run_id(conv_id: str, *, user_id: int) -> None:
             if not changed:
                 return False  # nothing to clear; skip the write
             logger.info('[Autopilot] conv=%s cleared runId+budget '
-                        '(run concluded; objective pin retained)', conv_id[:8])
+                        '(run concluded; objective pin retained)', conv_id)
             return None
 
         # notify=False: clearing internal run pins/counters is not rendered.
         update_conversation_settings(
             conv_id, _mut, user_id=user_id, notify=False)
     except Exception as e:
-        logger.debug('[Autopilot] clear_run_id failed conv=%s: %s', conv_id[:8], e)
+        logger.debug('[Autopilot] clear_run_id failed conv=%s: %s', conv_id, e)
 
 
 # ── Run resolvers (DB reads) ────────────────────────────────────────
@@ -190,7 +190,7 @@ def resolve_recent_run_id(conv_id: str, *, user_id: int) -> str:
         )
     except Exception as e:
         logger.debug('[Autopilot] resolve_recent_run_id failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
     return ''
 
 
@@ -237,7 +237,7 @@ def resolve_run_anchor_turn_id(
         return anchor
     except Exception as e:
         logger.debug('[Autopilot] resolve_run_anchor_turn_id failed conv=%s run=%s: %s',
-                     conv_id[:8], run_id, e)
+                     conv_id, run_id, e)
         return ''
 
 
@@ -284,7 +284,7 @@ def update_objective_from_receipt(
             out['updated'] = True
             logger.info('[Autopilot] conv=%s objective re-pinned from L2 '
                         'receipt (%d → %d chars)',
-                        conv_id[:8], len(existing), len(objective))
+                        conv_id, len(existing), len(objective))
             return None
 
         # notify=False: same internal-bookkeeping convention as the mint path.
@@ -295,5 +295,5 @@ def update_objective_from_receipt(
         return out['updated']
     except Exception as e:
         logger.warning('[Autopilot] objective re-pin failed conv=%s: %s',
-                       conv_id[:8], e)
+                       conv_id, e)
         return False

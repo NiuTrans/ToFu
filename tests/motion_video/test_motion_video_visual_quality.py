@@ -176,6 +176,13 @@ def test_engine_records_gate_findings_on_the_quality_axis(tmp_path, monkeypatch)
     from lib.motion_video import engine
     from tests.motion_video.test_motion_video_workflow import _film
 
+    monkeypatch.setattr('lib.motion_video._env.motion_root',
+                        lambda: str(tmp_path / 'empty-runtime-cache'))
+
+    def refuse_network(*args, **kwargs):
+        raise AssertionError('synthetic media must not download browser dependencies')
+
+    monkeypatch.setattr('lib.http_transport.client.http_get', refuse_network)
     task, _ = _film(tmp_path, monkeypatch)
     finding = 'fixture text overflows its container'
     monkeypatch.setattr(mv, 'check_project', lambda *args, **kwargs: {

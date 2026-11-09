@@ -51,8 +51,8 @@ async def chat_tool_state(conv_id):
             return api_ok({'skipped': True})
 
         logger.debug('[ToolState] conv=%s patched %d keys: %s',
-                     conv_id[:8], len(data), list(data.keys())[:10])
+                     conv_id, len(data), list(data.keys())[:10])
         return api_ok()
     except Exception as e:
-        logger.error('[ToolState] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
+        logger.error('[ToolState] Failed for conv=%s: %s', conv_id, e, exc_info=True)
         return api_internal_error('internal_error')

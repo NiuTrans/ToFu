@@ -164,6 +164,18 @@ class CookieBridgeRobolectricTest {
         assertEquals(2, opened.size)
     }
 
+    @Test fun credential_bearing_health_urls_refuse_before_cookie_or_http_access() {
+        var requests = 0
+        var cookieReads = 0
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { requests++; error("unsafe URL reached HTTP") }.build()
+        val probe = HealthProbe(http = http, cookieProvider = { cookieReads++; null })
+        val outcome = probe.probe("$origin/proxy/15000/?token=fixture-value")
+        assertEquals(TofuProbe.Verdict.UNREACHABLE, outcome.verdict)
+        assertEquals(0, requests)
+        assertEquals(0, cookieReads)
+        assertFalse(outcome.detail.contains("fixture-value"))
+    }
+
     @Test
     fun the_local_credential_lands_in_the_jar_for_127_0_0_1_only() {
         val secret = "tofu_admin_" + "ef".repeat(32)
@@ -200,6 +212,36 @@ class CookieBridgeRobolectricTest {
         assertTrue(urlClient.shouldOverrideUrlLoading(webView, fakeMainFrameRequest("http://127.0.0.1:8000/", gesture = true)))
         assertEquals(listOf(android.net.Uri.parse("http://127.0.0.1:8000/")), opened)
         assertEquals(null, urlClient.shouldInterceptRequest(webView, fakeMainFrameRequest("$origin/proxy/15000/app.js", main = false)))
+    }
+
+    @Test fun updates_do_not_read_the_live_local_or_ssh_cookie_jars() {
+        val secret = "tofu_admin_" + "ab".repeat(32)
+        LocalKernelCookie.install(CookieBridge, KernelEndpoint("http://127.0.0.1:43567/", "127.0.0.1"), secret)
+        val sshCookie = okhttp3.Cookie.Builder().name("ssh_session").value("fixture-ssh-secret")
+            .hostOnlyDomain("127.0.0.2").path("/").build()
+        CookieBridge.inject("http://127.0.0.2:41234/", listOf(sshCookie))
+        var reads = 0
+        var requests = 0
+        val observingCookies = object : CookieSink {
+            override fun inject(origin: String, cookies: List<okhttp3.Cookie>) = CookieBridge.inject(origin, cookies)
+            override fun purgeHost(host: String) = CookieBridge.purgeHost(host)
+            override fun cookieHeader(origin: String): String? { reads++; return CookieBridge.cookieHeader(origin) }
+        }
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { requests++; error("reserved host reached HTTP") }.build()
+        val probe = UpdateProbe(http = http, cookies = observingCookies)
+        try {
+            for (url in listOf("http://127.0.0.1:9999/", "http://127.1:9999/", "http://127.0.0.2:9999/", "http://127.2:9999/")) {
+                assertEquals(null, probe.advertised(url))
+            }
+            assertEquals("do not consult an installed cookie at any port", 0, reads)
+            assertEquals(0, requests)
+            assertTrue(CookieManager.getInstance().getCookie("http://127.0.0.1:43567/").orEmpty().contains(secret))
+            assertTrue(CookieManager.getInstance().getCookie("http://127.0.0.2:41234/").orEmpty().contains("fixture-ssh-secret"))
+        } finally {
+            probe.close()
+            http.connectionPool.evictAll()
+            http.dispatcher.executorService.shutdown()
+        }
     }
 
     private fun fakeMainFrameRequest(

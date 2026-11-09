@@ -91,7 +91,7 @@ def inject_context_and_emit_chips(
             ``_tool_names``).
         prefetch_executor: The prefetch pool started before Section 2; this
             function shuts it down after inject.
-        tid: The short task id (``task['id'][:8]``).
+        tid: The task's log tag (``task_log_tag(task['id'])``).
         t_run_start: Monotonic start-of-run anchor (for the prep timing line).
         vu_phase: Optional callback accepting ``detail`` plus the structured
             ``detail_key`` keyword. The run_task adapter owns the VU-only gate;

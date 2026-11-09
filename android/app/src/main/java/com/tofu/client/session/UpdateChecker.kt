@@ -1,93 +1,130 @@
 package com.tofu.client.session
 
+import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import okhttp3.CookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The network half of the update check: one `GET {base}/api/health`, whose
- * `mobile_client_version` / `mobile_client_url` fields advertise the newest
- * published Android client. Pure of Android APIs (only OkHttp), so it is
- * exercised by the fast JDK tier via an injected interceptor.
- *
- * `/api/health` is a public liveness path, so this needs no credential and
- * works even for a server the user has not signed in to yet.
+ * Health is public inside Tofu, not necessarily outside the selected gateway.
+ * Select cookies for the full endpoint, disable redirects/automatic cookie jars
+ * and reuse authentication's bounded decoded-body/cancellable socket boundary.
  */
-class UpdateProbe(http: OkHttpClient = defaultClient(), private val diagnostics: DiagLog? = null) {
-    private val http = DiagnosticHttp.attach(http, diagnostics, "UpdateHttp")
+class UpdateProbe(
+    http: OkHttpClient? = null,
+    private val diagnostics: DiagLog? = null,
+    private val cookies: CookieSink = CookieBridge,
+) : java.io.Closeable {
+    private val ownsHttp = http == null
+    private val closed = AtomicBoolean(false)
+    private val http = DiagnosticHttp.attach(http ?: defaultClient(), diagnostics, "UpdateHttp").newBuilder()
+        .followRedirects(false).followSslRedirects(false).cookieJar(CookieJar.NO_COOKIES)
+        .callTimeout(PROBE_DEADLINE_SECONDS, TimeUnit.SECONDS).build()
 
-    /** Probe one server; never throws, returns null when unavailable/absent. */
-    fun advertised(baseUrl: String): AdvertisedClient? {
+    private fun request(baseUrl: String): Request? {
+        // Refuse legacy URL rows on either credential host before reading the
+        // WebView jar or creating a call. Cookies ignore ports and the WebView
+        // canonicalizes alternative IPv4 spellings, unlike OkHttp.
+        if (!acceptsRemoteUrl(baseUrl)) return null
         val server = ServerUrl.parse(baseUrl) ?: return null
-        val request = Request.Builder().url(server.endpoint("api/health")).get().build()
-        return try {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
-                UpdateCheck.parseAdvertised(response.body?.string())
-            }
-        } catch (e: Exception) {
-            diagnostics?.exception("Update", e)
-            null
+        val endpoint = server.endpoint("api/health")
+        return Request.Builder().url(endpoint).get().apply {
+            header("Accept", "application/json")
+            cookies.cookieHeader(endpoint)?.takeIf { it.isNotBlank() }?.let { header("Cookie", it) }
+        }.build()
+    }
+
+    /** Synchronous test seam; production uses the cancellable variant. */
+    fun advertised(baseUrl: String): AdvertisedClient? = try {
+        val request = request(baseUrl)
+        if (request == null) null else http.newCall(request).execute().use(::advertisement)
+    } catch (error: CancellationException) { throw error }
+      catch (error: Exception) { failed(error); null }
+
+    suspend fun advertisedCancellable(baseUrl: String): AdvertisedClient? = try {
+        currentCoroutineContext().ensureActive()
+        val request = request(baseUrl)
+        if (request == null) null else http.newCall(request).awaitBounded(MAX_RESPONSE_BYTES).use(::advertisement)
+    } catch (error: CancellationException) { throw error }
+      catch (error: Exception) { failed(error); null }
+
+    private fun advertisement(response: Response): AdvertisedClient? {
+        if (!response.isSuccessful) return null
+        val type = response.body?.contentType()?.subtype ?: return null
+        if (type != "json" && !type.endsWith("+json")) return null
+        val body = response.readBoundedBody(MAX_RESPONSE_BYTES)?.trim() ?: return null
+        if (!body.startsWith('{') || !body.endsWith('}')) return null
+        return UpdateCheck.parseAdvertised(body)
+    }
+
+    private fun failed(error: Exception) {
+        diagnostics?.record("W", "Update", "health probe failed: ${error.javaClass.simpleName}")
+    }
+
+    /** Injected clients remain their caller's responsibility. */
+    override fun close() {
+        if (ownsHttp && closed.compareAndSet(false, true)) {
+            http.dispatcher.cancelAll()
+            http.connectionPool.evictAll()
+            http.dispatcher.executorService.shutdown()
         }
     }
 
     companion object {
+        private const val MAX_RESPONSE_BYTES = NATIVE_HTTP_RESPONSE_MAX_BYTES
+        private const val PROBE_DEADLINE_SECONDS = 8L
+        private const val SSH_FORWARD_COOKIE_ADDRESS = 0x7F00_0002L
+
+        internal fun acceptsRemoteUrl(baseUrl: String): Boolean {
+            if (ServerUrl.storageError(baseUrl) != null) return false
+            val server = ServerUrl.parse(baseUrl) ?: return false
+            return !LocalKernelCookie.isReservedHost(server.host) &&
+                LocalKernelCookie.ipv4(server.host.lowercase()) != SSH_FORWARD_COOKIE_ADDRESS
+        }
+
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            // Short: this runs in the background on list open and must never
-            // stall the UI on a dead server.
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(4, TimeUnit.SECONDS)
-            .build()
+            .connectTimeout(4, TimeUnit.SECONDS).readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(PROBE_DEADLINE_SECONDS, TimeUnit.SECONDS)
+            .followRedirects(false).followSslRedirects(false).cookieJar(CookieJar.NO_COOKIES).build()
     }
 }
 
-/**
- * Compares the installed app against every server the user has, keeping the
- * newest advertised version. Probing all of them (rather than guessing "the"
- * server) matters because a user can point at a stale sandbox while their
- * primary server carries the released client.
- *
- * The [probe] seam is a plain function so the aggregation is unit-testable with
- * no network; production passes [UpdateProbe].
- */
+/** Only saved REMOTE_URL servers advertise updates; failed/unsafe rows remain unknown. */
 class UpdateChecker(
     private val installedName: String,
-    private val probe: (String) -> AdvertisedClient? = UpdateProbe()::advertised,
+    private val probe: suspend (String) -> AdvertisedClient? = UpdateProbe()::advertisedCancellable,
 ) {
-    /** Returns null when there are no profiles to ask. Never throws. */
     suspend fun check(profiles: List<Profile>): UpdateStatus? = withContext(Dispatchers.IO) {
-        if (profiles.isEmpty()) return@withContext null
-        // Probe every server concurrently: N servers each with a 4s timeout
-        // would otherwise cost N×4s on a cold or dead fleet. The profile count
-        // is small (a user's own servers), so unbounded fan-out here is bounded
-        // in practice.
+        currentCoroutineContext().ensureActive()
+        val remote = profiles.filter { it.kind == KernelKind.REMOTE_URL }
+        if (remote.isEmpty()) return@withContext null
         val advertised = coroutineScope {
-            profiles.map { profile ->
+            remote.map { profile ->
                 async {
-                    try {
-                        probe(profile.baseUrl)
-                    } catch (e: Exception) {
-                        null
-                    }
+                    try { if (UpdateProbe.acceptsRemoteUrl(profile.baseUrl)) probe(profile.baseUrl) else null }
+                    catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { null }
                 }
             }.awaitAll()
         }
-        var best: AdvertisedClient? = null
-        for (candidate in advertised) {
-            if (candidate == null) continue
-            val current = best
-            if (current == null ||
-                UpdateCheck.compareVersions(candidate.version, current.version) > 0
-            ) {
-                best = candidate
-            }
-        }
+        currentCoroutineContext().ensureActive()
+        val best = advertised.filterNotNull().maxWithOrNull { a, b ->
+            UpdateCheck.compareVersions(a.version, b.version)
+        } ?: return@withContext null
+        if (advertised.any { it == null } && UpdateCheck.compareVersions(best.version, installedName) <= 0)
+            return@withContext null // Partial knowledge cannot prove the whole set is up to date.
         UpdateCheck.evaluate(installedName, best)
     }
 }

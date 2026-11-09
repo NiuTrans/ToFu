@@ -17,6 +17,9 @@ revision, in message windows when it exceeds any single storage response.
 authoritative total without materializing the owner's complete archive.
 ``count_conversation_activity_intervals`` counts activity through timestamp-
 only authority projections rather than hydrating transcript content.
+``scan_conversation_turn_usage`` lists lightweight candidates, then reads each
+one's per-Turn usage rows (``conversation.turn_usage``) for a time window;
+no transcript content crosses the RPC.
 ``scan_conversations_bounded`` lists lightweight candidates first, then
 hydrates transcripts in small RPC batches so archive scans cannot build one
 oversize storage frame. Given a time bound, a transcript too large for any
@@ -140,6 +143,65 @@ class AnchoredMessageWindow:
     snapshot: ConversationSnapshot
     total_count: int
     anchor_sequence: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTurnUsage:
+    """One conversation's per-Turn usage projection; no transcript content.
+
+    ``turns`` holds the usage-bearing main-lane messages whose Turn time is
+    in the requested window, plus archive messages whose time is unknown;
+    each row carries ``index`` (its main-lane sequence), ``usage``,
+    ``timestamp`` when known and the attribution fields it stored (``model``,
+    ``preset``, ``effort``, ``provider_id``, ``providerId``). ``message_count``
+    counts the whole main lane. ``title_fallback`` is the first message's
+    content prefix when the conversation has no title and one was requested.
+    """
+
+    metadata: dict[str, Any]
+    message_count: int
+    title_fallback: str
+    turns: list[dict[str, Any]]
+
+
+def _turn_usage_projection(result: Any) -> ConversationTurnUsage:
+    malformed = RuntimeError("conversation turn usage projection is malformed")
+    if not isinstance(result, Mapping):
+        raise malformed
+    metadata = result.get("metadata")
+    message_count = result.get("message_count")
+    title_fallback = result.get("title_fallback")
+    turns = result.get("turns")
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(metadata.get("id"), str)
+        or not isinstance(metadata.get("title"), str)
+        or not isinstance(metadata.get("settings"), Mapping)
+        or any(isinstance(metadata.get(field), bool)
+               or not isinstance(metadata.get(field), int)
+               for field in ("created_at", "updated_at"))
+        or isinstance(message_count, bool)
+        or not isinstance(message_count, int)
+        or message_count < 0
+        or not isinstance(title_fallback, str)
+        or not isinstance(turns, list)
+    ):
+        raise malformed
+    for turn in turns:
+        index = turn.get("index") if isinstance(turn, Mapping) else None
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < message_count
+            or not isinstance(turn.get("usage"), Mapping)
+        ):
+            raise malformed
+    return ConversationTurnUsage(
+        metadata=dict(metadata),
+        message_count=message_count,
+        title_fallback=title_fallback,
+        turns=[dict(turn) for turn in turns],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,6 +646,74 @@ class ConversationRepository:
             raise RuntimeError("conversation activity projection is malformed")
         return candidate_count, list(counts)
 
+    def turn_usage(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+        timestamp_gte: int,
+        timestamp_lt: int,
+        title_fallback_characters: int = 0,
+    ) -> ConversationTurnUsage | None:
+        """Read one conversation's usage rows in ``[gte, lt)`` Turn time."""
+        for value in (timestamp_gte, timestamp_lt, title_fallback_characters):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("turn usage bounds must be integers")
+        if timestamp_gte >= timestamp_lt:
+            raise ValueError("timestamp_gte must precede timestamp_lt")
+        if not 0 <= title_fallback_characters <= 256:
+            raise ValueError("title_fallback_characters must be between 0 and 256")
+        result = self._client().query("conversation.turn_usage", {
+            "user_id": _owner_id(user_id),
+            "conv_id": _conversation_id(conversation_id),
+            "timestamp_gte": timestamp_gte,
+            "timestamp_lt": timestamp_lt,
+            "title_fallback_characters": title_fallback_characters,
+        })
+        return None if result is None else _turn_usage_projection(result)
+
+    def scan_turn_usage(
+        self,
+        *,
+        user_id: int,
+        updated_at_gte: int,
+        created_at_lt: int,
+        timestamp_gte: int,
+        timestamp_lt: int,
+        limit: int = 1000,
+        title_fallback_characters: int = 0,
+    ) -> tuple[int, Iterator[ConversationTurnUsage]]:
+        """Candidate count plus a lazy per-conversation usage projection.
+
+        Candidates are listed metadata-only; each one's usage rows are then
+        read in its own bounded response. A conversation deleted after the
+        listing is skipped; any other failure propagates.
+        """
+        metadata = self.list(
+            user_id=user_id,
+            updated_at_gte=updated_at_gte,
+            created_at_lt=created_at_lt,
+            order_by="updated_at_desc",
+            limit=limit,
+            include_messages=False,
+            settings_keys=[],
+        )
+        conversation_ids = [str(row["id"]) for row in metadata]
+
+        def projections() -> Iterator[ConversationTurnUsage]:
+            for conversation_id in conversation_ids:
+                usage = self.turn_usage(
+                    conversation_id,
+                    user_id=user_id,
+                    timestamp_gte=timestamp_gte,
+                    timestamp_lt=timestamp_lt,
+                    title_fallback_characters=title_fallback_characters,
+                )
+                if usage is not None:
+                    yield usage
+
+        return len(conversation_ids), projections()
+
     def _hydrate_id_batch(
         self,
         conversation_ids: list[str],
@@ -941,6 +1071,28 @@ def count_conversation_activity_intervals(
     )
 
 
+def scan_conversation_turn_usage(
+    *,
+    user_id: int,
+    updated_at_gte: int,
+    created_at_lt: int,
+    timestamp_gte: int,
+    timestamp_lt: int,
+    limit: int = 1000,
+    title_fallback_characters: int = 0,
+) -> tuple[int, Iterator[ConversationTurnUsage]]:
+    """Scan candidates' per-Turn usage rows without reading transcripts."""
+    return ConversationRepository().scan_turn_usage(
+        user_id=user_id,
+        updated_at_gte=updated_at_gte,
+        created_at_lt=created_at_lt,
+        timestamp_gte=timestamp_gte,
+        timestamp_lt=timestamp_lt,
+        limit=limit,
+        title_fallback_characters=title_fallback_characters,
+    )
+
+
 def search_conversation_page(query: str, *, user_id: int, limit: int = 200,
                              cursor: str | None = None) -> dict:
     """Owner-scoped v2 search page, including continuation and coverage."""
@@ -997,9 +1149,11 @@ __all__ = [
     "ConversationCatalogPage",
     "ConversationRepository",
     "ConversationSnapshot",
+    "ConversationTurnUsage",
     "get_conversation",
     "list_conversations",
     "scan_conversations_bounded",
+    "scan_conversation_turn_usage",
     "count_conversation_activity_intervals",
     "get_anchored_conversation_window",
     "search_conversation_ids",

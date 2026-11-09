@@ -14,7 +14,7 @@ the model isn't biased toward "I'm doing code now" framing for translation,
 paper Q&A, daily-report or trading turns.
 
 Prose references tools by Tofu's own names only: read_files,
-apply_diff / insert_content, write_file, find_files, search_files,
+edit_file, write_file, find_files, search_files,
 run_command, todo_write, ask_human (via human_guidance),
 spawn_agents (async swarm).
 

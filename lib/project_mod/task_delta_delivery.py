@@ -2,24 +2,50 @@
 
 Entries: deliver_task_delta, commit_delivered_task_delta. Baselines, intents,
 revocation and receipts retain integration/delivery ownership. A private index
-computes the three-way merge; publication changes files only. HEAD, the real
-index and release gates stay independent of workspace delivery. No validation
-checkout is materialized. A reviewed project delivery in a repository that opted
-into automatic commits is then recorded on the current branch as exactly its
-own delta, without writing any checkout file.
+computes the three-way merge. No validation checkout is materialized.
+
+A reviewed project delivery in a repository that opted into automatic commits
+lands as exactly its own delta, committed on the current branch through the
+shared checkout-landing owner (``lib.project_mod.checkout_landing``, which
+``scripts/git_land.py`` also uses): other writers' uncommitted edits are
+carried forward by three-way merge, and the receipt says delivered only once
+the commit is verified reachable from the branch. A delta that needs other
+writers' uncommitted bytes, or overlaps their edits, is held with a visible
+reason and lands once its inputs change. Every other task publishes files
+only; HEAD, the real index and release gates stay independent of it. A
+no-change delivery names HEAD and captures nothing.
 """
 from __future__ import annotations
 
-import contextlib
+import json
 import os
 from pathlib import Path
-import shutil
 import tempfile
+import time
 
 from lib.git_runtime import GIT_STALL_SECONDS
+from lib.log import get_logger
 from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_claims_lease
 from lib.project_mod.delivery_retry import input_fingerprint, retry_evidence, conflicted_paths, pin_receipt
 from lib.project_mod.workspace_runtime import NODE_TOOL_CACHE_DIRECTORIES
+
+logger = get_logger(__name__)
+
+# Held conflicts whose last full recheck this process found unchanged, by
+# (canonical root, owner, task id): the receipt identity plus _hold_observation
+# taken before that recheck read any content. While a pass observes the same
+# inputs the same hold stands, without the whole-delta claims lease, a capture
+# or a merge; any difference runs the full recheck, which replaces or drops the
+# entry. One entry per held task delivery in this process.
+_UNCHANGED_HOLDS: dict[tuple[str, int, str], tuple] = {}
+# DolphinFS records whole-second timestamps: a stat cannot order a write made
+# within the same second as the observation (git's racily clean entries).
+_TIMESTAMP_RESOLUTION_SECONDS = 1
+
+_INTEGRATION_IDENTITY = {
+    'GIT_AUTHOR_NAME': 'Tofu Integration', 'GIT_AUTHOR_EMAIL': 'integration@tofu.local',
+    'GIT_COMMITTER_NAME': 'Tofu Integration', 'GIT_COMMITTER_EMAIL': 'integration@tofu.local',
+}
 
 
 def checkpoint_has_no_delta(row) -> bool:
@@ -86,6 +112,46 @@ def _canonical_tree(root, head):
     from lib import integration_control as ic
     with tempfile.TemporaryDirectory(prefix='tofu-index-') as directory:
         return ic._alternate_index_tree(root, head, str(Path(directory) / 'index'))
+
+
+def _canonical_path_entries(root, head, paths):
+    """Observe live checkout bytes at ``paths`` alone, as a capture would list them.
+
+    Returns exactly what ``ls-tree -z <_canonical_tree capture> -- <paths>``
+    prints: a private index seeded from ``head`` at those paths stages them by
+    the capture's rules (tracked paths always, untracked ones unless ignored).
+    No tree is written and no other path is read. None when a path holds a
+    directory, which ``ls-tree`` names by a tree this index never writes.
+    """
+    from lib import integration_control as ic
+    with tempfile.TemporaryDirectory(prefix='tofu-index-') as directory:
+        environment = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
+
+        def git(*args, **kwargs):
+            # Like the capture, these scale with the delta's volume: stall-supervised.
+            kwargs.setdefault('stall_seconds', GIT_STALL_SECONDS)
+            return ic._git(root, ['--literal-pathspecs', *args], env=environment,
+                           check=True, **kwargs)
+
+        seeded = git('ls-tree', '-r', '-z', '--full-tree', head, '--', *paths).stdout if head else ''
+        if seeded:
+            # The supervised runner has no stdin; the entries are already in hand.
+            git('update-index', '-z', '--index-info', input_text=seeded, stall_seconds=None)
+        staged = [entry.split('\t', 1)[1] for entry in seeded.split('\0') if '\t' in entry]
+        staged += [path for path in git('ls-files', '--others', '--exclude-standard', '-z',
+                                        '--', *paths).stdout.split('\0') if path]
+        if staged:
+            git('add', '-A', '--', *staged)
+        wanted, entries = set(paths), []
+        for entry in git('ls-files', '-s', '-z', '--', *paths).stdout.split('\0'):
+            if not entry:
+                continue
+            meta, path = entry.split('\t', 1)
+            if path not in wanted:
+                return None
+            mode, blob, _stage = meta.split(' ')
+            entries.append(f"{mode} {'commit' if mode == '160000' else 'blob'} {blob}\t{path}\0")
+        return ''.join(entries)
 
 
 def _tree_entries(root, rev, paths):
@@ -157,14 +223,241 @@ def _merge_workspace_delta(root, source, patch_path, task_id, index_path, baseli
         if rebuilt is None:
             return '', applied.stderr or applied.stdout or f'Git merge failed with exit {applied.returncode}', paths
     tree = ic._git(root, ['write-tree'], env=environment, check=True).stdout.strip()
-    target = ic._git(root, ['commit-tree', tree, '-p', source, '-m',
-                            message or f'Tofu workspace delivery: {task_id}'], env={
-        **environment, 'GIT_AUTHOR_NAME': 'Tofu Integration',
-        'GIT_AUTHOR_EMAIL': 'integration@tofu.local',
-        'GIT_COMMITTER_NAME': 'Tofu Integration',
-        'GIT_COMMITTER_EMAIL': 'integration@tofu.local',
-    }, check=True).stdout.strip()
-    return target, '', []
+    return _commit(root, tree, source, message or f'Tofu workspace delivery: {task_id}'), '', []
+
+
+def _commit(root, tree, parent, message):
+    from lib import integration_control as ic
+    return ic._git(root, ['commit-tree', tree, '-p', parent, '-m', message],
+                   env=_INTEGRATION_IDENTITY, check=True).stdout.strip()
+
+
+def _delivered_without_publication(root, row, receipt, head, changed, checkpoint):
+    """Receipt updates when HEAD already holds the delta, else None.
+
+    An empty delta publishes nothing: its receipt names HEAD, never a capture
+    of the checkout, whose files hold other writers' uncommitted bytes.
+    """
+    from lib import integration_control as ic
+
+    def reaches(revision):
+        return ic._git(root, ['merge-base', '--is-ancestor', revision, head]).returncode == 0
+
+    if not changed or (head and reaches(checkpoint)):
+        return dict(state='delivered', phase='no_changes', reason='',
+                    checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint,
+                    headSha=head, targetSha=head, publicationMode='committed')
+    target = receipt.get('targetSha')
+    if (receipt.get('phase') == 'commit_adoption' and target and head
+            and receipt.get('checkpointSha') == row['checkpoint_sha']
+            and receipt.get('deltaCheckpointSha') == checkpoint and reaches(target)):
+        return dict(state='delivered', reason='', headSha=head, publicationMode='committed')
+    return None
+
+
+def _held_conflict(receipt, *, landing):
+    """A conflict hold that only a change of its recorded inputs can lift."""
+    if (receipt.get('retry') or {}).get('condition') != 'conflict_inputs_changed':
+        return False
+    if landing:
+        return receipt.get('state') == 'blocked' and receipt.get('phase') == 'commit_adoption'
+    return (receipt.get('state') in {'blocked', 'failed'}
+            and receipt.get('phase') == 'workspace_adoption')
+
+
+def _hold_identity(row, receipt):
+    return json.dumps([{key: value for key, value in receipt.items() if key != 'updatedAt'},
+                       row.get('checkpoint_sha'), (row.get('origin') or {}).get('sourceSnapshot'),
+                       row.get('state')], sort_keys=True, default=str)
+
+
+def _hold_observation(root, paths, *, landing):
+    """Every input a held conflict's recheck reads, observed without file content.
+
+    HEAD; the stat identity of each delta path and of every ``.gitignore`` and
+    ``info/exclude`` deciding whether an untracked delta path is staged; for a
+    commit landing also the real index entries at those paths and Git's
+    in-progress markers. ``None`` when an observed file changed within the
+    timestamp resolution of now, where a stat cannot order it against a
+    concurrent write: the full recheck decides then.
+    """
+    from lib import integration_control as ic
+    from lib.project_mod.checkout_landing import _IN_PROGRESS, git_paths
+    head = ic._rev(root, 'HEAD')
+    directories = {''}
+    for path in paths:
+        parts = path.split('/')[:-1]
+        directories.update('/'.join(parts[:depth]) for depth in range(1, len(parts) + 1))
+    files = [root / path for path in paths]
+    files += [root / directory / '.gitignore' for directory in sorted(directories)]
+    files += git_paths(root, 'info/exclude', *(_IN_PROGRESS if landing else ()))
+    racy_from = (int(time.time()) - _TIMESTAMP_RESOLUTION_SECONDS) * 1_000_000_000
+    identities = []
+    for path in files:
+        try:
+            info = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            identities.append(None)
+            continue
+        if max(info.st_mtime_ns, info.st_ctime_ns) >= racy_from:
+            return None
+        identities.append((info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                           info.st_ino, info.st_dev))
+    staged = ic._git(root, ['--literal-pathspecs', 'ls-files', '-s', '-z', '--', *paths], check=True,
+                     stall_seconds=GIT_STALL_SECONDS).stdout if landing else ''
+    return head, tuple(identities), staged
+
+
+def _lands_as_commit(row, root) -> bool:
+    """A reviewed project delivery into a repository that opted into automatic commits."""
+    from lib.linear_git_checkpoint import is_enabled
+    from lib.project_dispatch.admission import KEY
+    return KEY in (row.get('origin') or {}) and is_enabled(root)
+
+
+def _landing_fingerprint(root, branch, head, baseline, checkpoint, paths):
+    """Everything a held landing read, observed at the delta's paths alone.
+
+    The branch tip, the checkout's bytes and index entries at those paths and
+    any Git operation in progress: a hold is rechecked only once one changes.
+    """
+    from lib import integration_control as ic
+    from lib.project_mod.checkout_landing import operations_in_progress
+    staged = ic._git(root, ['--literal-pathspecs', 'ls-files', '-s', '-z', '--', *paths],
+                     check=True, stall_seconds=GIT_STALL_SECONDS).stdout
+    return input_fingerprint(baseline=baseline, checkpoint=checkpoint, branch=f'{branch} {head}',
+                             source_tree=[_canonical_path_entries(root, head, paths), staged],
+                             command='commit', gate_options={'operations': operations_in_progress(root)})
+
+
+def _paths_lacking_their_base(root, head, baseline, checkpoint):
+    """Delta paths whose HEAD entry differs from the bytes the delta was computed on."""
+    pending, _ = _pending_task_paths(root, head, baseline, checkpoint)
+    before, current = _tree_entries(root, baseline, pending), _tree_entries(root, head, pending)
+    return [path for path in pending if before.get(path) != current.get(path)]
+
+
+def _borrowed_paths(root, row, paths):
+    """PATHS whose input bytes were other writers' uncommitted edits (sourceHead..sourceSnapshot)."""
+    from lib import integration_control as ic
+    origin = row.get('origin') or {}
+    head, snapshot = origin.get('sourceHead'), origin.get('sourceSnapshot')
+    if not paths or not head or not snapshot or head == snapshot:
+        return []
+    listed = ic._git(root, ['--literal-pathspecs', 'diff', '--no-renames', '--name-only', '-z',
+                            head, snapshot, '--', *paths], check=True).stdout
+    borrowed = set(listed.split('\0'))
+    return [path for path in paths if path in borrowed]
+
+
+def _commit_reviewed_delta(row, root, baseline, checkpoint, changed, claims, admitted, save,
+                           unchanged_hold):
+    """Land a reviewed project delta as its own commit on the current branch.
+
+    The delta merges onto committed HEAD in a private index. The checkout-landing
+    owner then plans every changed path against the checkout's current bytes
+    (uncommitted edits are carried forward by three-way merge) and, under Git's
+    own ``index.lock``, rechecks the plan, writes the files, moves exactly those
+    index entries and the branch by compare-and-swap. The receipt says delivered
+    only after the commit is verified reachable from the branch. A delta that
+    needs bytes HEAD lacks, conflicts with history, or overlaps uncommitted
+    edits is held ``blocked`` with retry evidence; unchanged inputs keep the
+    hold without merging again, and nothing is written meanwhile.
+    """
+    from lib import integration_control as ic
+    from lib.project_mod import checkout_landing
+
+    owner, task_id = int(row['user_id']), row['task_id']
+    with workspace_claims_lease(claims, timeout=5.0), ic._repo_lock(str(root)):
+        _, receipt, allowed = admitted()
+        if not allowed:
+            return receipt
+        head = ic._rev(root, 'HEAD')
+        settled = _delivered_without_publication(root, row, receipt, head, changed, checkpoint)
+        if settled is not None:
+            return save(locked=True, **settled)
+        branch = ic._git(root, ['symbolic-ref', '-q', 'HEAD'],
+                         stall_seconds=GIT_STALL_SECONDS).stdout.strip()
+        if not head or not branch.startswith('refs/heads/'):
+            return save(locked=True, state='blocked', phase='commit_adoption', retry=None,
+                        reason='task_delta_uncommitted: the checkout has no committed branch '
+                               'to receive the delivery')
+        fingerprint = _landing_fingerprint(root, branch, head, baseline, checkpoint, changed)
+        retry = receipt.get('retry') or {}
+        if (receipt.get('state') == 'blocked' and receipt.get('phase') == 'commit_adoption'
+                and retry.get('condition') == 'conflict_inputs_changed'
+                and retry.get('fingerprint') == fingerprint):
+            return unchanged_hold(receipt)
+    file_mode = ic._git(root, ['config', '--bool', 'core.fileMode']).stdout.strip() != 'false'
+    message = _delivery_commit_message(root, row, baseline, checkpoint)
+
+    def hold(reason, paths):
+        with ic._repo_lock(str(root)):
+            ref = f'refs/tofu/delivery-inputs/u{owner}/{ic._safe_task(task_id)}'
+            return pin_receipt(root, ref, head, lambda: save(
+                locked=True, state='blocked', phase='commit_adoption', reason=reason[:900],
+                retry=retry_evidence('conflict_inputs_changed', fingerprint, baseline,
+                                     checkpoint, head, paths)))
+
+    while True:
+        with tempfile.TemporaryDirectory(prefix='task-delta-commit-',
+                                         dir=str(ic._workspace_root())) as directory:
+            commit, conflict, paths = _merge_workspace_delta(
+                root, head, Path(directory) / 'task.patch', task_id,
+                Path(directory) / 'index', baseline, checkpoint, message=message)
+        if conflict:
+            paths = paths or _paths_lacking_their_base(root, head, baseline, checkpoint)
+            entangled = _borrowed_paths(root, row, paths)
+            if entangled:
+                return hold('task_delta_entangled: ' + ', '.join(entangled[:20])
+                            + ' carry other writers\' uncommitted edits this delivery built on; '
+                            'it lands as its own commit once they are committed', paths)
+            return hold('task_delta_conflict: ' + conflict[:700], paths)
+        tree = ic._rev(root, commit + '^{tree}')
+        if tree == ic._rev(root, head + '^{tree}'):
+            return save(state='delivered', phase='no_changes', reason='', retry=None,
+                        checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint,
+                        headSha=head, targetSha=head, publicationMode='committed')
+        try:
+            steps = checkout_landing.plan(root, head, tree, file_mode)
+            if steps.tree != tree:
+                commit = _commit(root, steps.tree, head, message)
+            step_claims = [('file', str(root / step.path)) for step in steps]
+            with workspace_claims_lease(step_claims, timeout=5.0), ic._repo_lock(str(root)):
+                _, receipt, allowed = admitted()
+                if not allowed:
+                    return receipt
+                checkout_landing.revalidate(root, branch, head, steps)
+                recovery_ref = f'refs/tofu/delivery-checkpoints/u{owner}/{ic._safe_task(task_id)}'
+                ic._git(root, ['update-ref', recovery_ref, commit], check=True)
+                receipt = save(locked=True, state='pending', phase='commit_adoption', reason='',
+                               retry=None, sourceSha=head, checkpointSha=row['checkpoint_sha'],
+                               deltaCheckpointSha=checkpoint, targetSha=commit, headSha=head,
+                               publicationMode='committed')
+                if receipt.get('state') != 'pending':
+                    return receipt
+                _, receipt, allowed = admitted()
+                if not allowed:
+                    return receipt
+                checkout_landing.publish(root, branch, head, commit, steps,
+                                         f'tofu delivery: {task_id}')
+                tip = ic._rev(root, branch)
+                if not _contains(root, commit, tip):
+                    return save(locked=True, state='pending', phase='commit_adoption',
+                                reason=f'task_delta_commit_unreachable: {branch} is at {tip}, '
+                                       f'which does not contain {commit}; the next pass lands it again')
+                return save(locked=True, state='delivered', reason='', headSha=tip,
+                            targetSha=commit, publicationMode='committed')
+        except checkout_landing.Replan:
+            head = ic._rev(root, branch)
+            fingerprint = _landing_fingerprint(root, branch, head, baseline, checkpoint, changed)
+        except checkout_landing.Refused as refusal:
+            held = [path for path in changed if any(
+                item == path or item.startswith(path + ': ') for item in refusal.paths)]
+            return hold('task_delta_entangled: ' + refusal.reason + ''.join(
+                f'; {item}' for item in refusal.paths[:10]), held)
+        except checkout_landing.IndexBusy:
+            return save(state='blocked', phase='commit_adoption', reason='workspace_busy')
 
 
 def deliver_task_delta(row, receipt, save_receipt):
@@ -188,6 +481,22 @@ def deliver_task_delta(row, receipt, save_receipt):
     # captures. Only these paths can be published. The lease owner widens
     # aliases/directory transitions conservatively and orders physical locks.
     claims = [('file', str(root / path)) for path in changed]
+    landing = bool(changed) and _lands_as_commit(row, root)
+    # A held conflict is rechecked when an input changes, not on every pass:
+    # one observed exactly as before its last unchanged verdict keeps the hold
+    # without the whole-delta lease (docs/CONTINUOUS_DELIVERY.md).
+    hold_key, observation = (str(root), owner, task_id), None
+    if changed and _held_conflict(receipt, landing=landing):
+        observation = _hold_observation(root, changed, landing=landing)
+        if (observation is not None
+                and _UNCHANGED_HOLDS.get(hold_key) == (_hold_identity(row, receipt), *observation)):
+            return receipt
+    _UNCHANGED_HOLDS.pop(hold_key, None)
+
+    def unchanged_hold(result):
+        if observation is not None and _held_conflict(result, landing=landing):
+            _UNCHANGED_HOLDS[hold_key] = (_hold_identity(row, result), *observation)
+        return result
 
     def hold(latest, current):
         if not changed and not repair:
@@ -241,31 +550,59 @@ def deliver_task_delta(row, receipt, save_receipt):
         return ic._git(root, ['--literal-pathspecs', 'diff', '--quiet', left, right,
                              '--', *changed]).returncode == 0
 
+    def fingerprint_of(source_entries):
+        return input_fingerprint(baseline=baseline, checkpoint=checkpoint, branch='',
+                                 source_tree=source_entries, command='', gate_options={})
+
+    def unchanged_conflict_reason(current):
+        return (current.get('reason') if current.get('reason') != 'workspace_busy' else
+                'task_delta_conflict: unchanged conflict inputs require an owned repair checkpoint')
+
+    def settled_conflict_unchanged(current, head):
+        """Keep a settled conflict whose exact inputs are unchanged, capturing nothing.
+
+        Its fingerprint reads the canonical checkout only at task-delta paths,
+        so observing those paths decides. Anything else, including a receipt
+        that adoption recovery could still settle, takes the whole capture.
+        """
+        retry = current.get('retry') or {}
+        if (not changed or current.get('state') not in {'blocked', 'failed'}
+                or current.get('phase') != 'workspace_adoption'
+                or retry.get('condition') != 'conflict_inputs_changed'):
+            return False
+        try:
+            entries = _canonical_path_entries(root, head, changed)
+            previous_target = current.get('targetSha')
+            if entries is None or (
+                    previous_target and current.get('checkpointSha') == row['checkpoint_sha']
+                    and current.get('deltaCheckpointSha') == checkpoint
+                    and ic._git(root, ['--literal-pathspecs', 'ls-tree', '-z', previous_target,
+                                       '--', *changed], check=True).stdout == entries):
+                return False
+        except Exception as error:
+            # The whole capture below decides instead and reports its own failure.
+            logger.debug('Settled-conflict path recheck skipped task=%s: %s', task_id, error)
+            return False
+        return fingerprint_of(entries) == retry.get('fingerprint')
+
     try:
+        if landing:
+            return _commit_reviewed_delta(row, root, baseline, checkpoint, changed, claims,
+                                          admitted, save, unchanged_hold)
         with workspace_claims_lease(claims, timeout=5.0), ic._repo_lock(str(root)):
             _, receipt, allowed = admitted()
             if not allowed:
                 return receipt
             head = ic._rev(root, 'HEAD')
-            if (head and ic._git(root, [
-                    'merge-base', '--is-ancestor', checkpoint, head]).returncode == 0):
-                return save(locked=True, state='delivered', phase='no_changes', reason='',
-                            checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint,
-                            headSha=head, targetSha=head, publicationMode='committed')
+            settled = _delivered_without_publication(root, row, receipt, head, changed, checkpoint)
+            if settled is not None:
+                return save(locked=True, **settled)
+            if settled_conflict_unchanged(receipt, head):
+                return unchanged_hold(save(locked=True, state='blocked', phase='workspace_adoption',
+                                           reason=unchanged_conflict_reason(receipt)))
             source = _canonical_tree(root, head)
             reuse = (receipt.get('retry') or {}).get('sourceSha') or ''
-            if not changed:
-                return save(locked=True, state='delivered', phase='no_changes', reason='',
-                            checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint, headSha=head,
-                            targetSha=ic._checkpoint_tree(root, head, source, task_id, reuse_commit=reuse),
-                            publicationMode='working_tree')
             previous_target = receipt.get('targetSha')
-            if (receipt.get('phase') == 'commit_adoption' and previous_target and head
-                    and receipt.get('checkpointSha') == row['checkpoint_sha']
-                    and receipt.get('deltaCheckpointSha') == checkpoint
-                    and ic._git(root, ['merge-base', '--is-ancestor', previous_target, head]).returncode == 0):
-                return save(locked=True, state='delivered', reason='', headSha=head,
-                            publicationMode='committed')
             if (receipt.get('phase') == 'workspace_adoption'
                     and receipt.get('checkpointSha') == row['checkpoint_sha']
                     and receipt.get('deltaCheckpointSha') == checkpoint
@@ -273,18 +610,15 @@ def deliver_task_delta(row, receipt, save_receipt):
                 return save(locked=True, state='delivered', reason='', headSha=head,
                             publicationMode='working_tree')
             # History/index movement cannot block delivery of unchanged files.
-            fingerprint = input_fingerprint(
-                baseline=baseline, checkpoint=checkpoint, branch='',
-                source_tree=ic._git(root, ['--literal-pathspecs', 'ls-tree', '-z', source,
-                                         '--', *changed], check=True).stdout,
-                command='', gate_options={})
+            fingerprint = fingerprint_of(ic._git(
+                root, ['--literal-pathspecs', 'ls-tree', '-z', source, '--', *changed],
+                check=True).stdout)
             previous_retry = receipt.get('retry') or {}
             if (receipt.get('state') in {'blocked', 'failed'}
                     and previous_retry.get('condition') == 'conflict_inputs_changed'
                     and previous_retry.get('fingerprint') == fingerprint):
-                return save(locked=True, state='blocked', phase='workspace_adoption',
-                            reason=(receipt.get('reason') if receipt.get('reason') != 'workspace_busy' else
-                                    'task_delta_conflict: unchanged conflict inputs require an owned repair checkpoint'))
+                return unchanged_hold(save(locked=True, state='blocked', phase='workspace_adoption',
+                                           reason=unchanged_conflict_reason(receipt)))
             source = ic._checkpoint_tree(root, head, source, task_id, reuse_commit=reuse)
 
         with tempfile.TemporaryDirectory(prefix='task-delta-', dir=str(ic._workspace_root())) as directory:
@@ -343,7 +677,6 @@ def reclaim_delivered_workspace(row) -> bool:
     are reconstructible; removal unlinks them without touching their targets.
     """
     from lib import integration_control as ic
-    from lib.file_history.store import readme_path
     if not row.get('managed'):
         return False
     baseline = (row.get('origin') or {}).get('sourceSnapshot')
@@ -361,6 +694,23 @@ def reclaim_delivered_workspace(row) -> bool:
         return False
     if retired_workspace_placeholder(root, workspace):
         return _retire_captured_workspace(row, root, workspace, baseline, checkpoint)
+    if not checkout_reconstructible(root, workspace, checkpoint):
+        return False
+    return _retire_captured_workspace(row, root, workspace, baseline, checkpoint)
+
+
+def checkout_reconstructible(root: Path, workspace: Path, captured: str) -> bool:
+    """Whether removing WORKSPACE loses nothing beyond CAPTURED and rebuildable files.
+
+    CAPTURED is a commit of the checkout's bytes: a delivered task's checkpoint,
+    or the work in progress a discarded local checkout has just saved. HEAD must
+    be in its history, the staged state one of the two trees and the current
+    bytes exactly its tree. Ignored files may only be dependency bridges,
+    caches, shared-data links and the FileHistory bootstrap: undo history and
+    other durable ignored artifacts keep the checkout.
+    """
+    from lib import integration_control as ic
+    from lib.file_history.store import readme_path
     discovered = ic._git(workspace, ['rev-parse', '--show-toplevel', '--git-common-dir'])
     identity = discovered.stdout.splitlines()
     canonical = ic._git(root, ['rev-parse', '--git-common-dir'], check=True).stdout.strip()
@@ -369,15 +719,15 @@ def reclaim_delivered_workspace(row) -> bool:
             or (workspace / identity[1]).resolve() != (root / canonical).resolve()):
         return False
     source_head = ic._rev(workspace, 'HEAD')
-    if not source_head or ic._git(root, ['merge-base', '--is-ancestor', source_head, checkpoint]).returncode:
+    if not source_head or ic._git(root, ['merge-base', '--is-ancestor', source_head, captured]).returncode:
         return False
     staged = [ic._git(workspace, ['diff', '--cached', '--quiet', revision, '--']).returncode
-              for revision in (source_head, checkpoint)]
+              for revision in (source_head, captured)]
     if not all(code in (0, 1) for code in staged) or 0 not in staged:
         return False  # A third staged version is not recoverable from either tree.
     with tempfile.TemporaryDirectory(prefix='tofu-reclaim-index-') as directory:
-        current = ic._alternate_index_tree(workspace, checkpoint, str(Path(directory) / 'index'))
-    if current != ic._rev(root, checkpoint + '^{tree}'):
+        current = ic._alternate_index_tree(workspace, captured, str(Path(directory) / 'index'))
+    if current != ic._rev(root, captured + '^{tree}'):
         return False
     ignored = ic._git(workspace, ['ls-files', '--others', '--ignored',
                                  '--exclude-standard', '-z'], check=True).stdout
@@ -409,9 +759,7 @@ def reclaim_delivered_workspace(row) -> bool:
     durable_ignored = [path for path in ignored.split('\0') if path and path not in bootstrap
                        and not any(part in reconstructible for part in Path(path).parts)
                        and not is_shared_link(root, workspace, path)]
-    if durable_ignored:
-        return False
-    return _retire_captured_workspace(row, root, workspace, baseline, checkpoint)
+    return not durable_ignored
 
 
 def _retire_captured_workspace(row, root, workspace, baseline, checkpoint):
@@ -434,25 +782,21 @@ def _retire_captured_workspace(row, root, workspace, baseline, checkpoint):
         return True
 
 
-_OPERATIONS_IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge',
-                           'rebase-apply', 'BISECT_LOG')
-
-
 def commit_delivered_task_delta(row) -> dict | None:
     """Record a reviewed working-tree delivery as one commit on the current branch.
 
     Working-tree delivery leaves the task's bytes uncommitted in a checkout that
     other writers keep editing, where a whole-workspace checkpoint can neither
-    attribute nor verify them. This commits exactly the delivered
-    baseline-to-checkpoint delta on top of committed HEAD: the delta merges in a
-    private index; then, holding Git's index.lock, only the index entries of the
-    delta's paths move to the new commit and the branch moves by compare-and-swap.
-    No checkout file is written, so other writers' uncommitted edits, including
-    borrowed input the task built on, stay uncommitted.
+    attribute it. This commits exactly the delivered baseline-to-checkpoint
+    delta on top of committed HEAD: the delta merges in a private index, then
+    the linear checkpoint's publication moves only the index entries of the
+    delta's paths and the branch by compare-and-swap. No checkout file is
+    written, so other writers' uncommitted edits, including borrowed input the
+    task built on, stay uncommitted, and entries they staged are preserved.
 
     Returns the acknowledgement to record, or None while a transient condition
-    (index busy, branch moved, staged edits on a delta path, an operation in
-    progress) keeps the next delivery pass due.
+    (index busy, branch moved, an operation in progress) keeps the next
+    delivery pass due.
     """
     from lib import integration_control as ic
     from lib.project_mod.delivery_retry import retry_evidence
@@ -485,7 +829,28 @@ def commit_delivered_task_delta(row) -> dict | None:
                     'conflictPaths', 'conflictPathCount', 'conflictPathsTruncated')}}
     if ic._rev(root, commit + '^{tree}') == ic._rev(root, head + '^{tree}'):
         return {'status': 'no_changes', 'branchRef': branch, 'headSha': head}
-    return _publish_task_commit(root, branch, head, commit, row['task_id'])
+    from lib.linear_git_checkpoint import LinearCheckpointError, publish_commit
+    try:
+        published = publish_commit(root, branch_ref=branch, base_sha=head, target_sha=commit,
+                                   reflog=f'tofu delivery: {row["task_id"]}')
+    except LinearCheckpointError as error:
+        raise ic.IntegrationError(str(error)) from error
+    if published is None:
+        return None
+    return {'status': 'committed', 'branchRef': branch, 'parentSha': head,
+            'commitSha': commit, 'indexSynchronized': published['indexSynchronized']}
+
+
+def delivered_paths(row) -> list[str]:
+    """Repository paths whose bytes the working-tree delivery of ROW published."""
+    from lib import integration_control as ic
+    baseline, checkpoint = _delivered_delta(row)
+    if not baseline or not checkpoint:
+        return []
+    listed = ic._git(Path(row['project_root']),
+                     ['diff', '--name-only', '--no-renames', '-z', baseline, checkpoint],
+                     check=True, stall_seconds=GIT_STALL_SECONDS).stdout
+    return [path for path in listed.split('\0') if path]
 
 
 def _delivered_delta(row):
@@ -525,114 +890,3 @@ def _delivery_commit_message(root, row, baseline, checkpoint) -> str:
     if assignment:
         lines.append(f'Tofu-Assignment: {assignment}')
     return '\n'.join(lines) + '\n'
-
-
-def _tree_changes(root, old, new):
-    from lib import integration_control as ic
-    tokens = ic._git(root, ['diff-tree', '-r', '-z', '--no-renames', '--no-abbrev', old, new],
-                     check=True, stall_seconds=GIT_STALL_SECONDS).stdout.split('\0')
-    changes = []
-    for meta, path in zip(tokens[0::2], tokens[1::2]):
-        old_mode, new_mode, old_oid, new_oid, _status = meta.lstrip(':').split(' ')
-        changes.append((path,
-                        None if not old_mode.strip('0') else (old_mode, old_oid),
-                        None if not new_mode.strip('0') else (new_mode, new_oid)))
-    return changes
-
-
-def _operation_in_progress(root) -> bool:
-    from lib import integration_control as ic
-    arguments = [part for name in _OPERATIONS_IN_PROGRESS for part in ('--git-path', name)]
-    paths = ic._git(root, ['rev-parse', *arguments], check=True,
-                    stall_seconds=GIT_STALL_SECONDS).stdout.splitlines()
-    return any((root / path).exists() for path in paths)
-
-
-def _index_admits(root, changes) -> bool:
-    """Only paths the index holds at HEAD, or already at the delivery, may move."""
-    from lib import integration_control as ic
-    listed = ic._git(root, ['--literal-pathspecs', 'ls-files', '-s', '-v', '-z', '--',
-                            *(path for path, _old, _new in changes)],
-                     check=True, stall_seconds=GIT_STALL_SECONDS).stdout
-    index: dict[str, list[list[str]]] = {}
-    for record in listed.split('\0'):
-        meta, _, path = record.partition('\t')
-        if path:
-            index.setdefault(path, []).append(meta.split(' '))
-    for path, old, new in changes:
-        records = index.get(path, [])
-        if len(records) > 1:
-            return False  # an unresolved merge
-        actual = None
-        if records:
-            tag, mode, oid, stage = records[0]
-            if tag != 'H' or stage != '0':
-                return False  # assume-unchanged/skip-worktree bits hide working bytes
-            actual = (mode, oid)
-        if actual not in (old, new):
-            return False  # another writer staged this path
-    return True
-
-
-def _prepared_index(root, index_path: Path, changes, oid_length: int) -> Path:
-    from lib import integration_control as ic
-    descriptor, name = tempfile.mkstemp(prefix='index.tofu-delivery-', dir=str(index_path.parent))
-    os.close(descriptor)
-    prepared = Path(name)
-    try:
-        shutil.copyfile(index_path, prepared)
-        zero = '0' * oid_length
-        records = ''.join(f'{new[0]} {new[1]}\t{path}\0' if new else f'0 {zero}\t{path}\0'
-                          for path, _old, new in changes)
-        ic._git(root, ['update-index', '-z', '--index-info'], input_text=records,
-                env={'GIT_INDEX_FILE': str(prepared)}, check=True)
-    except BaseException:
-        prepared.unlink(missing_ok=True)
-        raise
-    return prepared
-
-
-def _publish_task_commit(root, branch, head, commit, task_id):
-    """Index entries of the delta's paths first, then the branch: Git's own order.
-
-    An interruption between the two leaves the delivery staged, never a HEAD
-    whose index reverts it; the next pass recomputes and finishes it.
-    """
-    from lib import integration_control as ic
-    changes = _tree_changes(root, head, commit)
-    index_path = (root / ic._git(root, ['rev-parse', '--git-path', 'index'], check=True,
-                                 stall_seconds=GIT_STALL_SECONDS).stdout.strip()).resolve()
-    lock_path = index_path.with_name(index_path.name + '.lock')
-    try:
-        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    except FileExistsError:
-        return None  # Another Git process owns the index; a later pass retries.
-    installed, prepared = False, None
-    try:
-        with os.fdopen(descriptor, 'wb') as lock:
-            current = ic._git(root, ['symbolic-ref', '-q', 'HEAD'],
-                              stall_seconds=GIT_STALL_SECONDS).stdout.strip()
-            if (current != branch or ic._rev(root, branch) != head
-                    or _operation_in_progress(root) or not _index_admits(root, changes)):
-                return None
-            prepared = _prepared_index(root, index_path, changes, len(head))
-            lock.write(prepared.read_bytes())
-            lock.flush()
-            os.fsync(lock.fileno())
-        os.replace(lock_path, index_path)
-        installed = True
-    finally:
-        if not installed:
-            with contextlib.suppress(FileNotFoundError):
-                lock_path.unlink()
-        if prepared is not None:
-            with contextlib.suppress(FileNotFoundError):
-                prepared.unlink()
-    moved = ic._git(root, ['update-ref', '-m', f'tofu delivery: {task_id}', branch, commit, head],
-                    stall_seconds=GIT_STALL_SECONDS)
-    if moved.returncode:
-        raise ic.IntegrationError(
-            f'The index carries delivery commit {commit}, but {branch} did not move from '
-            f'{head}: {moved.stderr.strip()[:400]}')
-    return {'status': 'committed', 'branchRef': branch, 'parentSha': head,
-            'commitSha': commit, 'paths': len(changes)}

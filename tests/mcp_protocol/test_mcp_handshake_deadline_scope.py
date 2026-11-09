@@ -123,7 +123,7 @@ def test_connected_session_can_finish_a_call_longer_than_its_handshake(monkeypat
     server = _server(SLOWER_THAN_HANDSHAKE)
     # Replace only transport construction. The SDK still owns negotiation,
     # requests and shutdown against the real in-process MCP server.
-    monkeypatch.setattr(sse, 'sse_client', lambda url, headers: server)
+    monkeypatch.setattr(sse, 'sse_client', lambda url, headers, **options: server)
     monkeypatch.setattr(_bridge, 'MCP_CONNECT_TIMEOUT', HANDSHAKE_BUDGET_SECONDS)
 
     async def main():

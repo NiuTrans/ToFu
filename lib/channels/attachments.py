@@ -4,12 +4,16 @@ Responsibility: turn requested attachments into durable outbox attachment
 records — name, MIME type, size, sha256, kind and where the bytes live — after
 checking that each one belongs to the sending conversation (a regular file in
 its verified workspace roots, read without following symlinks, one of its own
-published artifacts, or a slide deck it produced) and fits 大象's documented
-upload limits
-(``x-dxAttachments``); find the workspace files a final answer explicitly
+published artifacts, or a slide deck it produced) or, given ``{path,
+project}``, is a regular file inside one of the owner's registered project
+roots, read the same way and recorded with that project as its provenance
+(channel protocol P13), and fits 大象's documented upload limits
+(``x-dxAttachments``) where the platform carries files; find the workspace files a final answer explicitly
 links; and, at send time, re-read an original from its source and refuse bytes
 that changed after the item was queued. Refusals are ``ChannelError`` codes
-whose messages say what to do instead.
+whose messages say what to do instead; a ``channel_send`` refusal also names
+the supported path (``x-attachmentSources``), so no caller looks for another
+way to send.
 
 Entry points: ``from_tool`` (``channel_send``), ``for_final_answer`` (the
 command-chat auto-reply), ``admit``, ``classify``, ``linked_references``,
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import mimetypes
 import os
 import re
 import stat
@@ -50,6 +55,11 @@ _INLINE_CODE = re.compile(r'(`+)[^`].*?\1', re.DOTALL)
 _LINK = re.compile(r'!?\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]\(\s*(<[^<>\n]+>|[^\s()<>]+)'
                    r'(?:\s+(?:"[^"\n]*"|\'[^\'\n]*\'|\([^()\n]*\)))?\s*\)')
 _SCHEME = re.compile(r'^([A-Za-z][A-Za-z0-9+.-]*):')
+_WORKSPACE = "this conversation's workspace"
+# What every channel_send attachment refusal ends with: how a file outside the sending conversation
+# reaches a chat (channel protocol x-attachmentSources), so no caller looks for another way to send.
+_PROJECT_FORM = ('A file of one of the owner\'s registered projects is attached as {"path": <its path in '
+                 'the project>, "project": <the project root, as get_router_projects lists it>}.')
 
 
 def limits_text() -> str:
@@ -70,16 +80,41 @@ def classify(name: str) -> tuple[str, str]:
     return kind, mime
 
 
-def _record(name: str, data_size: int, sha256: str, source: dict[str, Any]) -> dict[str, Any]:
-    kind, mime = classify(name)
-    if data_size >= SIZE_BELOW_BYTES:
-        raise ChannelError('attachment_too_large',
-                           f'{name} is {data_size / _MIB:.1f} MiB; {limits_text()}')
+def _named_kind(name: str) -> tuple[str, str]:
+    """``(kind, MIME type)`` of a file that is only named, never uploaded: no upload limit applies."""
+    suffix = Path(name).suffix.lower().lstrip('.')
+    if suffix in TYPES:
+        kind, mime = TYPES[suffix]
+        return kind, mime
+    return 'file', mimetypes.guess_type(name)[0] or 'application/octet-stream'
+
+
+def _record(name: str, data_size: int, sha256: str, source: dict[str, Any], *,
+            carried: bool = True) -> dict[str, Any]:
+    if carried:
+        kind, mime = classify(name)
+        if data_size >= SIZE_BELOW_BYTES:
+            raise ChannelError('attachment_too_large',
+                               f'{name} is {data_size / _MIB:.1f} MiB; {limits_text()}')
+    else:
+        kind, mime = _named_kind(name)
     return {'name': name, 'type': mime, 'size': int(data_size), 'sha256': sha256, 'kind': kind,
             'renditionOf': None, 'source': source, 'state': 'pending', 'error': None}
 
 
-def _snapshot(path: str, roots: list[str], *, include_bytes: bool):
+def degraded_note(record: dict[str, Any], platform: str) -> str:
+    """The note naming a file the platform cannot carry (channel protocol P5): never refused, never dropped.
+
+    A published artifact keeps its delivery URL in Tofu; a workspace file is named only.
+    """
+    source = record.get('source') or {}
+    link = {'file': f'/api/artifacts/{source.get("artifact")}/download',
+            'asset': f'/api/response-assets/{source.get("artifact")}'}.get(source.get('store'))
+    where = f'；在 Tofu 中打开：{link}' if link else ''
+    return f'（未附上 {record["name"]}：{platform} 不支持发送文件{where}。）'
+
+
+def _snapshot(path: str, roots: list[str], *, include_bytes: bool, where: str = _WORKSPACE):
     """The shared descriptor-pinned reader, its failures as actionable refusals."""
     from lib.artifacts.file_snapshot import read_project_snapshot
     shown = path
@@ -87,31 +122,31 @@ def _snapshot(path: str, roots: list[str], *, include_bytes: bool):
         return read_project_snapshot(path, roots, include_bytes=include_bytes, fingerprint=True)
     except PermissionError as error:
         raise ChannelError('attachment_outside_workspace',
-                           f'{shown} is outside this conversation\'s workspace; attach a file inside '
-                           f'one of its roots ({", ".join(roots)})') from error
+                           f'{shown} is outside {where}; attach a file inside one of its roots '
+                           f'({", ".join(roots)})') from error
     except OSError as error:
         if error.errno in (errno.ELOOP, errno.ENOTDIR):
             raise ChannelError('attachment_symlink',
                                f'{shown} is, or passes through, a symbolic link; attach the real file '
-                               'inside the workspace') from error
+                               f'inside {where}') from error
         if error.errno == errno.ENOENT:
-            raise ChannelError('attachment_not_found', f'{shown} does not exist in this conversation\'s '
-                                                       'workspace') from error
+            raise ChannelError('attachment_not_found', f'{shown} does not exist in {where}') from error
         raise ChannelError('attachment_unreadable', f'{shown} cannot be read ({error.strerror})') from error
     except ValueError as error:
         if str(error) == 'Invalid project path':
             raise ChannelError('attachment_path_invalid',
                                f'{shown}: a path may not contain ".." or NUL; give the file\'s path '
-                               'inside the workspace') from error
+                               f'inside {where}') from error
         if 'regular file' in str(error):
             raise ChannelError('attachment_not_a_file',
                                f'{shown} is not a non-empty regular file') from error
         raise ChannelError('attachment_changed', f'{shown} changed while it was read; try again') from error
 
 
-def _admit_path(path: str, roots: list[str]) -> dict[str, Any]:
-    classify(os.path.basename(path))
-    if '..' not in Path(path).parts and '\x00' not in path:
+def _admit_path(path: str, roots: list[str], *, carried: bool = True, where: str = _WORKSPACE) -> dict[str, Any]:
+    if carried:
+        classify(os.path.basename(path))
+    if carried and '..' not in Path(path).parts and '\x00' not in path:
         # A file that is too large is refused before it is read; the reader
         # below stays the only authority on what is inside the workspace. A
         # path through a symlink is left to the reader, which refuses it
@@ -127,9 +162,47 @@ def _admit_path(path: str, roots: list[str]) -> dict[str, Any]:
             if size >= SIZE_BELOW_BYTES:
                 raise ChannelError('attachment_too_large',
                                    f'{os.path.basename(path)} is {size / _MIB:.1f} MiB; {limits_text()}')
-    snapshot = _snapshot(path, roots, include_bytes=False)
+    snapshot = _snapshot(path, roots, include_bytes=False, where=where)
     return _record(os.path.basename(snapshot.path), snapshot.size, snapshot.sha256,
-                   {'path': snapshot.path, 'roots': list(roots)})
+                   {'path': snapshot.path, 'roots': list(roots)}, carried=carried)
+
+
+def _registered_project(owner: int, requested: str) -> str | None:
+    """The owner's registered project root ``requested`` names exactly (its path, or the same directory)."""
+    from lib.project_mod.config import get_recent_projects
+    wanted = os.path.normpath(os.path.expanduser(requested))
+    paths = [os.path.normpath(row['path']) for row in get_recent_projects(user_id=owner)
+             if isinstance(row, dict) and isinstance(row.get('path'), str) and os.path.isabs(row['path'])]
+    exact = [path for path in paths if path == wanted]
+    same = [path for path in paths if os.path.realpath(path) == os.path.realpath(wanted)]
+    return (exact or same or [None])[0]
+
+
+def _admit_project_file(owner: int, project: Any, path: Any, *, carried: bool) -> dict[str, Any]:
+    """``{path, project}``: a regular file inside one of the owner's registered project roots (P13).
+
+    The registered root is resolved once (the owner registered it); inside it
+    the same no-follow snapshot applies, and the record names the project as
+    its provenance.
+    """
+    if not isinstance(project, str) or not project.strip() or not isinstance(path, str) or not path.strip():
+        raise ChannelError('invalid_attachments', 'A project attachment is {path, project} with both non-empty')
+    registered = _registered_project(owner, project.strip())
+    if registered is None:
+        raise ChannelError('attachment_project_unknown',
+                           f'{project} is not one of the owner\'s registered projects; give the project root '
+                           'exactly as get_router_projects lists it (project_path)')
+    root = os.path.realpath(registered)
+    if os.path.isabs(path):
+        # Only the root's own spelling is rewritten; inside it the reader follows no link.
+        absolute = os.path.abspath(path)
+        for spelling in (registered, os.path.normpath(os.path.expanduser(project.strip()))):
+            if os.path.commonpath([absolute, spelling]) == spelling:
+                path = os.path.join(root, os.path.relpath(absolute, spelling))
+                break
+    record = _admit_path(path, [root], carried=carried, where=f'project {registered}')
+    record['source']['project'] = registered
+    return record
 
 
 def _load_artifact(source: dict[str, Any], owner: int) -> tuple[bytes, str]:
@@ -182,22 +255,28 @@ def _artifact_source(reference: str, conversation_id: str) -> dict[str, Any] | N
     return None
 
 
-def admit(reference: str, *, roots: list[str], owner: int, conversation_id: str) -> dict[str, Any]:
-    """One attachment record for a workspace path or an own-artifact delivery URL."""
+def admit(reference: str, *, roots: list[str], owner: int, conversation_id: str,
+          carried: bool = True) -> dict[str, Any]:
+    """One attachment record for a workspace path or an own-artifact delivery URL.
+
+    ``carried`` False: the platform carries no files, so the file is only named
+    in the text (channel protocol P5); its source is verified the same way,
+    but no upload type or size limit applies.
+    """
     if not isinstance(reference, str) or not reference.strip():
         raise ChannelError('invalid_attachments', 'Each attachment needs a non-empty path')
     source = _artifact_source(reference.strip(), conversation_id)
     if source is not None:
         data, name = _load_artifact(source, owner)
-        return _record(name, len(data), hashlib.sha256(data).hexdigest(), source)
+        return _record(name, len(data), hashlib.sha256(data).hexdigest(), source, carried=carried)
     slides = _SLIDES_FILE_URL.fullmatch(reference.strip())
     if slides is not None:
         path, deck_dir = _slides_deck(slides.group(1), owner, conversation_id)
-        return _admit_path(path, [deck_dir])
+        return _admit_path(path, [deck_dir], carried=carried)
     if not roots:
         raise ChannelError('attachment_outside_workspace',
                            'This conversation has no workspace, so it has no files to attach')
-    return _admit_path(reference, roots)
+    return _admit_path(reference, roots, carried=carried)
 
 
 def _scope(task: dict[str, Any]) -> tuple[list[str], Callable[[str], str], set[str]]:
@@ -227,20 +306,40 @@ def _scope(task: dict[str, Any]) -> tuple[list[str], Callable[[str], str], set[s
     return roots, route, {name.lower() for name in labels}
 
 
-def from_tool(task: dict[str, Any], owner: int, conversation_id: str, entries: Any) -> list[dict[str, Any]]:
-    """``channel_send`` attachments: every entry admitted, or the first refusal."""
+def from_tool(task: dict[str, Any], owner: int, conversation_id: str, entries: Any, *,
+              carried: bool = True) -> list[dict[str, Any]]:
+    """``channel_send`` attachments: every entry admitted, or the first refusal (``carried``: see ``admit``).
+
+    An entry is ``{path}`` (this conversation's file, artifact or deck) or
+    ``{path, project}`` (a file of one of the owner's registered projects,
+    channel protocol P13). Every refusal ends by naming that supported path.
+    """
     if entries is None:
         return []
+    try:
+        return _admitted_entries(task, owner, conversation_id, entries, carried=carried)
+    except ChannelError as error:
+        from lib.channels.protocol.contract import CONTRACT
+        raise ChannelError(error.code, f'{error} {_PROJECT_FORM} '
+                                       f'{CONTRACT["x-attachmentSources"]["supportedPath"]}') from error
+
+
+def _admitted_entries(task: dict[str, Any], owner: int, conversation_id: str, entries: Any, *,
+                      carried: bool) -> list[dict[str, Any]]:
     if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) for e in entries):
-        raise ChannelError('invalid_attachments', 'attachments must be a non-empty list of {path} objects')
+        raise ChannelError('invalid_attachments', 'attachments must be a non-empty list of {path} or '
+                                                  '{path, project} objects')
     roots, route, _ = _scope(task)
     records, seen = [], set()
     for entry in entries:
-        if set(entry) != {'path'}:
-            raise ChannelError('invalid_attachments', 'Each attachment is {path}')
+        if set(entry) not in ({'path'}, {'path', 'project'}):
+            raise ChannelError('invalid_attachments', 'Each attachment is {path} or {path, project}')
         reference = entry['path']
-        record = admit(route(reference) if isinstance(reference, str) else reference, roots=roots,
-                       owner=owner, conversation_id=conversation_id)
+        if 'project' in entry:
+            record = _admit_project_file(owner, entry['project'], reference, carried=carried)
+        else:
+            record = admit(route(reference) if isinstance(reference, str) else reference, roots=roots,
+                           owner=owner, conversation_id=conversation_id, carried=carried)
         identity = _identity(record)
         if identity not in seen:
             seen.add(identity)
@@ -343,5 +442,5 @@ def read_original(record: dict[str, Any], *, owner: int) -> bytes:
 
 
 
-__all__ = ['SIZE_BELOW_BYTES', 'TYPES', 'admit', 'classify', 'for_final_answer', 'from_tool', 'identities',
-           'limits_text', 'linked_references', 'read_original']
+__all__ = ['SIZE_BELOW_BYTES', 'TYPES', 'admit', 'classify', 'degraded_note', 'for_final_answer', 'from_tool',
+           'identities', 'limits_text', 'linked_references', 'read_original']

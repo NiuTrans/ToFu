@@ -31,6 +31,87 @@ Verify `test_worker_exit_recovery`, the continuity suites and the public native
 Goal process-loss qualification, including one unchanged file publication and
 exact original-price fees across registered actors.
 
+## Restart-paused conversations resume by themselves
+
+*(running contract; owner `lib/conversations/restart_resume.py`)*
+
+**Problem:** after the 2026-11-08 16:55 restart only dispatched Workers
+continued in place. Both Coordinators got a new "Continue the original project
+request" wake that re-read every Worker, one chat continued only because a
+background-command wake happened to exist, two swarm-master chats stayed
+interrupted (their swarms stood down, waiting for the parent's Continue) and the
+Global Router, whose turn had ended, was never woken. The settlement hook
+promised that startup recovery resumes restart-paused work, yet only project
+dispatch did; the browser's batch-resume hint needs a human click, lists only
+Turns boot recovery settled (a graceful restart settles its Turns before boot),
+and lives in the execution host's in-process store, which the API host serving
+the browser never reads in the managed split.
+
+**Decision:** the server continues every Turn a restart interrupted, from its
+checkpoint, exactly as the owner's Continue would, once.
+
+- *Candidates.* The shutdown quiesce of each stopping process records the Turns
+  it aborts (namespace `conversation.restart_paused.v1`, one record per
+  stopping process, written before they settle while storage still serves).
+  Boot recovery hands the orphans of a killed server to the same pass, and an
+  open restart notice's `interrupted` list is the third source. Each candidate
+  is validated against its durable main-lane tail Turn; records are consumed by
+  the pass. Only the immediately previous generation's records and still open
+  notices count, so an interruption the owner left alone days ago never
+  restarts by itself.
+- *Resume.* After readiness, once the owners that resume their own work have
+  run (project dispatch recovery, background batch wakes, swarm rehydration),
+  `resume_restart_paused_turns` continues each tail Turn still `interrupted`
+  with cause `server_restart` through the ordinary `create_attempt` command:
+  the first of `continue`/`checkpoint_resume` its settlement offers, with that
+  option's anchor, the Turn's own accepted execution identity and public
+  config, and command id `restart-resume:<interrupted Attempt>`, so a repeated
+  pass, process or restart resumes each interruption once. A swarm master's
+  Continue carries the receipt its detached swarm needs to re-attach.
+- *Left alone, with the reason in the restart notice:* dispatched Workers and
+  Coordinator wakes (project dispatch recovery continues them), Goal
+  (`autopilot`) and Flow (a selected flow) runs (D1/D2 above), a Turn waiting for
+  the owner's answer (`answer_guidance`), a Turn that offers only Regenerate,
+  cause `user_abort` (the owner stopped it), a lane the owner moved past and a
+  Turn that ended before the stop. After a manual shutdown or in a restart
+  storm (`lib.shutdown_marker` classification) nothing resumes by itself.
+- *Coordinators in place.* A restart-paused Coordinator wake continues in its
+  own Turn through the restart continuation of project dispatch
+  (`project-dispatch-resume:`), like a Worker. A restart-paused human request
+  Turn without a wake continues in place too: Coordinator recovery
+  (`project_dispatch/continuation.recover_coordinator`, at boot and every
+  settlement) calls this module's `resume_conversation`, so it needs none of
+  the candidate records above (the restart that deploys this runs the old
+  code, which writes none) and the same command id makes it idempotent with
+  this pass. A request Turn continued in place, by either or by the owner's
+  Continue, owns follow-through until its current Attempt settles; no wake
+  races it.
+- *Failures.* A transient storage failure keeps its record and repeats the
+  pass through the boot step's existing retry; every other refusal is final
+  and reported. The restart's requester hears each conversation's result in
+  the restart-complete notice ([ROUTER.md R9](ROUTER.md#r9-the-owners-delegation-the-global-router-acts-for-the-owner-owner-decision-2026-11-06)),
+  which a new generation sends only after this pass.
+
+Cost: one resume Attempt per interrupted Turn from its checkpoint, with no new
+brief, no re-read results and no poller; one small record per stopping process.
+
+**Alternatives rejected:** running the browser's batch resume server-side
+unchanged (its hint is incomplete and invisible to the API host); resuming
+every interrupted Turn regardless of age (an abandoned interruption would
+restart days later); scanning storage for interrupted Turns at boot (no index,
+so every boot would pay for history); a boot hook per conversation kind
+(Router, Watchdog, chats) instead of the common turn command (principle 4); a
+new Coordinator wake after a restart (a fresh brief re-reads every Worker and
+the interrupted round is lost); a synthetic Continue for a conversation whose
+turn had already ended (it was not interrupted; the restart notice wakes it).
+
+Verification: `tests/conversation/test_restart_resume.py` (SQLite and native
+authorities), `tests/project_mod/test_coordinator_continuation.py`
+`::test_a_restart_paused_*`, `tests/router/test_restart_notice.py`, and the
+real two-process `tests/server/test_restart_resume_application.py` (a resident
+storage service and a real headless execution host booting as the next
+generation in a private project).
+
 ## Problem
 
 Self-evolution goals run for hours to days. Committed-effect recovery now spans

@@ -74,7 +74,7 @@ class OrchestrationChatFlowCompletion:
         except Exception as exc:
             logger.debug(
                 '[FlowChat] trace capture failed task=%s: %s',
-                str(self._task.get('id') or '')[:8], exc,
+                str(self._task.get('id') or ''), exc,
             )
             self._task.setdefault('_flow_trace', [])
 

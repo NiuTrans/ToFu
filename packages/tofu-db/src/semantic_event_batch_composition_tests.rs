@@ -91,7 +91,9 @@ fn event_batch_composition_selected_groups_avoid_real_loose_spill_without_admiss
             assert_eq!(result["inserted"].as_u64().unwrap() as usize, (500 - first).min(size));
         }
         let file_syncs = vfs.trace().unwrap()[before..].iter().filter(|operation| **operation == Operation::SyncAll).count();
-        if size == 500 { assert!(file_syncs >= 1000, "oversized batch must spill actual loose files"); }
+        // The oversized batch still spills, but into one catalogued segment:
+        // its file syncs follow the publication, never the row count.
+        if size == 500 { assert!((1..size).contains(&file_syncs), "oversized spill paid {file_syncs} file syncs"); }
         else { assert_eq!(file_syncs, 0, "selected groups stay WAL-carried"); }
         // Crash loses all non-durable file/namespace effects; WAL or spill
         // barriers must preserve every acknowledged row on a fresh reopen.

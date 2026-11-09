@@ -95,6 +95,9 @@ and refuses any logging from the signal callback.
 对 live worker 执行 `stop` / `restart` 会中断在途任务：交互终端必须确认，非交互
 调用必须消费用户在 Tofu UI 中批准的一次性 `shutdown` / `restart` 记录。服务本来
 就未运行时，`stop` 保持幂等且不要求批准；`status`、`doctor`、`logs` 均为只读。
+界面的“批准并执行”会直接执行该操作并消费记录。CLI 登记待批准请求后，使用
+`python serverctl.py status` 观察执行结果；再次调用 `restart` / `stop` 是新的操作，
+并非领取前一次界面操作的结果。
 
 启动控制请求必须等待共享的源码产物准备窗口。此前 `start` 沿用普通查询的
 5 秒 HTTP 超时，会在 manager 仍正确准备产物时误报启动失败；现在它与

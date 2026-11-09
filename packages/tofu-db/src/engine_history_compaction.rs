@@ -20,7 +20,11 @@ pub(crate) struct PreparedHistoryCompaction {
     wal_cover: Option<crate::wal::PublicationWalCover>,
     restart_required: Arc<std::sync::atomic::AtomicBool>,
     completed: bool,
-    incremental_routing: bool,
+    /// Automatic slices publish the unchanged routing root: retired sources
+    /// leave the manifest, and their locations leave routing when a rotation's
+    /// merge rewrites their run (`RoutingRoot::append`). Hash-ordered pages
+    /// interleave every source, so dropping them here rewrote nearly every page.
+    lazy_routing_retirement: bool,
     /// The launch materialization budget that already sizes an automatic
     /// slice; it bounds the source bytes one promotion group keeps resident.
     promotion_group_bytes: u64,
@@ -31,7 +35,7 @@ impl PreparedHistoryCompaction {
     /// Operator compaction may retire the entire history. Preserve its
     /// streaming memory bound instead of retaining every source's locations.
     pub(super) fn use_streaming_routing_retirement(&mut self) {
-        self.incremental_routing = false;
+        self.lazy_routing_retirement = false;
     }
 }
 #[cfg(test)]
@@ -85,6 +89,16 @@ impl Engine {
         if first_retained == 0 {
             return Ok(None);
         }
+        self.prepare_history_publication(first_retained).map(Some)
+    }
+
+    /// Reserves the physical publication lane for a new history manifest that
+    /// retires `segments[..first_retained]` (none for the routing rewrite).
+    fn prepare_history_publication(&mut self, first_retained: usize) -> io::Result<PreparedHistoryCompaction> {
+        let current = self
+            .history_manifest
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "history is empty"))?;
         if self.rotation_in_flight || self.deferred_rotation.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -112,14 +126,52 @@ impl Engine {
             wal_cover: self.wal.publication_cover(Arc::clone(&self.vfs))?,
             restart_required: Arc::clone(&self.restart_required),
             completed: false,
-            incremental_routing: true,
+            lazy_routing_retirement: true,
             promotion_group_bytes: self.checkpoint_materialize_batch_bytes,
             #[cfg(test)]
             payload_segment_test_ids: Vec::new(),
         };
         self.async_publication_in_flight = true;
         self.open_publication_gc_window();
-        Ok(Some(prepared))
+        Ok(prepared)
+    }
+
+    /// The published routing root's shape; `None` without indexed history.
+    pub fn history_routing(&self) -> io::Result<Option<HistoryRouting>> {
+        let Some(manifest) = self.history_manifest.as_ref() else { return Ok(None) };
+        let Some(id) = manifest.payload_index_root_id else { return Ok(None) };
+        let root = crate::history_payload::RoutingRoot::decode(&self.blocks.get_materialized_shared(id)?)?;
+        Ok(Some(HistoryRouting {
+            version: root.version(),
+            entries: root.entries(),
+            pages: root.page_ids().count(),
+            retained_sources: manifest.segments.len(),
+        }))
+    }
+
+    /// The downgrade converter (`tofu-db rewrite-history-routing`). A lazily
+    /// retired root (version 2) is rewritten to hold only the locations of the
+    /// sources the manifest retains and published as version 1, which engines
+    /// before 2026-11-08 open; nothing is retired and every read answers as
+    /// before. The next automatic slice of a current engine marks it again.
+    /// Returns whether a root was rewritten.
+    pub fn rewrite_history_routing(&mut self) -> io::Result<bool> {
+        self.require_usable_authority()?;
+        self.require_physical_maintenance_available()?;
+        if self.history_routing()?.is_none_or(|routing| routing.version == 1) {
+            return Ok(false);
+        }
+        if self.state.authority_state_root.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "history compaction requires a current authority state root",
+            ));
+        }
+        let mut prepared = self.prepare_history_publication(0)?;
+        prepared.use_streaming_routing_retirement();
+        let outcome = encode_history_compaction(&prepared);
+        self.finish_history_compaction(prepared, outcome)?;
+        Ok(true)
     }
 
     pub(crate) fn finish_history_compaction(
@@ -186,10 +238,10 @@ impl Engine {
 /// No Engine/authority borrow. Keeps one promotion group resident: the
 /// retired sources of one automatic slice, whose total the launch
 /// materialization budget bounds (a single larger source forms its own
-/// group), plus one payload-segment encoder and the exact retirement
-/// locations of an automatic slice. Bulk operator compaction streams group by
-/// group without collecting those locations. Existing payload catalog/GC owns
-/// promoted bytes; no new registry exists.
+/// group), plus one payload-segment encoder. Automatic slices write no
+/// routing page; bulk operator compaction streams one rewrite of the retained
+/// routing. Existing payload catalog/GC owns promoted bytes; no new registry
+/// exists.
 pub(crate) fn encode_history_compaction(
     prepared: &PreparedHistoryCompaction,
 ) -> io::Result<HistoryCompactionOutcome> {
@@ -202,7 +254,6 @@ pub(crate) fn encode_history_compaction(
         test_segment_ids: prepared.payload_segment_test_ids.iter(),
     };
     let mut group = PromotionGroup::default();
-    let mut retired_locations = prepared.incremental_routing.then(BTreeSet::new);
     for reference in &prepared.current.segments[..prepared.first_retained] {
         if let Some(index_id) = reference.payload_index_block_id {
             let source = blocks.get_materialized_uncached(reference.block_id)?;
@@ -221,12 +272,6 @@ pub(crate) fn encode_history_compaction(
                 }
                 group.add(source, &index.entries)?;
             }
-            // Retired locations leave routing only through this publication,
-            // which any failed promotion aborts. A duplicate payload in a
-            // retained source stays visible.
-            if let Some(locations) = &mut retired_locations {
-                locations.extend(index.entries.iter().map(|entry| (entry.0, index.source)));
-            }
         }
     }
     if !group.units.is_empty() {
@@ -242,17 +287,23 @@ pub(crate) fn encode_history_compaction(
         .map(|id| {
             let root =
                 crate::history_payload::RoutingRoot::decode(&blocks.get_materialized_shared(id)?)?;
-            match &retired_locations {
-                Some(locations) => root.remove_locations(blocks, locations),
-                None => root.retain_sources(blocks,
-                    &segments.iter().map(|reference| reference.block_id).collect()),
+            if prepared.lazy_routing_retirement {
+                if root.holds_retired() {
+                    return Ok((root, id));
+                }
+                // Same pages; only the root's version tells older engines,
+                // which read a retired location as corruption, to refuse it.
+                let root = root.with_retired_sources();
+                let id = blocks.put_loose(&root.encode()?)?;
+                return Ok((root, id));
             }
+            let root = root.retain_sources(blocks,
+                &segments.iter().map(|reference| reference.block_id).collect())?;
+            let id = blocks.put_loose(&root.encode()?)?;
+            Ok::<_, io::Error>((root, id))
         })
         .transpose()?;
-    let routing_id = routing
-        .as_ref()
-        .map(|root| blocks.put_loose(&root.encode()?))
-        .transpose()?;
+    let (routing, routing_id) = routing.unzip();
     let mut history = HistoryManifest {
         manifest_page_ids: Vec::new(),
         checkpoint_sequence: prepared.current.checkpoint_sequence,

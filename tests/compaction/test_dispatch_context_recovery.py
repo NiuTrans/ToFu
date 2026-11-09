@@ -238,7 +238,7 @@ def test_stale_or_unaccepted_archive_falls_back_without_losing_observations(
     assert task['_compactionResumeOutcome'] == {'reason': reason, 'archiveId': None}
 
 
-def test_resume_projection_receives_fresh_history_proof_without_completed_prefix_reuse():
+def test_resume_projection_receives_fresh_history_proof():
     from lib.tasks_pkg.model_replay import restore_prefix
     config = {'model': 'gpt-6-astra', 'checkpointToolRounds': [_round(1)]}
     proof = {'version': 1, 'count': 1, 'digest': 'd' * 64}
@@ -563,12 +563,16 @@ def test_successful_continue_can_publish_a_fresh_completed_prefix(monkeypatch, m
     assert candidate['content'] == task['content']
     assert candidate['projection']['messages'][-1]['content'] == task['content']
     assert task['_modelReplayPublishStatus'] == 'prepared'
-    # Publication admission must not grant restoration admission for this same Turn.
+    # Publication admission never grants restoration of this same Turn: its own
+    # published checkpoint is refused even if a context ever offered it.
     proof = {'version': 2, 'count': 1, 'digest': 'd' * 64}
+    published = {**candidate['projection'], 'historyProof': proof,
+                 'turns': [['turn', 'e' * 64]]}
     assert restore_prefix([{'turnId': 'human'}, {'turnId': 'turn'}], config,
         conversation_id='conversation', user_id=1,
-        validated_context={'historyProof': proof, 'proofEligible': True}) == ([], 0)
-    assert config['_modelReplayStatus'] == 'unsupported_mode'
+        validated_context={'historyProof': proof, 'proofEligible': True,
+                           'continuation': published}) == ([], 0)
+    assert config['_modelReplayStatus'] == 'checkpoint_not_before_target'
 
 
 @pytest.mark.parametrize('change,reason', [

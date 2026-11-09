@@ -1,5 +1,6 @@
 """Independent conversations reuse existing durable grants and Turn admission."""
 from copy import deepcopy
+from importlib import import_module
 import json
 from types import SimpleNamespace
 
@@ -20,6 +21,10 @@ def runtime(context, monkeypatch):
     from lib.conversations import project_coordination, project_messages, repository as conversations
     from lib.project_dispatch import repository, service
     from lib.storage import service as storage_service
+    # Lazy consumers capture these factories and Turn readers at import time.
+    # Load their real bindings before source modules receive fixture fakes.
+    import_module('lib.project_dispatch.recovery')
+    import_module('lib.conversation_sync.runtime')
     monkeypatch.setattr(project_coordination, 'ProjectCoordinationRepository', lambda owner: c.binding)
     monkeypatch.setattr(repository, 'ProjectDispatchRepository', lambda owner, path: c.repository(owner, path))
     monkeypatch.setattr(conversations, 'ConversationRepository', lambda: c.conversations)
@@ -82,6 +87,13 @@ def test_late_storage_consumer_follows_runtime_restoration(runtime, monkeypatch)
     monkeypatch.setattr(storage_service, '_runtime', SimpleNamespace(
         client=lambda **kwargs: restored_client))
     assert get_storage_client() is restored_client
+
+
+def test_late_recovery_consumer_does_not_retain_fixture_factories(runtime):
+    from lib.project_dispatch import recovery
+
+    assert recovery.ProjectDispatchRepository is type(runtime.c.repo)
+    assert recovery.ProjectDispatchService is ProjectDispatchService
 
 
 @pytest.mark.parametrize('files', [False, True])

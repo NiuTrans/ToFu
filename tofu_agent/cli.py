@@ -17,6 +17,7 @@ from tofu_agent.models import (
     ModelRoutingConfig,
 )
 from tofu_agent.provider_setup import ModelRoutingSetupService
+from lib.agent_core.run_contract import THINKING_DEPTHS
 from lib.trajectory import AVAILABLE_FORMATS
 from tofu_agent.provider_store import (
     ModelRoutingSettingsStore,
@@ -150,6 +151,11 @@ def _parser() -> argparse.ArgumentParser:
              'exposes the full storage-free tool surface (dangerous execution '
              'stays opt-in inside TOOLS_ALL). Keyword-routed exposure is '
              'opt-in via TOFU_AGENT_RUN_NATIVE_EXPOSURE=routed.')
+    run_parser.add_argument(
+        '--thinking', choices=sorted(THINKING_DEPTHS),
+        default=os.environ.get('TOFU_AGENT_RUN_THINKING') or None,
+        help='Reasoning depth (%(choices)s). Omitted leaves the model route '
+             'default; TOFU_AGENT_RUN_THINKING supplies the same value.')
     run_parser.add_argument(
         '--delegate-mode', action='store_true',
         default=os.environ.get('TOFU_AGENT_RUN_DELEGATE_MODE', '')
@@ -345,6 +351,8 @@ def _prepare_run(args):
 
     config: dict = {}
     config['project'] = args.cwd or os.getcwd()
+    if getattr(args, 'thinking', None):
+        config['thinking'] = args.thinking
     if args.tools:
         tags = [tag.strip() for tag in args.tools.split(',') if tag.strip()]
         config['tools'] = tags[0] if len(tags) == 1 else tags

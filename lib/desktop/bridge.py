@@ -401,6 +401,18 @@ def _addressing_enqueue_error(target_agent_id, user_id=''):
     return None
 
 
+def _device_wait_scope(cmd):
+    """Publish a queued command to the owning task's liveness judge, when known."""
+    from contextlib import nullcontext
+    from lib.project_mod.tool_admission import cancellation as current
+    control = current()
+    task = control.task if control is not None else None
+    if not isinstance(task, dict):
+        return nullcontext()
+    from lib.tasks_pkg.explained_wait import device_wait
+    return device_wait(task, cmd)
+
+
 def send_desktop_command(cmd_type, params=None, timeout=None, target_agent_id=None,
                          user_id='', cmd_id=None, ttl=None, cancellation=None):
     """Queue a command and wait for settlement or an explicit caller stop.
@@ -446,18 +458,19 @@ def send_desktop_command(cmd_type, params=None, timeout=None, target_agent_id=No
 
     deadline = time.monotonic() + timeout if timeout is not None else None
     cancelled = False
-    while not event.is_set():
-        if cancellation is not None and cancellation.is_set():
-            cancelled = True
-            break
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            break
-        # Poll only a supplied cancellation signal; otherwise block on settlement.
-        interval = remaining
-        if cancellation is not None:
-            interval = .25 if remaining is None else min(.25, remaining)
-        event.wait(timeout=interval)
+    with _device_wait_scope(cmd):
+        while not event.is_set():
+            if cancellation is not None and cancellation.is_set():
+                cancelled = True
+                break
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                break
+            # Poll only a supplied cancellation signal; otherwise block on settlement.
+            interval = remaining
+            if cancellation is not None:
+                interval = .25 if remaining is None else min(.25, remaining)
+            event.wait(timeout=interval)
 
     with command_queue_lock:
         cmd = command_queue.get(cmd_id, cmd)

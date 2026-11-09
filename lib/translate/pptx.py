@@ -10,7 +10,7 @@ but include extra fields: ``type='pptx'``, ``filename``, ``download_url``.
 
 import os
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -54,7 +54,7 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
         if not text or not text.strip():
             return text
         c, _u = _translate_one_chunk(text, system_prompt,
-                                     chunk_label=f':pptx-{task_id[:6]}',
+                                     chunk_label=f':pptx-{task_id}',
                                      source=source, target=target,
                                      abort_check=task['abort_event'].is_set)
         return c
@@ -100,7 +100,7 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
                 error=envelope,
                 error_context='pptx-translate',
             )
-            logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8],
+            logger.error('[PPTX-Translate] Task %s failed: %s', task_log_tag(task_id),
                          _err_text)
             return
 
@@ -117,14 +117,14 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
 
         logger.info('[PPTX-Translate] Task %s done: %s — %d slides, %d segments, '
                     '%d chars, %.1fs',
-                    task_id[:8], filename, result.get('slides', 0),
+                    task_log_tag(task_id), filename, result.get('slides', 0),
                     result.get('segments', 0), result.get('chars_translated', 0),
                     result.get('elapsed', 0))
 
     except Exception as e:
         if task['abort_event'].is_set():
             _translate_runtime.finish(task_id)
-            logger.info('[PPTX-Translate] Task %s aborted', task_id[:8])
+            logger.info('[PPTX-Translate] Task %s aborted', task_log_tag(task_id))
             return
         from lib.error_envelope import from_exception as _err_from_exc
         envelope = _err_from_exc(
@@ -136,7 +136,7 @@ def _do_translate_pptx(task_id, input_path, filename, target, source):
             error=envelope,
             error_context='pptx-translate',
         )
-        logger.error('[PPTX-Translate] Task %s failed: %s', task_id[:8], e, exc_info=True)
+        logger.error('[PPTX-Translate] Task %s failed: %s', task_log_tag(task_id), e, exc_info=True)
     finally:
         # Clean up input file (translated file kept for download)
         try:

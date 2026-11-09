@@ -11,10 +11,17 @@ from lib.router.relay import relay_command_id, relay_project_report
 from lib.scheduler.conversation_dispatch import ScheduledTurnDispatch
 from tests.project_mod.test_coordinator_reports import reports as reports  # noqa: F401  fixture
 
+
+
 pytestmark = pytest.mark.unit
 REPORT = {'projectPath': '/work/project', 'coordinatorId': 'coordinator-project', 'turnId': 'report-turn',
           'kind': 'delivery', 'title': 'Parser fix merged',
           'message': 'Fixed the null pointer; regression test added and green.'}
+
+
+@pytest.fixture(autouse=True)
+def _daytime(monkeypatch):
+    monkeypatch.setattr('lib.router.proactive.held.quiet_hours_active', lambda *args, **kw: False)
 
 
 @pytest.fixture

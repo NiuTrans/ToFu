@@ -11,9 +11,13 @@ admits it only through ``verify_forwarded_turn``. An owner message steered into
 the router's running reply is named by ``steerId`` (its user-steer record in
 that reply Turn, whose committed author is the authority); ``owner_steer_carriers``
 labels such a message with its steer id in the router's model view. The router's
-note and an instruction's triggering event travel as a separate peer-initiated
-input, never inside the owner's text. A deterministic command id per (router
-conversation, source, project) makes every retry deliver at most once.
+note and an instruction's triggering event are nonhuman evidence **inside that
+same input**: ``content`` is the owner's text followed by the labelled evidence,
+``originalContent`` keeps the owner's verbatim words, which is exactly what
+``authored_text`` and the forward verification compare. A second input would
+become its own synthetic Coordinator request whenever the steer window had
+closed and re-attempt the work with no authority. A deterministic command id per
+(router conversation, source, project) makes every retry deliver at most once.
 
 Entry points: route_to_project(task, scope, arguments, *, dispatch=None),
 verify_forwarded_turn(turn, *, user_id), forward_command_id,
@@ -229,34 +233,33 @@ def route_to_project(task: dict, scope: dict, arguments: dict, *, dispatch=None)
                      'instructionId': instruction_id}
         command_id = forward_command_id(router_id, {'instructionId': instruction_id, **trigger}, project)
     target, created = _ensure_project_router(owner, project, task.get('config') or {})
+    evidence = _evidence_text(router_id, forwarded, arguments.get('note'), trigger)
+    message = {'role': 'user', 'origin': {'initiator': 'human', 'forwardedFrom': forwarded}}
+    if evidence is None:
+        message['content'] = text
+    else:
+        # One Coordinator request, not two: the owner's verbatim words stay the
+        # authored text that require_human_turn/verify_forwarded_turn compare,
+        # while the model reads them together with the nonhuman evidence. A
+        # second input would become its own synthetic Coordinator request
+        # whenever the steer window had closed, re-attempting this work with no
+        # authority (docs/ROUTER.md R2 "Evidence rides the same request").
+        message['content'] = text + '\n\n' + evidence
+        message['originalContent'] = text
     if dispatch is None:
         from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn as dispatch
     outcome = dispatch(
-        target['conversationId'],
-        {'role': 'user', 'content': text, 'origin': {'initiator': 'human', 'forwardedFrom': forwarded}},
-        {}, user_id=owner, command_id=command_id, log_prefix='[Router]',
-        input_actor='human', inject_mode='steer')
+        target['conversationId'], message, {}, user_id=owner, command_id=command_id,
+        log_prefix='[Router]', input_actor='human', inject_mode='steer')
     if not outcome.accepted:
         error = ValueError('The Project Router did not accept the forwarded request '
                            f'({outcome.disposition}); retry with the same arguments')
         error.execution_started = False if outcome.disposition == 'target_missing' else None
         raise error
-    evidence = _evidence_text(router_id, forwarded, arguments.get('note'), trigger)
-    evidence_disposition = None
-    if evidence is not None:
-        from lib.turn_initiation import INITIATOR_PEER, stamp_initiator
-        message = stamp_initiator({'role': 'user', 'content': evidence,
-                                   'origin': {'initiator': 'peer', 'sourceConversationId': router_id}},
-                                  INITIATOR_PEER)
-        # A queued request must not let its context steer an unrelated live request.
-        evidence_disposition = dispatch(
-            target['conversationId'], message, {}, user_id=owner, command_id=command_id + ':context',
-            log_prefix='[Router]', inject_mode='queue' if outcome.disposition == 'queued' else 'steer',
-        ).disposition
     result = {'project_path': project, 'coordinator_conversation_id': target['conversationId'],
               'binding_revision': target['revision'], 'project_router_created': created,
               'disposition': outcome.disposition, 'forwarded_from': forwarded,
-              'context_disposition': evidence_disposition, 'command_id': command_id}
+              'context_disposition': None, 'command_id': command_id}
     if instruction_id is not None:
         application = RouterInstructions(owner).record_application({
             'version': 1, 'owner': owner, 'instructionId': instruction_id,

@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 
 from lib.log import get_logger
 from lib.proxy import SUBSCRIPTION_HOSTS
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
@@ -169,7 +169,7 @@ def _probe_host(url: str, *, cancelled=None) -> str:
     """Classify server reachability through the subscription route manager.
 
     Route health is owned per ``(host, concrete path)`` by
-    :mod:`lib.subscription_routes`; these small TTL caches are only a mirror
+    :mod:`lib.network_routes`; these small TTL caches are only a mirror
     for the non-blocking Settings status surface and never gate requests.
     """
     host = (urlparse(url).hostname or '').lower()
@@ -680,7 +680,7 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
     NEVER probes inline — reads the stable or short-lived failure cache only.
     """
     host = (host or '').lower()
-    from lib.subscription_routes import manager as route_manager
+    from lib.network_routes import manager as route_manager
     route_status = route_manager.status()
     preferred_route_id = route_status.get('preferred', {}).get(host, '')
     route_rows = {

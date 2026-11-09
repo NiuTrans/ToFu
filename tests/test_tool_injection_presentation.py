@@ -319,6 +319,41 @@ const peerImgHtml = presentation.renderInjectionHtml({
 check('peer_images_render_through_the_same_grid',
   peerImgHtml.includes('sw-inject-img-grid')
   && peerImgHtml.includes('data-preview-src="/api/images/peer_b.png"'));
+// Behind a reverse proxy (BASE_PATH /proxy/15000) a stored upload must load
+// through the same media URL port message-bubble images use.
+const proxiedSteerImgHtml = createToolInjectionPresentation({
+  translate,
+  renderMarkdown: escaped,
+  iconHtml: () => '',
+  resolveConversationTitle: () => '',
+  resolveMediaUrl: (url) => (url.startsWith('/') ? `/proxy/15000${url}` : url),
+}).renderInjectionHtml({
+  _userSteerInject: true,
+  steerPreviews: [{
+    text: 'see this',
+    images: [
+      { preview: '/api/images/steer_a.png' },
+      { preview: 'data:image/png;base64,iVBORw0KGgo=' },
+    ],
+  }],
+});
+check('steer_image_uploads_resolve_through_the_media_url_port',
+  proxiedSteerImgHtml.includes('src="/proxy/15000/api/images/steer_a.png"')
+  && proxiedSteerImgHtml.includes('data-preview-src="/proxy/15000/api/images/steer_a.png"')
+  && proxiedSteerImgHtml.includes('src="data:image/png;base64,iVBORw0KGgo="'));
+const hostileResolverHtml = createToolInjectionPresentation({
+  translate,
+  renderMarkdown: escaped,
+  iconHtml: () => '',
+  resolveConversationTitle: () => '',
+  resolveMediaUrl: () => 'javascript:alert(1)',
+}).renderInjectionHtml({
+  _userSteerInject: true,
+  steerPreviews: [{ text: 'x', images: [{ preview: '/api/images/a.png' }] }],
+});
+check('resolved_steer_image_urls_stay_whitelisted',
+  !hostileResolverHtml.includes('javascript:')
+  && !hostileResolverHtml.includes('data-preview-src'));
 
 const stallHtml = presentation.renderInjectionHtml({
   _stallNudge: true,
@@ -429,6 +464,6 @@ def test_tool_injection_owner_contract():
     run_harness(
         target_js=str(OWNER_JS),
         body_js=_OWNER_HARNESS,
-        expect_pass=30,
+        expect_pass=32,
         label='tool injection presentation owner',
     )

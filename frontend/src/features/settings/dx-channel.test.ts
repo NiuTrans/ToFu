@@ -310,6 +310,17 @@ describe('大象 settings tab', () => {
     expect(findButton('common.cancel')).toBeUndefined();
   });
 
+  it('says a runtime refusal is not a login problem and offers no login or reconnect', async () => {
+    const api = fakeApi(account({ status: status('runtime_unavailable', 'bridge exited (1): SSO_NODE_UNAVAILABLE: no Node') }));
+    runtime.Api = { channels: api };
+    populateDxTab();
+    await settle();
+    expect(text()).toContain('settings.dx.state.runtime_unavailable — bridge exited (1): SSO_NODE_UNAVAILABLE: no Node');
+    expect(text()).toContain('settings.dx.hint.runtimeUnavailable');
+    expect(text()).not.toContain('settings.dx.hint.needsLogin');
+    expect(findButton('settings.dx.reconnect')).toBeUndefined();
+  });
+
   it('reconnects an account that needs the owner to act', async () => {
     const api = fakeApi(account({ status: status('kicked') }));
     runtime.Api = { channels: api };
@@ -660,7 +671,7 @@ const SECRET = 'fake-robot-secret-never-real-42';
 
 function robotView(overrides: Partial<DxRobotView> = {}): DxRobotView {
   return { clientId: 'fake-robot-client', credentialName: 'channel.u1.dx.robot', credentialHint: 'fa…42',
-           managed: true, error: null, ...overrides };
+           managed: true, builtIn: false, error: null, ...overrides };
 }
 
 function robotCard(): HTMLElement {

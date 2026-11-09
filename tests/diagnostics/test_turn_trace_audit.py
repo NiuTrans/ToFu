@@ -59,6 +59,49 @@ def test_parse_summary_line_reads_keys_and_ignores_unknown_ones():
     assert audit.parse_summary_line('[TurnTraceSummary] task=a totalMs=1') is None
 
 
+def _fold_rows(task_id, rows):
+    from lib.tasks_pkg import turn_trace
+
+    t0 = 1_724_000_000_000
+    seeded = [{'event_id': index, 'type': kind, 'payload': payload | {'type': kind},
+               'ts_ms': t0 + offset} for index, (kind, offset, payload) in enumerate(rows)]
+    original = turn_trace._read_trace_rows
+    turn_trace._read_trace_rows = lambda selected: list(seeded)
+    try:
+        return turn_trace.fold_task_trace(task_id)
+    finally:
+        turn_trace._read_trace_rows = original
+
+
+def test_failed_attempt_time_is_parsed_aggregated_and_reported():
+    gateway_hold = audit.parse_summary_line(_line(
+        6, 'task-504', 'conv-1', total=9_000, wait=300, admission=0, retry=300,
+        spawn=0, extra=' failedAttemptMs=7000'))
+    older = audit.parse_summary_line(_line(
+        7, 'task-old', 'conv-1', total=1_000, wait=0, admission=0, retry=0, spawn=0))
+    assert (gateway_hold['failedAttemptMs'], older['failedAttemptMs']) == (7_000, 0)
+
+    trace = _fold_rows('task-api', [
+        ('round_start', 0, {'roundNum': 1}),
+        ('phase', 100, {'phase': 'waiting_model'}),
+        ('phase', 2_100, {'phase': 'retrying', 'attempt': 1, 'statusCode': 504}),
+        ('model_request_start', 2_400, {'spanId': 'm2', 'roundNum': 1}),
+        ('delta', 3_400, {}),
+        ('round_end', 4_000, {'roundNum': 1, 'reason': 'final'}),
+        ('done', 4_000, {'finishReason': 'stop'}),
+    ])
+    from_api = audit.record_from_trace(trace, 'conv-2')
+    assert (from_api['failedAttemptMs'], from_api['ttftMs']) == (2_000, 1_000)
+
+    report = audit.build_report([gateway_hold, older, from_api], source='mixed')
+    assert report['overall']['failedAttemptMs'] == 9_000
+    assert report['conversations']['conv-1']['failedAttemptMs'] == 7_000
+    text = '\n'.join(audit.render_text(report))
+    assert 'failed attempt (in llm)' in text and 'failedAtt' in text
+    (row,) = [line for line in text.splitlines() if line.lstrip().startswith('task-504')]
+    assert '7.0s' in row.split()[5]  # total, llm, then the failed-attempt column
+
+
 def test_logs_mode_streams_rotations_dedupes_and_splits_wait(log_dir):
     paths = audit.summary_log_files(log_dir)
     assert [path.name for path in paths] == ['app.log.2026-10-22', 'app.log']

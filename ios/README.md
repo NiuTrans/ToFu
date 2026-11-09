@@ -16,7 +16,8 @@ build; XcodeGen's project and Info.plist are generated outputs.
 
 | Owner | Responsibility |
 |---|---|
-| `ServerUrl`, `SupervisorUrl`, `FormEncoding` | URL authority, proxy prefixes, endpoint and form encoding |
+| `ServerUrl`, `SupervisorUrl`, `FormEncoding` | Credential-free saved URLs, transient navigation, proxy prefixes and encoding |
+| `ConnectionOnboarding`, `ConnectionReviewState`, `ProfileOperationGeneration` | Review-only inbound metadata and UI-intent fencing |
 | `SessionManager`, `LoginRetryPolicy` | Session orchestration, retries, stale-operation checks |
 | `GatewayLogin`, `LoginForm` | Bounded discovery and recognized password submission |
 | `GatewaySessionProbe`, `GatewayHTTP` | Protected endpoint evidence, per-URL cookies, explicit redirects |
@@ -42,26 +43,50 @@ production compile or lifecycle failures.
 ## Authentication contract
 
 - Saved `NONE` remains an explicit choice and performs zero native requests.
-  Proxy/absproxy defaults apply only when creating a profile. URL userinfo is
-  rejected; IPv6, non-default ports and code-server prefixes are preserved.
+  Proxy/absproxy defaults apply only to new profiles/drafts, never saved rows.
+  Saved, QR and pasted URLs reject userinfo and credential-like query/fragment
+  fields, including encoded names and nested redirect/query values. Canonical
+  URLs preserve IPv6, ports, proxy prefixes and safe SPA parameters. Rejected
+  labels never echo raw input. Legacy URLs are sanitized only for explicit
+  editing; activation never rewrites their URL or authentication choice.
+- `tofu://connect?url=<encoded-http(s)-url>&name=<optional-name>` and the Paste
+  action open review metadata only: no imported passwords, project paths,
+  persistence, probes or sign-in. The connection-link protocol accepts up to
+  8 KiB of input and an optional 80-character name. Every open form, including
+  an untouched edit, retains its identity and fields until **Use link** replaces
+  it or **Keep form** discards the suggestion. Only the latest pending metadata
+  is retained. Submitted passwords and disappearing/replaced form drafts are
+  cleared; no password is stored in connection-review state.
+- `AppViewModel` owns one cancellable Add/Edit/Open/Delete operation. Cancel,
+  Back, form edits, links, review decisions and new selections invalidate its
+  generation. Results can publish errors or navigate only while that intent is
+  current and the actual stored configuration still matches. Recency/cookie/
+  instance stamps are not configuration edits. A deleted row, including a
+  saved `NONE` snapshot, can never fall back to the rendered list copy.
+  Edit credentials are reconciled only after the intended row is read back,
+  even if Cancel arrives during a nonthrowing commit; changed vault keys are
+  preserved with an error instead of overwritten, and SQLite/Keychain still
+  cannot provide a shared crash-atomic transaction.
 - Discovery starts at the configured app URL and follows at most eight
   same-origin redirects. Cookies are selected for each full request URL. A
   foreign redirect, absent password or unknown/ambiguous form opens interactive
   sign-in. Saved credentials are submitted only to one recognized code-server
   form, preserving hidden fields and the return target.
 - Cached cookies and browser landing pages are candidates. Authentication
-  requires protected `/api/v4/conversations?limit=1&meta=1` metadata or Tofu's own
-  authentication refusal. A stopped app may use the configured supervisor's
-  versioned status response. Public health/meta, HTML and unrelated JSON do not
+  requires protected `/api/v4/conversations?limit=1&meta=1` metadata with the
+  maintained success envelope's `meta.requestId` or Tofu's own authentication
+  refusal (whose `requestId` remains top-level). A stopped app may use the
+  configured supervisor's versioned status response. Public health/meta, HTML and unrelated JSON do not
   prove the gate has been passed. A valid issued code-server cookie after a
   trusted password submission is also accepted, as on Android.
 - Cookie host stamps compare profile id, alias, URL and saved auth atomically;
   a changed/deleted profile cannot be promoted by an old request. Recency and
   project path changes are preserved. Password sharing requires the same HTTP
   origin and code-server prefix.
-- Interactive mode is temporary screen state; it does not overwrite saved
-  auth. Returning to the configured login page may resume password sign-in
-  once. Main-frame messages and native reauth accept only the configured
+- Interactive mode and credential-bearing SSO callbacks are temporary screen
+  state; `parseNavigation` admits callbacks but cannot authorize persistence.
+  They do not overwrite saved auth. Returning to the configured login page may
+  resume password sign-in once. Main-frame messages and native reauth accept only the configured
   origin, including scheme and port. Wire names `TofuNative.requestReauth`,
   `TofuDiag.deliver`, `tofu:native-visibility`, `window.tofuStartPending` and
   `SupervisorBridge.pendingDefaultsKey` stay shared with the SPA.
@@ -87,6 +112,13 @@ swift test --package-path ios
 python3 -m pytest tests/mobile/test_ios_client_structure.py
 ```
 
+`SecurityRegressionsTests` and `ConnectionIntentTests` cover saved/transient URL
+separation, legacy editing, review choices and superseded UI intents. Compiled
+fault injection also exercises a late controller handoff, deletion during a
+real SQLite recency write and cancellation after a password request reaches the
+transport. Existing Foundation pool/response-bound and atomic SQLite tests
+remain part of the core gate; source structure or syntax checks are not builds.
+
 CI runs the core on Linux and macOS. The Apple-only SameSite adapter test runs
 on macOS. The existing macOS job also builds an unsigned iOS simulator app.
 A local simulator build requires Xcode 15+ and XcodeGen:
@@ -99,7 +131,9 @@ xcodebuild build -project TofuClient.xcodeproj -scheme TofuClient \
 ```
 
 Linux success does not validate Keychain, actual WKWebView persistence, TLS
-prompts, media capture or simulator linkage. Device checks remain necessary.
+prompts, media capture or simulator linkage. Device checks remain necessary,
+including cold/warm OS or QR links, Use link/Keep form on dirty edits, password
+draft cleanup, SSO callbacks and cancellation without late screen changes.
 WebKit's public website-data records are grouped by domain and do not expose
 scheme/port: old-profile cookie removal is exact-host/path aware and preserves
 parent-domain IdP cookies, while storage cleanup removes only records naming

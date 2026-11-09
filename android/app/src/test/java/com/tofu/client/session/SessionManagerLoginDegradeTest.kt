@@ -1,6 +1,7 @@
 package com.tofu.client.session
 
 import com.tofu.client.data.AuthType
+import com.tofu.client.data.KernelKind
 import com.tofu.client.data.Profile
 import com.tofu.client.data.ProfileDao
 import kotlinx.coroutines.flow.Flow
@@ -39,7 +40,7 @@ class SessionManagerLoginDegradeTest {
         override fun secretFor(alias: String): String? = secret
     }
 
-    private class FakeDao(private var current: Profile) : ProfileDao {
+    private class FakeDao(private var current: Profile) : ProfileDaoFixture {
         val updates = mutableListOf<Profile>()
         override fun observeAll(): Flow<List<Profile>> = flowOf(listOf(current))
         override suspend fun getById(id: Long): Profile? = current
@@ -54,7 +55,7 @@ class SessionManagerLoginDegradeTest {
         }
         override suspend fun setCookieHostIfCurrent(id: Long, expectedUrl: String, expectedAlias: String, expectedAuthType: AuthType, host: String): Int {
             val row = getById(id) ?: return 0
-            return if (row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
+            return if (row.kind == KernelKind.REMOTE_URL && row.baseUrl == expectedUrl && row.alias == expectedAlias && row.authType == expectedAuthType) setCookieHost(id, host) else 0
         }
         override suspend fun touchLastUsed(id: Long, timestamp: Long): Int {
             current = current.copy(lastUsedAt = timestamp); return 1
@@ -268,14 +269,14 @@ class SessionManagerLoginDegradeTest {
         // NoHttpAllowed interceptor throws the moment login() issues the GET/POST
         // handshake, exactly reproducing the pre-fix on-device failure path.
         val cookies = FakeCookieSink()
-        val dao = FakeDao(profile())
+        val noneProfile = profile().copy(authType = AuthType.NONE)
+        val dao = FakeDao(noneProfile)
         val http = OkHttpClient.Builder()
             .followRedirects(false)
             .followSslRedirects(false)
             .addInterceptor(NoHttpAllowed())
             .build()
 
-        val noneProfile = profile().copy(authType = AuthType.NONE)
         // A NONE profile also has no stored secret; login must not need one.
         val mgr = SessionManager(dao, FakeSecrets(null), cookies, http)
 

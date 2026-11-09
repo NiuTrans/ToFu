@@ -903,6 +903,10 @@ def _make_sh_project(tmp_path, neuter_setsid=False):
     proj.mkdir()
     (proj / 'data').mkdir()
     src = open(_REAL_SUPERVISOR_SH).read()
+    # Disposable shell tests exercise the PID-owned fallback only. Their
+    # status/stop paths must never consult or mutate the caller's user unit.
+    src = src.replace('set -euo pipefail\n',
+                      'set -euo pipefail\nsystemctl() { return 1; }\n', 1)
     if neuter_setsid:
         # Force the non-setsid path: make `command -v setsid` fail AND turn the
         # setsid launch into a bare background job in the caller's session.
@@ -934,6 +938,31 @@ def _make_sh_project(tmp_path, neuter_setsid=False):
     )
     (proj / 'supervisor.py').write_text(stub)
     return proj
+
+
+@_needs_bash_setsid
+def test_shell_fixture_never_reaches_the_users_systemctl(tmp_path):
+    """Disposable watchdog controls own only their PID group, not a user unit."""
+    import shlex
+
+    proj = _make_sh_project(tmp_path)
+    binaries = tmp_path / 'host-binaries'
+    binaries.mkdir()
+    trace = tmp_path / 'systemctl-calls'
+    host_systemctl = binaries / 'systemctl'
+    host_systemctl.write_text(
+        '#!/bin/sh\n'
+        f'printf "%s\\n" "$*" >> {shlex.quote(str(trace))}\n'
+        'exit 0\n', encoding='utf-8')
+    host_systemctl.chmod(0o755)
+    env = dict(os.environ, PATH=f'{binaries}{os.pathsep}{os.environ["PATH"]}')
+    env.pop('BASH_ENV', None)
+    env.pop('BASH_FUNC_systemctl%%', None)
+    result = subprocess.run(
+        ['bash', str(proj / 'supervisor.sh'), 'stop'], env=env,
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert not trace.exists(), 'a disposable fixture reached the host user unit'
 
 
 def _read_pid(proj):
@@ -1255,85 +1284,132 @@ def test_setsid_is_load_bearing_neuter(tmp_path, supervisor_owner_lease):
 
 def _run_watchdog_with_fastfail(
         tmp_path, owner_pid, neuter_backoff=False):
-    """Run cmd_watchdog in the FOREGROUND against a stub supervisor.py that
-    exits immediately (simulating a persistent port-in-use fast-fail), for a
-    bounded window. Each launch appends a line to launches.log. Returns the
-    number of launches observed in a 15s window.
+    """Observe real watchdog launches/sleep requests over 15 injected seconds.
 
-    When *neuter_backoff* is True, strip the escalation so the loop restarts at
-    the fixed 2s base every time — the storm the backoff is meant to prevent.
+    Interpreter startup and scheduling must not consume the observation window
+    or make the fast-failing child look healthy. BASH_ENV replaces only this
+    copied shell's date/sleep boundary: time stands still while the child runs,
+    and each sleep advances by its actual requested duration after our ACK.
+    Longer real sleeps/deadlines would merely hide the next loaded-host failure.
     """
-    proj = tmp_path / ('wd_neuter' if neuter_backoff else 'wd')
-    proj.mkdir()
-    (proj / 'data').mkdir()
-    src = open(_REAL_SUPERVISOR_SH).read()
-    if neuter_backoff:
-        # Defeat escalation: never double the backoff (constant 2s base).
-        src = src.replace('_backoff=$(( _backoff * 2 ))', '_backoff="$_backoff"')
-    (proj / 'supervisor.sh').write_text(src)
-    os.chmod(proj / 'supervisor.sh', 0o755)
-    launches = proj / 'launches.log'
-    # Stub exits instantly (fast-fail) and records each start.
-    (proj / 'supervisor.py').write_text(
-        f"open({str(launches)!r}, 'a').write('x\\n')\n"
-        "import sys; sys.exit(1)\n"
+    from lib.project_mod.process_group import (
+        group_has_live_members, retire_process_group,
     )
+
+    proj = _make_sh_project(tmp_path)
+    sh = proj / 'supervisor.sh'
+    if neuter_backoff:
+        # Mutate only escalation in the disposable copy, not any watchdog
+        # constants, lifecycle checks, or the injected observation window.
+        src = sh.read_text(encoding='utf-8')
+        neutered = src.replace(
+            '_backoff=$(( _backoff * 2 ))', '_backoff="$_backoff"', 1)
+        assert neutered != src, 'escalation fault injection did not apply'
+        sh.write_text(neutered, encoding='utf-8')
+    launches = proj / 'launches.log'
+    (proj / 'supervisor.py').write_text(
+        "import sys\n"
+        f"with open({str(launches)!r}, 'a') as log:\n"
+        "    log.write('x\\n')\n"
+        "sys.exit(1)\n",
+        encoding='utf-8',
+    )
+    clock = proj / 'watchdog-test-clock.sh'
+    clock.write_text(r'''
+_watchdog_test_now=0
+date() {
+    [[ "$#" -eq 1 && "$1" == '+%s' ]] || return 1
+    printf '%s\n' "$_watchdog_test_now"
+}
+sleep() {
+    printf '__test_backoff__ %s %s\n' "$1" "$_watchdog_test_now"
+    local advance
+    IFS= read -r advance || return 1
+    [[ "$advance" == "$1" ]] || return 1
+    _watchdog_test_now=$(( _watchdog_test_now + advance ))
+}
+''', encoding='utf-8')
     env = dict(
         os.environ,
+        BASH_ENV=str(clock),
         TOFU_SUPERVISOR_PROJECTS=str(proj),
+        TOFU_SUPERVISOR_PYTHON=sys.executable,
         TOFU_SUPERVISOR_OWNER_PID=owner_pid,
     )
-    # Call the internal watchdog entrypoint directly, in the foreground.
-    # start_new_session → its own process group, so killpg below targets ONLY
-    # the watchdog + its children, never the pytest process group.
-    p = subprocess.Popen(['bash', str(proj / 'supervisor.sh'), '__watchdog__'],
-                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True)
+    # The watchdog closes inherited fds >2; the handshake deliberately uses
+    # only stdin/stdout. No timer releases a producer before it reaches sleep.
+    p = subprocess.Popen(
+        ['bash', str(sh), '__watchdog__'], cwd=proj, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, start_new_session=True,
+    )
+    backoffs = []
+    elapsed = 0
+
+    def join_leader(timeout):
+        # The group owner sends TERM before this callback. EOF also releases
+        # a sleep whose blocking read started just after the signal arrived.
+        p.stdin.close()
+        return p.wait(timeout=timeout)
+
     try:
-        # Leave enough scheduler slack for a loaded shared CI host. At 11s the
-        # fixed-2s neuter intermittently produced only four launches because
-        # process startup/logging overhead consumed >3s; 15s still keeps the
-        # exponential path at <=4 launches (t≈0,2,6,14) while the fixed path
-        # has ample room to cross the >=5 proof threshold.
-        time.sleep(15)
+        for line in p.stdout:
+            if not line.startswith('__test_backoff__ '):
+                continue
+            _, requested, now = line.split()
+            seconds = int(requested)
+            assert seconds > 0
+            assert int(now) == elapsed, 'sleep did not advance the owned clock'
+            assert _read_pid(proj) == p.pid
+            backoffs.append(seconds)
+            # This sleep spans the end of the original 15s window. Keep the
+            # producer blocked until owned-group retirement, not another run.
+            if elapsed + seconds >= 15:
+                break
+            elapsed += seconds
+            p.stdin.write(f'{seconds}\n')
+            p.stdin.flush()
     finally:
         try:
-            os.killpg(os.getpgid(p.pid), _signal.SIGTERM)
-        except OSError:
-            p.terminate()
-        try:
-            p.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            p.kill()
-    n = 0
-    if launches.is_file():
-        n = sum(1 for _ in open(launches))
-    return n
+            # start_new_session gives this unreaped Popen its own group. The
+            # shared owner joins the leader AND retires any remaining members;
+            # no shell stop command can reach a shared supervisor service.
+            retire_process_group(p.pid, wait_leader=join_leader)
+        finally:
+            p.stdin.close()
+            p.stdout.close()
+    assert p.returncode == 0, 'watchdog did not stop cooperatively'
+    assert not group_has_live_members(p.pid), 'owned watchdog group survived'
+    assert _read_pid(proj) is None, 'watchdog did not retire its PID file'
+    with launches.open(encoding='utf-8') as log:
+        n = sum(1 for _ in log)
+    assert n == len(backoffs), 'sleep requests must follow actual completed children'
+    return n, backoffs
 
 
 @_needs_bash_setsid
 def test_watchdog_backs_off_on_persistent_fast_fail(
         tmp_path, supervisor_owner_lease):
-    """A supervisor.py that dies immediately (e.g. port 15001 in use) must NOT
-    trigger a 2s restart storm — escalating backoff caps the attempt rate."""
-    n = _run_watchdog_with_fastfail(
+    """Persistent fast failure must request escalating waits, not a 2s storm."""
+    n, backoffs = _run_watchdog_with_fastfail(
         tmp_path, supervisor_owner_lease, neuter_backoff=False)
-    # Over ~15s, escalating backoff (sleep 2,4,8,…) launches at t≈0,2,6,14
-    # → at most 4. Fixed-2s has time for at least 5 even with scheduler load.
+    # The real copied loop launches at virtual t=0,2,6,14. Its fourth sleep
+    # request is 16s, spanning the end of the same 15s observation window.
+    assert backoffs == [2, 4, 8, 16]
     assert 1 <= n <= 4, f'expected escalating backoff to cap launches (got {n})'
 
 
 @_needs_bash_setsid
 def test_backoff_escalation_is_load_bearing_neuter(
         tmp_path, supervisor_owner_lease):
-    """NEUTER: remove the *=2 escalation → constant 2s restarts → more launches
-    in the same window. Proves the backoff assertion above is real."""
-    n_fixed = _run_watchdog_with_fastfail(
+    """NEUTER: defeat only *=2; the same injected window must reveal a storm."""
+    n_fixed, backoffs = _run_watchdog_with_fastfail(
         tmp_path, supervisor_owner_lease, neuter_backoff=True)
-    # Fixed 2s over ~15s → launches at t≈0,2,4,…14. Must clearly exceed
-    # the escalating case's cap (≤4), proving the escalation is load-bearing.
+    # Fixed 2s launches at virtual t=0,2,4,...14: both the requested sequence
+    # and actual launch count defeat the production case's assertions.
+    assert backoffs == [2] * 8
     assert n_fixed >= 5, (
-        f'without escalation the loop should restart ~every 2s (got {n_fixed}) — '
+        f'without escalation the loop should restart every 2s (got {n_fixed}) — '
         'if this is low, the backoff test would give a false pass'
     )
 

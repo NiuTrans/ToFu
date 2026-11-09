@@ -8,9 +8,10 @@ network. Covers:
   * URL → reader routing (status URL matches, non-status x.com does not),
   * tweet-result JSON parsing (valid / reply / quote / tombstone / empty),
   * a reader HIT short-circuits fetch_page_content,
-  * a skip-domain status URL is READ (bypasses the block) while a non-status
-    x.com URL stays blocked,
-  * an auth-source-connected skip-domain bypasses the block (ordering fix).
+  * a status URL on a fetch-quality-skipped host (x.com) is READ while a
+    non-status x.com URL stays skipped,
+  * an auth-source-connected skipped host bypasses the skip (ordering fix),
+  * an operator ban (skip_domains) admits neither bypass.
 """
 
 import pytest
@@ -209,45 +210,42 @@ def test_reader_read_truncates(monkeypatch):
     assert len(out) < 200
 
 
-# ── Integration: skip-domain bypass for a status URL ──
+# ── Integration: the fetch-quality skip yields to the reader tier ──
 
-def test_fetch_page_content_reads_skipped_status_url(monkeypatch):
-    """x.com is in skip_domains, yet a *status* URL must be READ via the reader
-    tier (which runs before the skip gate)."""
+def test_fetch_page_content_reads_status_url_on_a_skipped_host(monkeypatch):
+    """x.com is a built-in fetch-quality skip (NO_TEXT_DOMAINS), yet a *status*
+    URL must be READ via the reader tier, which runs before the skip."""
     def fake_get(url, **kw):
         return FakeResp(200, {
             'text': 'Tweet via reader', 'user': {'screen_name': 'edent'}})
 
     monkeypatch.setattr(readers, 'http_get', fake_get)
-    # Guarantee x.com is blocked so the bypass is what we're proving.
-    _config.configure(skip_domains={'x.com', 'twitter.com'})
 
     out = core.fetch_page_content('https://x.com/edent/status/719484841172054016')
     assert out is not None
     assert 'Tweet via reader' in out
 
 
-def test_fetch_page_content_non_status_xcom_still_blocked(monkeypatch):
-    """A non-status x.com URL has no reader match → the skip block still bites
-    and no network request is made."""
+def test_fetch_page_content_non_status_xcom_still_skipped(monkeypatch):
+    """A non-status x.com URL has no reader match → the fetch-quality skip
+    bites, says it is not a ban, and no network request is made."""
     def fail_request(*a, **kw):
-        raise AssertionError('should not fetch a blocked non-status x.com URL')
+        raise AssertionError('should not fetch a skipped non-status x.com URL')
 
     monkeypatch.setattr(core, '_do_request', fail_request)
     monkeypatch.setattr(readers, 'http_get',
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError('reader must not fire for non-status URL')))
-    _config.configure(skip_domains={'x.com', 'twitter.com'})
 
-    assert core.fetch_page_content('https://x.com/elonmusk') is None
+    diag = {}
+    assert core.fetch_page_content('https://x.com/elonmusk', diag=diag) is None
+    assert diag['reason'] == 'fetch_skip'
+    assert 'not a source ban' in diag['detail']
 
 
-# ── Integration: auth-source connected domain bypasses the skip gate ──
+# ── Integration: auth-source connected domain bypasses the fetch-quality skip ──
 
-def test_auth_source_bypasses_skip_domain(monkeypatch):
-    """A skip-domain with connected auth cookies must be fetched via the auth
-    path — proving the auth-source match now runs BEFORE _should_fetch."""
-
+def _connect_xcom_auth_source(monkeypatch):
     class FakeAuthProvider:
         def match_source(self, url):
             return {'domain': 'x.com', 'cookies': [{'name': 'a', 'value': 'b'}]}
@@ -263,21 +261,55 @@ def test_auth_source_bypasses_skip_domain(monkeypatch):
 
     monkeypatch.setattr(core, 'get_auth_source_provider', lambda: FakeAuthProvider())
     monkeypatch.setattr(core, '_try_authenticated_fetch', fake_auth_fetch)
-    # No reader match for a bare profile URL, so this exercises the auth path.
-    _config.configure(skip_domains={'x.com', 'twitter.com'})
+    return calls
 
+
+def test_auth_source_bypasses_fetch_skip(monkeypatch):
+    """A skipped host with connected auth cookies must be fetched via the auth
+    path — proving the auth-source match runs BEFORE _should_fetch."""
+    calls = _connect_xcom_auth_source(monkeypatch)
+    # No reader match for a bare profile URL, so this exercises the auth path.
     out = core.fetch_page_content('https://x.com/someprofile')
     assert out is not None
     assert 'Authenticated page body' in out
     assert calls['url'] == 'https://x.com/someprofile'
 
 
-def test_no_auth_no_reader_skip_domain_blocked(monkeypatch):
-    """Control: without a reader match OR auth connection, a skip-domain URL is
-    blocked (proves the bypasses above are load-bearing, not always-open)."""
+def test_no_auth_no_reader_fetch_skip_holds(monkeypatch):
+    """Control: without a reader match OR auth connection, a skipped host is not
+    fetched (proves the bypasses above are load-bearing, not always-open)."""
     monkeypatch.setattr(core, 'get_auth_source_provider', lambda: None)
     monkeypatch.setattr(core, '_do_request',
                         lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError('should not fetch blocked domain')))
-    _config.configure(skip_domains={'x.com', 'twitter.com'})
+                            AssertionError('should not fetch a skipped host')))
     assert core.fetch_page_content('https://x.com/someprofile') is None
+
+
+# ── Integration: an operator ban admits no bypass ──
+
+def test_ban_refuses_a_reader_handled_status_url(monkeypatch):
+    """skip_domains is source policy: the reader tier must not read a banned URL."""
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return FakeResp(200, {'text': 'Tweet via reader', 'user': {'screen_name': 'edent'}})
+
+    monkeypatch.setattr(readers, 'http_get', fake_get)
+    _config.configure(skip_domains={'x.com'})
+
+    diag = {}
+    assert core.fetch_page_content(
+        'https://x.com/edent/status/719484841172054016', diag=diag) is None
+    assert diag['reason'] == 'skip_domain'
+    assert calls == []
+
+
+def test_ban_refuses_a_connected_auth_source(monkeypatch):
+    calls = _connect_xcom_auth_source(monkeypatch)
+    _config.configure(skip_domains={'x.com'})
+
+    diag = {}
+    assert core.fetch_page_content('https://x.com/someprofile', diag=diag) is None
+    assert diag['reason'] == 'skip_domain'
+    assert calls == {}

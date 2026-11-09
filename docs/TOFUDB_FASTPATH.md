@@ -211,19 +211,35 @@ The same census and headroom rules govern the automatically placed search
 projection, which yields to the data-volume projection instead of exporting
 ([INDEX_FASTPATH.md](INDEX_FASTPATH.md#search-projection-capacity-governance-2026-10-29)).
 
-**This deployment declines today, and says why.** Its corpus is ~0.96 TB of
-logical payload across 20,371 immutable segments and ~15.2M loose block files
-(segments are sparse: 47.0 MB logical against 13.7 MB allocated). Native
-backup and restore republish every reachable block as one file, so first
-activation plans ~68M block publications, roughly 185 h at the measured 5.5 ms
-FUSE and 4.3 ms overlay publication costs, against a 450 s budget. The
-container overlay also holds 16.5M free inodes against that corpus, and
-`/opt/meituan/hadoop` (4.9 TB, 169M inodes) is mounted read-only. Automatic
-selection therefore reports `activation-too-costly`, `inode-capacity` or
-`placement-insufficient-space` and serves the classic authority. Relocating
-this corpus needs its loose blocks packed first, so the reachable set shrinks,
-or a persistent local disk large enough for about twice the corpus and its
-inode count.
+**This deployment declines today, and should (re-measured 2026-11-08).** The
+host has no local SSD. Its local block volume `md0` (`/tmp`, `/opt/*`) is a
+RAID0 of two 7,200 rpm HDDs shared with the node's other pods, and the root
+overlay (`$HOME`) sits on a 256 GiB iSCSI virtual disk. The DolphinFS data
+volume is the remote SSD pool, reached like every production process through
+the preloaded userspace client (`LD_PRELOAD`). The engine's admission probe,
+run twice by the production binary on disposable authorities on DolphinFS,
+refuses both local bases as `speedup-insufficient`: fsync 963-1,481 µs
+durable against 8,879-284,394 µs on `md0`, and 733-834 µs against
+2,185-2,272 µs on the overlay, although local lookups take 2-3 µs against
+264-301 µs. Paired scratch runs of
+`benchmarks/storage_medium_probe.py` agree (p50 over two rounds, DolphinFS /
+`md0` / overlay): 4 KiB append+fdatasync 0.77 / 8-21 / 2.2 ms, cold random
+4 KiB read 0.19 / 8-13 / 0.56 ms, open+read+close 0.7 ms / 10 µs / 16 µs.
+Neither local volume is a safe primary: `/tmp` is emptied at every container
+boot (`systemd-tmpfiles` `D /tmp`), CodeLab pause/restart reschedules the pod
+onto another node so `md0` contents do not follow it, RAID0 has no
+redundancy, and the overlay keeps its contents across pause/restart only
+until the image is re-pulled. The overlay is also too small: 84 GB and 15.2M
+inodes free against about 1 TiB of payload segments and 32-38M loose block
+files holding about 22 TiB, growing by about 82 GiB/h on 2026-11-08, plus a
+search projection estimated at 86M files. Size these stores by `st_size`:
+DolphinFS reports `st_blocks` 0 for files published by rename. In the
+rehearsal native restore published 15.8 blocks/s onto `md0` and 157 blocks/s
+onto the overlay, so copying the ~38M-block backup would take about four weeks
+or three days. Automatic selection therefore serves the classic authority
+(`placement-candidate-persistence-unknown`); relocation is worth re-evaluating
+only on a persistent local NVMe volume with room for about twice the corpus
+and its inodes ([procedure](STORAGE_OPERATIONS.md#native-authority-placement)).
 
 **Alternatives rejected:** narrowing admission to commit barriers (refuses the
 metadata-bound volumes this capability exists for); predicting admission in

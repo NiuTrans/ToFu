@@ -790,6 +790,29 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(r.status_code, 403)
         _run(go())
 
+    def test_oauth_test_reports_a_failed_probe_as_unreachable(self):
+        from unittest import mock
+
+        import requests
+
+        from lib.api_keys import create_key
+        _row, token = create_key(owner_user_id=1, name='oauth-admin', scopes=['admin'])
+
+        def offline(url, **_options):
+            raise requests.ConnectionError(f'no route to {url}')
+
+        async def go():
+            with mock.patch('lib.oauth.http.http_get', offline):
+                r = await self._client().get(
+                    '/api/v1/oauth/test',
+                    headers={'Authorization': f'Bearer {token}'})
+            self.assertEqual(r.status_code, 200)
+            body = await r.get_json()
+            for name in ('claude_token', 'claude_auth', 'codex_token', 'codex_auth'):
+                probe = body[name]
+                self.assertEqual((probe['status'], probe['reachable'], probe['blocked']), (0, False, True))
+        _run(go())
+
     def test_project_status_requires_auth(self):
         async def go():
             r = await self._client().get('/api/v1/project/status')

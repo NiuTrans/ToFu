@@ -10,6 +10,7 @@ no-regression commit).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
 import threading
 
@@ -340,6 +341,11 @@ class TestEngineRound:
         html = '<html>authored composition with a graphic</html>'
         task = {'_emit': [], 'topic': 'x', 'task_id': 't-qa-1'}
 
+        # The pinned GSAP runtime ships with the package and is digest-verified
+        # by ensure_gsap; an accidental network fallback fails this offline spec.
+        from lib.motion_video import _runtime_assets as ra
+        monkeypatch.setattr(ra, 'GSAP_URL', 'http://127.0.0.1:1/never-downloaded')
+
         monkeypatch.setattr(vqa, 'visual_qa_available',
                             lambda: (True, ''))
         monkeypatch.setattr(tqa, "screenshot_timeline_contact_sheet",
@@ -412,7 +418,6 @@ class TestEngineRound:
 
     def test_motion_visual_qa_reuses_exact_pixels_and_reruns_changes(
             self, tmp_path, monkeypatch):
-        from pathlib import Path
 
         from lib.motion_video import engine
 
@@ -462,7 +467,6 @@ class TestEngineRound:
 
     def test_cached_actionable_motion_findings_still_enter_repair(
             self, tmp_path, monkeypatch):
-        from pathlib import Path
 
         from lib.motion_video import _scene_author as sa
         from lib.motion_video import engine

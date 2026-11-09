@@ -67,7 +67,7 @@ def _project_cost(profile, input_tokens, output_tokens):
     prompt at that write rate (not input PLUS write). Cache reads are zero.
     Missing/invalid prices are unknown, never free or a global-model estimate.
     """
-    from lib.pricing import DEFAULT_USD_CNY_RATE
+    from lib.pricing import get_pricing_data
     from lib.pricing._provider import normalize_pricing, _choose_context_tier
 
     raw = _mapping(profile.get('declaredPricing'))
@@ -129,9 +129,18 @@ def _project_cost(profile, input_tokens, output_tokens):
            (input_rate, output_rate, read_rate, write_rate) if rate is not None):
         return None
     currency = str(resolved.get('currency') or raw.get('currency')).upper()
-    if currency == 'CNY' and not _number(DEFAULT_USD_CNY_RATE):
-        return None
-    conversion = 1.0 / DEFAULT_USD_CNY_RATE if currency == 'CNY' else 1.0
+    exchange_rate, exchange_source = None, 'identity'
+    if currency == 'CNY':
+        # Settlement converts at the shared live rate (lib.cost); a quote at
+        # another rate would disagree with the cost it books.
+        snapshot = _mapping(get_pricing_data())
+        exchange_rate = _number(snapshot.get('usdToCny'))
+        if not exchange_rate:
+            return None
+        exchange_source = ('pricing_' + snapshot['exchangeRateSource']
+                           if snapshot.get('exchangeRateSource') in {'api', 'default'}
+                           else 'shared_pricing_state')
+    conversion = 1.0 / exchange_rate if currency == 'CNY' else 1.0
     use_write = write_rate is not None and write_rate > input_rate
     prompt_rate = write_rate if use_write else input_rate
     projected = (input_tokens * prompt_rate + output_tokens * output_rate) * conversion / 1e6
@@ -141,8 +150,8 @@ def _project_cost(profile, input_tokens, output_tokens):
         'source': 'declared_offering_pricing', 'estimated': True,
         'providerId': profile['providerId'], 'currency': currency,
         'unit': 'per_million_tokens',
-        'usdToCny': DEFAULT_USD_CNY_RATE if currency == 'CNY' else None,
-        'currencyRateSource': 'pricing_default' if currency == 'CNY' else 'identity',
+        'usdToCny': exchange_rate,
+        'currencyRateSource': exchange_source,
         'tierId': selected.get('id') if selected else None,
         'promptTokens': input_tokens, 'outputTokens': output_tokens,
         'uncachedInputTokens': 0 if use_write else input_tokens,

@@ -155,6 +155,32 @@ def test_directory_pages_do_not_hide_old_originals(setup):
         pm.execute('get_project_messages', {'before_id': 'foreign'}, setup.recipient)
 
 
+def test_directory_page_reaches_the_model_inline_and_pages_the_rest(setup):
+    """Twenty CJK previews exceed the single tool-result budget; the page must still be readable."""
+    import json
+    from lib.tasks_pkg.compaction.api import budget_tool_result_v2
+    sent = [send(setup, idempotency_key=str(index),
+                 content=f'{index}：' + '请核对数据库迁移的回滚计划、验证命令与交付证据。' * 20)['message']['id']
+            for index in range(24)]
+    note = ('Accepted after checking the rollback rehearsal and the verification command output. ' * 24)[:2048]
+    for message_id in sent:
+        pm.execute('consider_project_message', {'message_id': message_id, 'decision': 'accepted',
+                                                'note': note, 'expected_revision': 1}, setup.recipient)
+    seen, cursor, pages = [], None, 0
+    while True:
+        page = pm.execute('get_project_messages', {'before_id': cursor} if cursor else {}, setup.recipient)
+        view = json.loads(budget_tool_result_v2('get_project_messages', json.dumps(page, ensure_ascii=False),
+                                                user_id=0, model=''))
+        assert view.get('status') == 'ok' and not view.get('truncated'), view.get('summary')
+        assert page['older_messages_omitted'] == len(sent) - len(seen) - len(page['messages'])
+        seen[:0] = [row['id'] for row in page['messages']]
+        pages += 1
+        cursor = page['next_before_id']
+        if cursor is None:
+            break
+    assert seen == sent and pages > 2
+
+
 @pytest.mark.parametrize('bound', ['tokens', 'bytes'])
 def test_later_small_originals_progress_past_full_unfit_prefix(setup, monkeypatch, bound):
     from copy import deepcopy

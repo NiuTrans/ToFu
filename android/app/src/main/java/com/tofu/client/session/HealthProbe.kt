@@ -1,67 +1,95 @@
 package com.tofu.client.session
 
-import android.util.Log
 import android.webkit.CookieManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import okhttp3.CookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.Closeable
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The network half of [TofuProbe]: a single ``GET {base}/api/health`` carrying
- * the profile's session cookie when one is in the jar.
- *
- * The cookie is not optional decoration: behind a VS Code port-forwarding
- * proxy the edge 401s EVERY cookie-less request (the desktop agent's
- * never-reached-Tofu incident), so a probe without the session measures the
- * GATE, not the server. With the cookie attached, the verdicts read true:
- * 200+bootId is Tofu up, a Tofu-envelope 401 is Tofu's own auth, anything
- * else refused is the proxy edge.
+ * Single health request with exact-endpoint cookies, native body bounds and no redirects.
+ * The remote review form rejects reserved hosts before calling this owner. LOCAL intentionally
+ * supplies its own cookieProvider and retains the synchronous probe for installed-session proof.
  */
 class HealthProbe(
-    http: OkHttpClient = defaultClient(),
+    http: OkHttpClient? = null,
     private val diagnostics: DiagLog? = null,
-    /** By default never This phone's credential: the URL being probed is someone else's server. */
-    private val cookieProvider: (String) -> String? = { origin ->
-        if (LocalKernelCookie.isReservedUrl(origin)) null else CookieManager.getInstance().getCookie(origin)
+    private val cookieProvider: (String) -> String? = { endpoint ->
+        if (LocalKernelCookie.isReservedUrl(endpoint)) null else CookieManager.getInstance().getCookie(endpoint)
     },
-) {
-    private val http = DiagnosticHttp.attach(http, diagnostics, "HealthHttp").newBuilder()
-        .followRedirects(false).followSslRedirects(false).build()
+) : Closeable {
+    private val ownsHttp = http == null
+    private val closed = AtomicBoolean(false)
+    private val http = DiagnosticHttp.attach(http ?: defaultClient(), diagnostics, "HealthHttp").newBuilder()
+        .followRedirects(false).followSslRedirects(false).cookieJar(CookieJar.NO_COOKIES)
+        .callTimeout(HEALTH_DEADLINE_SECONDS, TimeUnit.SECONDS).build()
 
     data class Outcome(val verdict: TofuProbe.Verdict, val status: Int, val detail: String)
 
-    /** Probe ``{serverUrl}/api/health`` once. Never throws. */
-    fun probe(serverUrl: String): Outcome {
-        val server = ServerUrl.parse(serverUrl)
-            ?: return Outcome(TofuProbe.Verdict.UNREACHABLE, 0, "invalid URL")
-        val healthUrl = server.endpoint("api/health")
-        val builder = Request.Builder().url(healthUrl).get()
-        cookieProvider(healthUrl)?.let { builder.header("Cookie", it) }
-        return try {
-            http.newCall(builder.build()).execute().use { resp ->
-                val body = resp.body?.string()
-                Outcome(
-                    TofuProbe.classify(resp.code, body),
-                    resp.code,
-                    body.orEmpty().take(200),
-                )
-            }
-        } catch (e: Exception) {
-            diagnostics?.exception("Health", e)
-            Log.w(TAG, "health probe failed: ${e.javaClass.simpleName}")
-            Outcome(TofuProbe.Verdict.UNREACHABLE, 0, e.message ?: "network error")
+    private fun request(serverUrl: String): Request? {
+        if (closed.get() || ServerUrl.storageError(serverUrl) != null) return null
+        val server = ServerUrl.parse(serverUrl) ?: return null
+        val endpoint = server.endpoint("api/health")
+        return Request.Builder().url(endpoint).get().apply {
+            header("Accept", "application/json")
+            cookieProvider(endpoint)?.takeIf { it.isNotBlank() }?.let { header("Cookie", it) }
+        }.build()
+    }
+
+    /** The local adapter's synchronous seam keeps its explicitly injected credential path. */
+    fun probe(serverUrl: String): Outcome = try {
+        val request = request(serverUrl)
+        if (request == null) unavailable() else http.newCall(request).execute().use(::outcome)
+    } catch (error: CancellationException) { throw error }
+      catch (error: Exception) { failed(error) }
+
+    /** Form cancellation owns the actual socket throughout the bounded body read. */
+    suspend fun probeCancellable(serverUrl: String): Outcome = try {
+        currentCoroutineContext().ensureActive()
+        val request = request(serverUrl)
+        if (request == null) unavailable() else http.newCall(request).awaitBounded(MAX_RESPONSE_BYTES).use(::outcome)
+    } catch (error: CancellationException) { throw error }
+      catch (error: Exception) { failed(error) }
+
+    private fun outcome(response: Response): Outcome {
+        val body = response.readBoundedBody(MAX_RESPONSE_BYTES)
+        if (body == null) return unavailable(response.code)
+        // Server-controlled bodies and exception messages can themselves contain credentials.
+        // Classification consumes the body; diagnostic/UI details expose only status/verdict.
+        val verdict = TofuProbe.classify(response.code, body)
+        return Outcome(verdict, response.code, "HTTP ${response.code}: ${verdict.name}")
+    }
+
+    private fun failed(error: Exception): Outcome {
+        diagnostics?.record("W", "Health", "health probe failed: ${error.javaClass.simpleName}")
+        return unavailable()
+    }
+
+    private fun unavailable(status: Int = 0) = Outcome(TofuProbe.Verdict.UNREACHABLE, status, "Health could not be verified")
+
+    /** A supplied client's dispatcher/pool remains caller-owned. */
+    override fun close() {
+        if (closed.compareAndSet(false, true) && ownsHttp) {
+            http.dispatcher.cancelAll()
+            http.connectionPool.evictAll()
+            http.dispatcher.executorService.shutdown()
         }
     }
 
     private companion object {
-        const val TAG = "HealthProbe"
-
+        // Native authentication/health correctness contract: 256 KiB and the existing 8s health deadline.
+        const val MAX_RESPONSE_BYTES = NATIVE_HTTP_RESPONSE_MAX_BYTES
+        const val HEALTH_DEADLINE_SECONDS = 8L
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            // A login redirect is a gateway verdict. Never forward the explicit
-            // Cookie header to a foreign host while probing.
-            .followRedirects(false)
-            .build()
+            .connectTimeout(HEALTH_DEADLINE_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(HEALTH_DEADLINE_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(HEALTH_DEADLINE_SECONDS, TimeUnit.SECONDS)
+            .followRedirects(false).followSslRedirects(false).cookieJar(CookieJar.NO_COOKIES).build()
     }
 }

@@ -15,6 +15,8 @@ fn terminal_record_reuses_the_already_verified_turn_instead_of_reloading_history
     terminal.status = "completed".into();
     terminal.settlement = json!({"outcome":"completed","cause":"finished","resumeOptions":[]})
         .as_object().unwrap().clone();
+    // Measure the same transaction's reuse alone, from the durable head.
+    database.resident_projections().forget_all();
     let before = crate::fsync_stats::counters().projection_checkpoint_bytes;
     let mut read = database.begin_with_identity_claim_scopes(7, 11).unwrap();
     load_event_record_state(&database, &mut read, &terminal, true).unwrap().unwrap();
@@ -553,6 +555,86 @@ fn execution_frame_runtime_byte_rollover_and_repair_fallback_match_original() {
 }
 
 #[test]
+fn execution_frame_runtime_legacy_restart_size_keeps_historical_turns_readable() {
+    let projection = canonical_projection();
+    let mut encoded = serde_json::to_value(ProjectionWitness::mint(
+        projection.as_object().unwrap(), 7, "assistant", "running").unwrap().unwrap()).unwrap();
+    // Golden lengths from the two published recovery envelopes. The old
+    // native writer used evidence=user_abort; the current owner correctly
+    // uses system_recovery. A future format edit must update compatibility.
+    assert_eq!(serde_json::to_vec(&restart_settlement(projection.as_object().unwrap())).unwrap().len(), 411);
+    encoded["version"] = json!(2);
+    encoded["recoveryBytes"] = json!(406);
+    ProjectionWitness::decode(&encoded, 7).unwrap().unwrap()
+        .verify(projection.as_object().unwrap(), "assistant", "running").unwrap();
+    encoded["recoveryBytes"] = json!(411);
+    ProjectionWitness::decode(&encoded, 7).unwrap().unwrap()
+        .verify(projection.as_object().unwrap(), "assistant", "running").unwrap();
+    encoded["recoveryBytes"] = json!(407);
+    assert!(ProjectionWitness::decode(&encoded, 7).unwrap().unwrap()
+        .verify(projection.as_object().unwrap(), "assistant", "running").is_err());
+    encoded["version"] = json!(3);
+    encoded["recoveryBytes"] = json!(406);
+    assert!(ProjectionWitness::decode(&encoded, 7).unwrap().unwrap()
+        .verify(projection.as_object().unwrap(), "assistant", "running").is_err());
+}
+
+#[test]
+fn execution_frame_runtime_legacy_restart_size_reopens_and_upgrades_before_reuse() {
+    for recovery_bytes in [406, 411] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let revision = seed_projection(&mut database, canonical_projection(), true);
+        commit_step(&mut database, &producer_shaped_step(revision, 0, "hot"), true).unwrap();
+        let expected = state(&database);
+        let next = producer_shaped_step(revision + 1, 1, "hot");
+        let control_directory = tempfile::tempdir().unwrap();
+        let mut control = AuthorityDatabase::initialize(control_directory.path()).unwrap();
+        assert_eq!(seed_projection(&mut control, canonical_projection(), true), revision);
+        commit_step(&mut control, &producer_shaped_step(revision, 0, "hot"), true).unwrap();
+        commit_step(&mut control, &next, true).unwrap();
+        let expected_upgraded = state(&control);
+
+        // Recreate the compact head published by each historical v2 writer,
+        // through the same versioned-document and lane-index owners.
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let (_, loaded) = load_event_record_state(&database, &mut tx, &next, false).unwrap().unwrap();
+        let mut document = loaded.document;
+        document["_projectionHead"]["frameWitness"]["version"] = json!(2);
+        document["_projectionHead"]["frameWitness"]["recoveryBytes"] = json!(recovery_bytes);
+        metadata_summary::put_document(&database, &mut tx,
+            crate::versioned_document::PutRequest {
+                key: loaded.key.clone(), namespace: DOCUMENT_IDENTITY.into(),
+                logical_key: turn_logical_key(CONVERSATION, TURN),
+                value_json: serde_json::to_vec(&document).unwrap(),
+                expected_version: Some(loaded.physical_version), updated_at_ms: 2000,
+            }, crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES).unwrap();
+        let stored = database.entity_get(&mut tx, &loaded.key).unwrap().unwrap();
+        store_changed_lane_turn(&database, &mut tx, CONVERSATION, "main",
+            document["ordinal"].as_u64().unwrap(), stored).unwrap();
+        database.commit(tx).unwrap();
+        drop(database);
+
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        assert!(state(&database) == expected, "historical evidence changed public Turn state");
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let (_, loaded) = load_event_record_state(&database, &mut tx, &next, false).unwrap().unwrap();
+        assert!(execution_frame::append_from_witness(&database, &mut tx, &loaded,
+            &next, CONVERSATION, TURN).unwrap().is_none(),
+            "ambiguous v2 size evidence must materialize before fast admission");
+        drop(tx);
+        commit_step(&mut database, &next, true).unwrap();
+        let current = serde_json::to_value(head(&database).frame_witness.unwrap()).unwrap();
+        assert_eq!(current["version"], 3);
+        assert_eq!(current["recoveryBytes"], 411);
+        let upgraded = state(&database);
+        assert!(upgraded == expected_upgraded, "legacy upgrade differs from current-writer state");
+        drop(database);
+        assert!(state(&AuthorityDatabase::open(directory.path()).unwrap()) == upgraded);
+    }
+}
+
+#[test]
 fn execution_frame_runtime_witness_depth_corruption_and_legacy_version_fallback() {
     let projection = canonical_projection();
     let witness =
@@ -560,7 +642,7 @@ fn execution_frame_runtime_witness_depth_corruption_and_legacy_version_fallback(
             .unwrap()
             .unwrap();
     let encoded = serde_json::to_value(&witness).unwrap();
-    assert_eq!(encoded["version"], 2);
+    assert_eq!(encoded["version"], 3);
     assert_eq!(encoded["recoveryBytes"], serde_json::to_vec(
         &restart_settlement(projection.as_object().unwrap())).unwrap().len());
     let mut legacy = encoded.clone();

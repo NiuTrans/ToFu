@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     _string_payload_chars,
     compact_tool_rounds_for_frame_budget,
 )

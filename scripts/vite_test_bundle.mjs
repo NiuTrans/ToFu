@@ -12,7 +12,7 @@
  *     [--global-name=NAME] [--footer:js=CODE]
  *     [--outfile=FILE | --outdir=DIR] [--target=T] [--log-level=L]
  *     [--loader=ts --sourcefile=NAME]   (read entry source from stdin)
- *     [--inputs-manifest=FILE]  (JSON list of every file the build read)
+ *     [--inputs-manifest=FILE]  (versioned input and emitted-artifact receipt)
  */
 
 import { builtinModules } from 'node:module';
@@ -23,6 +23,9 @@ import { pathToFileURL } from 'node:url';
 
 const temporaryDirectories = new Set();
 const inputFiles = new Set();
+const outputFiles = new Set();
+let outputsComplete = true;
+let portableInputs = true;
 
 function parseArgs(argv) {
   const entries = [];
@@ -85,12 +88,48 @@ async function main() {
   // files) so a caller can content-validate a cached bundle.
   const inputRecorder = {
     name: 'tofu-test-input-recorder',
+    transform(code, id) {
+      // Location-sensitive modules keep checkout-local reuse. Do not infer
+      // portability merely because constant folding removed a path string.
+      if (/\.(?:css|less|sass|scss|styl|stylus)(?:\?|$)/.test(id)) return;
+      let nodes;
+      try {
+        nodes = [this.parse(code)];
+      } catch {
+        // An unrecognized source form supplies no portability proof.
+        portableInputs = false;
+        return;
+      }
+      while (nodes.length) {
+        const node = nodes.pop();
+        if (!node || typeof node !== 'object') continue;
+        if (node.type === 'MetaProperty'
+            || (node.type === 'Identifier' && ['__dirname', '__filename'].includes(node.name))) {
+          portableInputs = false;
+          return;
+        }
+        for (const value of Object.values(node)) {
+          if (value && typeof value === 'object') nodes.push(value);
+        }
+      }
+    },
+    configResolved(config) {
+      // Public-directory copies do not pass through Rollup's output hooks.
+      // Keep these builds executable, but do not certify an incomplete cache.
+      if (config.build.copyPublicDir && config.publicDir && existsSync(config.publicDir)) {
+        outputsComplete = false;
+      }
+    },
     buildEnd() {
       for (const id of [...this.getModuleIds(), ...this.getWatchFiles()]) {
         if (id.startsWith('\0')) continue;
         const file = id.split('?', 1)[0];
         if (file.startsWith('/')) inputFiles.add(file);
       }
+    },
+    writeBundle(options, bundle) {
+      const directory = options.dir || dirname(options.file);
+      for (const name of Object.keys(bundle)) outputFiles.add(resolve(directory, name));
     },
   };
 
@@ -104,6 +143,9 @@ async function main() {
     await build({
       configFile: false,
       root: process.cwd(),
+      // Private generated entries use stable root-relative specifiers. Vite
+      // still resolves and records the real files in this checkout.
+      resolve: { alias: { '#tofu-test-root': process.cwd() } },
       logLevel: flags['log-level'] === 'warning' ? 'warn' : (flags['log-level'] || 'warn'),
       plugins: [absolutePathResolver, inputRecorder],
       build: {
@@ -167,7 +209,13 @@ async function mainWithInputsManifest() {
   await main();
   const manifest = parseArgs(process.argv.slice(2)).flags['inputs-manifest'];
   if (manifest) {
-    writeFileSync(String(manifest), JSON.stringify([...inputFiles].sort()), 'utf8');
+    writeFileSync(String(manifest), JSON.stringify({
+      format: 'tofu.test-bundle/v1',
+      inputs: [...inputFiles].sort(),
+      outputs: [...outputFiles].sort(),
+      complete: outputsComplete,
+      portable: portableInputs,
+    }), 'utf8');
   }
 }
 

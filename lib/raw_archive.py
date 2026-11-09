@@ -29,7 +29,7 @@ import orjson
 from lib.log import get_logger
 from lib.logging_pkg.log_record_values import text_value
 from lib.raw_archive_contract import RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 
 logger = get_logger(__name__)

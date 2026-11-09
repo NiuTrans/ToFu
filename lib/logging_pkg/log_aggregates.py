@@ -93,6 +93,10 @@ _PATH_RE = re.compile(r'(?:/[\w.\-]+){2,}')
 # rid 有两种形态:纯 hex(254e0bf0)和 hex-计数(8ea40f-111)——后缀计数
 # 同属易变部分,一并吃掉,否则同一模板被 rid 形态拆成两行(实测 306/314 分裂)。
 _HEX_RE = re.compile(r'\b[0-9a-fA-F]{6,}(?:-\d+)*\b')
+# Task lines name whole attempt UUIDs; collapsed piecewise, each UUID's short
+# groups (``291d``/``a573``) would split one template per attempt.
+_UUID_RE = re.compile(
+    r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 _NUM_RE = re.compile(r'\d+')
 _WS_RE = re.compile(r'\s+')
 _COALESCE_PREFIX_RE = re.compile(
@@ -121,6 +125,7 @@ def _normalize_template(first_line: str) -> str:
     t = _LONG_QUOTED_RE.sub("'<payload>'", t)
     t = _URL_RE.sub('<url>', t)
     t = _PATH_RE.sub('<path>', t)
+    t = _UUID_RE.sub('<uuid>', t)
     t = _HEX_RE.sub('<hex>', t)
     t = _NUM_RE.sub('<n>', t)
     t = _WS_RE.sub(' ', t).strip()

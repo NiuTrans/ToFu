@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 from lib.tasks_pkg.context_composer import append_injection, can_append_injection
 from lib.turn_verdict import terminal_finish_reason
@@ -74,12 +74,12 @@ def drain_peer_messages_into(task: dict[str, Any],
             display_owner='peer-lane')
         task.setdefault('_peer_inject_pending', []).extend(_peer_items)
         logger.info('[Task %s] driver-loop injected %d peer message(s) at '
-                    'iteration %s', task.get('id', '?')[:8], len(_peer_items),
+                    'iteration %s', task_log_tag(task.get('id', '?')), len(_peer_items),
                     round_label)
         return len(_peer_items)
     except Exception as e:
         logger.error('[Task %s] driver-loop peer drain failed (continuing): %s',
-                     task.get('id', '?')[:8], e, exc_info=True)
+                     task_log_tag(task.get('id', '?')), e, exc_info=True)
         return 0
 
 
@@ -112,7 +112,7 @@ def _run_single_turn(
     """
     if 'id' not in task:
         raise ValueError("_run_single_turn called with a task dict missing 'id' — did you forget to use create_task()?")
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     logger.debug('[FlowTurn] _run_single_turn %s ENTRY — messages_override=%s',
                  tid, 'yes' if messages_override is not None else 'no')
 

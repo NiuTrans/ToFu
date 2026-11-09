@@ -36,7 +36,7 @@ def test_snapshots_retry_once_and_do_not_call_price_arithmetic():
         assert task['cost']['costUsd']==.0068
         assert task['apiRounds'][0]['nativeCredits']['total']==7593
         assert task['apiRounds'][0]['cost']['pricingSnapshot']['model']=='alpha'
-        from lib.storage.storage_projection import sanitize_api_rounds_for_persist
+        from lib.task_replay.persistence_projection import sanitize_api_rounds_for_persist
         assert sanitize_api_rounds_for_persist(task['apiRounds'])[0]['nativeCredits']['total']==7593
     asyncio.run(run())
 

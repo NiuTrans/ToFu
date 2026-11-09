@@ -167,7 +167,15 @@ jsonschema>=4.18
 # The optional AuthSourceProvider.bind hook (0.12.26) is backward compatible:
 # this host supplies a stateless implementation without calling the base hook.
 # Keep the published floor until release; workspace/export builds use the member.
-tofu-search>=0.12.25
+# >=0.12.27: SearchConfig.requests_transport and httpx_client_factory let the
+# shared network authority own prepared Requests and HTTP/2 search routes.
+# SOFT floor for routing: an older package keeps its own transport and simply
+# misses the shared proxy/bypass and route-health policy, it does not crash.
+# >=0.12.28: SearchConfig.skip_domains is an operator source ban only, with
+# fetch-quality skips carried by SearchConfig.fetch_skip_domains instead.
+# HARD floor for the bridge: the host passes fetch_skip_domains to configure()
+# and would TypeError at boot on an older package, so lowering is never safe.
+tofu-search>=0.12.28
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches

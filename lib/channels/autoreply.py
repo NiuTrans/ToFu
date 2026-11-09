@@ -57,6 +57,13 @@ def _channel(store, owner: int, conversation_id: str, turn_id: str) -> dict[str,
     return reply_origin(owner, conversation_id, turn_id)
 
 
+def _command_chat_enabled(store) -> bool:
+    """Whether any account with a command chat (大象, the bot platforms) is enabled."""
+    from lib.channels.policy import has_command_chat
+    return any(account.get('enabled') and has_command_chat(str(account.get('channel') or ''))
+               for account in store.accounts())
+
+
 def _enqueue(store, owner: int, channel: dict[str, Any], conversation_id: str, turn_id: str,
              kind: str, text: str, key: str, *, reply_to: str | None = None,
              attachments: list[dict[str, Any]] | None = None) -> None:
@@ -64,7 +71,9 @@ def _enqueue(store, owner: int, channel: dict[str, Any], conversation_id: str, t
     if not text:
         return
     from lib.channels import outbox
-    from lib.channels.model import ChannelError
+    from lib.channels.model import CHANNEL_TRAITS, ChannelError, ThreadKey
+    if reply_to and not CHANNEL_TRAITS[ThreadKey.parse(channel['thread']).channel]['quoteReply']:
+        reply_to = None  # a bot platform has no quote replies; the message still goes
     try:
         outbox.enqueue(owner, channel['thread'], text, idempotency_key=key, reply_to=reply_to,
                        origin={'kind': kind, 'conversationId': conversation_id, 'turnId': turn_id},
@@ -145,7 +154,11 @@ def _publish_segments(task: dict[str, Any], store, channel: dict[str, Any],
         if (segment.get('type') != 'text' or segment.get('deliverable') is not False
                 or segment.get(SUPERSEDED_PROVIDER_ATTEMPT_FIELD)):
             continue
-        text = str(segment.get('text') or '').strip()
+        from lib.tasks_pkg.stream_handler._intent_stall import (
+            strip_end_turn_marker, strip_silent_turn_marker,
+        )
+        text = strip_silent_turn_marker(strip_end_turn_marker(
+            str(segment.get('text') or '')))
         block_id = str(segment.get('blockId') or '').strip()
         if not text or not block_id:
             continue
@@ -192,8 +205,7 @@ def on_task_event(stream: str, task_id: str, payload: dict[str, Any]) -> None:
             return
         from lib.channels.store import ChannelStore
         store = ChannelStore(owner)
-        account = store.account('dx')
-        if not account or not account.get('enabled'):
+        if not _command_chat_enabled(store):
             return
         channel = _channel(store, owner, conversation_id, turn_id)
         if channel is None:
@@ -213,13 +225,47 @@ def on_task_event(stream: str, task_id: str, payload: dict[str, Any]) -> None:
 
 
 def _terminal_outcome(task: dict[str, Any]) -> str:
-    if task.get('aborted') or task.get('finishReason') == 'aborted':
-        return 'aborted'
-    if task.get('status') == 'done' and task.get('finishReason') != 'error':
-        return 'done'
-    if task.get('status') == 'interrupted':
+    """The settled Turn verdict as one of the command chat's four outcomes."""
+    from lib.turn_verdict import (
+        TurnStatus, derive_turn_verdict, task_terminal_evidence,
+    )
+    verdict = derive_turn_verdict(task_terminal_evidence(task))
+    # An invocation guard stop settles failed; the chat names it an interruption.
+    if verdict.cause in {'invocation_stalled', 'invocation_deadline'}:
         return 'interrupted'
+    if verdict.status is TurnStatus.INTERRUPTED:
+        return 'aborted'
+    # A truncated answer is still the answer the Turn settled with.
+    if verdict.status in {TurnStatus.COMPLETED, TurnStatus.TRUNCATED}:
+        return 'done'
     return 'error'
+
+
+def _verified_notice_turn(owner: int, conversation_id: str, turn_id: str) -> dict | None:
+    from lib.turn_initiation import INITIATOR_CHANNEL, INITIATOR_PEER, resolve_turn_initiator
+    from lib.turn_lifecycle import get_turn
+    output = get_turn(conversation_id, turn_id, user_id=owner)
+    if (not isinstance(output, dict) or output.get('actor') != 'assistant'
+            or output.get('conversationId') != conversation_id
+            or output.get('turnId') != turn_id or not output.get('parentTurnId')):
+        return None
+    source = get_turn(conversation_id, output['parentTurnId'], user_id=owner)
+    if resolve_turn_initiator(source) not in {INITIATOR_CHANNEL, INITIATOR_PEER}:
+        return None
+    return source
+
+
+def _notice_failure_reason(task: dict[str, Any], outcome: str) -> str:
+    if task.get('_executionLimitReason'):
+        return '执行已达到限制（' + str(task['_executionLimitReason']) + '）。'
+    if task.get('_invocationStopReason') in {'stalled', 'deadline'}:
+        return '处理已超时或停止响应。'
+    error = task.get('error')
+    if isinstance(error, dict):
+        reason = str(error.get('message') or error.get('detail') or '').strip()
+        if reason:
+            return '原因：' + reason.splitlines()[0]
+    return '尚未完成审阅：通知审阅已中断，未收到完整回复。' if outcome == 'interrupted' else '尚未完成审阅。'
 
 
 def _notify_notice_failure(task: dict[str, Any], owner: int, conversation_id: str,
@@ -230,28 +276,28 @@ def _notify_notice_failure(task: dict[str, Any], owner: int, conversation_id: st
     from lib.channels.delivery import is_global_router
     if not is_global_router(owner, conversation_id):
         return
-    from lib.turn_initiation import INITIATOR_CHANNEL, INITIATOR_PEER, resolve_turn_initiator
-    from lib.turn_lifecycle import get_turn
-    output = get_turn(conversation_id, turn_id, user_id=owner)
-    if output.get('actor') != 'assistant' or output.get('conversationId') != conversation_id:
+    source = _verified_notice_turn(owner, conversation_id, turn_id)
+    if source is None:
+        logger.warning('[Channels] cannot verify failed notice Turn %s; no automatic message',
+                       turn_id)
         return
-    parent_id = output.get('parentTurnId')
-    if not parent_id:
-        return
-    source = get_turn(conversation_id, parent_id, user_id=owner)
-    if resolve_turn_initiator(source) not in {INITIATOR_CHANNEL, INITIATOR_PEER}:
-        return
-    account = store.account('dx')
+    origin = ((source.get('projection') or {}).get('origin') or {})
+    channel = origin.get('channel') or {}
+    from lib.channels.policy import has_command_chat
+    # The notice's own channel when it has a command chat (a bot platform), else 大象's.
+    name = str(channel.get('channel') or '')
+    name = name if name and has_command_chat(name) else 'dx'
+    account = store.account(name)
     command_chat = str((account or {}).get('commandChat') or '')
     if not command_chat:
         return
-    text = '总负责人处理一条通知时失败，尚未完成审阅。请在 Tofu 的总负责人对话中重新处理。'
-    origin = ((source.get('projection') or {}).get('origin') or {})
-    channel = origin.get('channel') or {}
+    text = ('总负责人未能完成一条通知的审阅：'
+            + _notice_failure_reason(task, outcome)
+            + ' 请重新发送该通知或在 Tofu 总负责人对话中处理。')
     reply_to = None
     if channel.get('thread') == command_chat and origin.get('initiator') == 'channel':
         reply_to = next(iter(channel.get('eventIds') or []), None)
-    _enqueue(store, owner, {'channel': 'dx', 'thread': command_chat, 'eventIds': []},
+    _enqueue(store, owner, {'channel': name, 'thread': command_chat, 'eventIds': []},
              conversation_id, turn_id, 'router_status', text,
              f'{turn_id}:notice-review:{outcome}', reply_to=reply_to)
 
@@ -286,11 +332,18 @@ def on_task_terminal(task: dict[str, Any]) -> None:
         return
     from lib.channels.store import ChannelStore
     store = ChannelStore(int(owner))
-    account = store.account('dx')
-    if not account or not account.get('enabled'):
+    if not _command_chat_enabled(store):
         return
-    channel = _channel(store, int(owner), conversation_id, turn_id)
     outcome = _terminal_outcome(task)
+    if outcome == 'aborted' and task.get('_executionLimitReason'):
+        outcome = 'error'
+    # Terminal listeners run after the Turn's own durable settlement. Never
+    # guess a human destination when that source evidence is unavailable.
+    try:
+        channel = _channel(store, int(owner), conversation_id, turn_id)
+    except Exception:
+        channel = None
+        logger.warning('[Channels] terminal origin unavailable turn=%s', turn_id, exc_info=True)
     if channel is None:
         _notify_notice_failure(task, int(owner), conversation_id, turn_id, outcome, store)
         return
@@ -298,8 +351,12 @@ def on_task_terminal(task: dict[str, Any]) -> None:
     if outcome == 'done' and silent_turn_declared(task):
         return
     if outcome == 'done':
-        text, files = _final_answer_attachments(task, int(owner), conversation_id, channel,
-                                                str(task.get('content') or ''))
+        from lib.tasks_pkg.stream_handler._intent_stall import (
+            strip_end_turn_marker, strip_silent_turn_marker,
+        )
+        answer = strip_silent_turn_marker(strip_end_turn_marker(
+            str(task.get('content') or '')))
+        text, files = _final_answer_attachments(task, int(owner), conversation_id, channel, answer)
         _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_reply', text, turn_id,
                  attachments=files)
     _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_status',

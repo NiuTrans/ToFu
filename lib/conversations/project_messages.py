@@ -617,10 +617,20 @@ def execute(name: str, args: dict, task: dict) -> dict:
         # A directory is bounded context; full immutable originals require exact ID.
         rows = [{**m, 'content': m['content'][:256], 'contentChars': len(m['content']),
                  'contentTruncated': len(m['content']) > 256} for m in page['messages']]
-    return {'conversation_id': target, 'mailbox_revision': revision, 'messages': rows,
-            'total_messages': total, 'older_messages_omitted': total - len(rows),
-            'next_before_id': rows[0]['id'] if total > len(rows) and rows else None,
-            'execution_started': False}
+
+    def view(rows):
+        return {'conversation_id': target, 'mailbox_revision': revision, 'messages': rows,
+                'total_messages': total, 'older_messages_omitted': total - len(rows),
+                'next_before_id': rows[0]['id'] if total > len(rows) and rows else None,
+                'execution_started': False}
+    # Keep the newest rows the model reads inline: a page over the single
+    # tool-result budget would reach it only as an artifact pointer, while
+    # next_before_id already reaches every older message.
+    from lib.tasks_pkg.compaction.api import fits_tool_result_budget
+    while len(rows) > 1 and not fits_tool_result_budget(
+            json.dumps(view(rows), ensure_ascii=False), model=task.get('model', '')):
+        rows = rows[1:]
+    return view(rows)
 
 
 def page_view(owner: int, project: str, recipient: str, before_id: str = '') -> dict:

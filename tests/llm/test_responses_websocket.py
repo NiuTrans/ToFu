@@ -653,7 +653,7 @@ def test_open_session_forwards_handshake_and_never_waits_to_close(monkeypatch):
 
 def test_socket_follows_the_http_egress_decision(monkeypatch):
     from lib.llm import responses_websocket as ws
-    from lib.subscription_routes import Route
+    from lib.network_routes import Route
 
     plan = SimpleNamespace(url=_CODEX_BASE + '/responses')
     monkeypatch.setattr('lib.desktop.egress.route_request',
@@ -666,14 +666,14 @@ def test_socket_follows_the_http_egress_decision(monkeypatch):
                         lambda *args, **kwargs: 'direct')
     for routes, expected in (
             ([Route('direct', 'direct', 'direct')], None),
-            ([Route('env', 'environment proxy', 'env')], True),
+            ([Route('env', 'environment proxy', 'proxy', proxy_url='http://env:8080')], 'http://env:8080'),
             ([Route('pool', 'pool', 'proxy', proxy_url='http://proxy:3128')],
              'http://proxy:3128')):
-        monkeypatch.setattr('lib.proxy.subscription_route_candidates',
+        monkeypatch.setattr('lib.proxy.network_route_candidates',
                             lambda *args, routes=routes, **kwargs: routes)
         assert ws._websocket_proxy(plan, 'owner') == expected
 
-    monkeypatch.setattr('lib.proxy.subscription_route_candidates',
+    monkeypatch.setattr('lib.proxy.network_route_candidates',
                         lambda *args, **kwargs: [])
-    monkeypatch.setattr('lib.proxy.proxies_for', lambda url: {})
-    assert ws._websocket_proxy(plan, 'owner') is True
+    with pytest.raises(ws.ResponsesWebSocketUnavailable, match='no reachable'):
+        ws._websocket_proxy(plan, 'owner')

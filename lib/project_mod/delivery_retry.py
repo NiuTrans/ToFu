@@ -76,7 +76,8 @@ def prepare_conflict_repair(row, receipt):
         raise ic.IntegrationError('Conflict repair changed paths outside the original task delta; create new owned work')
     patch = ic._git(root, ['--literal-pathspecs', 'diff', '--binary', '--full-index', '--no-ext-diff',
                           '--no-textconv', source, checkpoint, '--', *paths], check=True, binary=True).stdout
-    with tempfile.TemporaryDirectory(prefix='delivery-repair-', dir=str(ic._workspace_root())) as directory:
+    with tempfile.TemporaryDirectory(prefix='delivery-repair-',
+                                     dir=str(ic._checkout_root(root, source))) as directory:
         patch_path = Path(directory) / 'repair.patch'
         patch_path.write_bytes(patch)
         scratch = Path(directory) / 'proposal'

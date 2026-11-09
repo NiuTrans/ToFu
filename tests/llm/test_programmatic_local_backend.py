@@ -1028,9 +1028,8 @@ def test_budget_keeps_required_tool_canonical_even_above_soft_target():
     """
     from lib.tools.project import PROJECT_TOOL_WRITE_FILE
 
-    # Exact content-vs-content_ref validation has a 120-token annotation-free
-    # structural floor. The budget still forces help-text compaction while
-    # retaining the complete callable contract.
+    # The 120-token budget is below write_file's canonical size; a required
+    # tool keeps its complete callable contract above that soft target.
     out = gw.fit_tool_schema_budget(
         [PROJECT_TOOL_WRITE_FILE], budget_tokens=120, model='kimi-k3',
         required_names={'write_file'})

@@ -105,6 +105,34 @@ def test_mentions_mode_delivers_only_mentions_and_replies(channel, dispatch, rec
     assert channel.thread(ThreadKey.parse(GROUP))['watermark'] == '7000000000000000001'
 
 
+@pytest.mark.parametrize('thread, mode, extra', [
+    (GROUP, 'watch', {}),
+    (COMMAND, None, {}),
+    (GROUP, 'mentions', {'mentioned_ids': (OWNER_UID,)}),
+])
+@pytest.mark.parametrize('kind', ['bot', 'system'])
+def test_a_bot_or_platform_notice_is_context_never_a_command_or_candidate(
+        channel, dispatch, thread, mode, extra, kind):
+    """Sender.kind is the platform's fact: an automated account is never reviewed or answered (no loops)."""
+    if mode:
+        _watch(channel, thread, mode)
+    result = ingest(OWNER, make_event(thread, sender='3003', sender_kind=kind, **extra), store=channel)
+    assert (result.outcome, result.disposition) == ('recorded', 'context')
+    assert dispatch.calls == []
+    record = channel.event(ThreadKey.parse(thread), '7000000000000000001')
+    assert record['senderKind'] == kind
+
+
+def test_a_subscriber_sees_a_bots_context_marked_as_a_bot(channel, dispatch, mailbox, monkeypatch):
+    monkeypatch.setattr('lib.channels.service._require_owned_conversation', lambda owner, conv: None)
+    from lib.channels import service
+    _watch(channel)
+    service.subscribe(OWNER, GROUP, 'worker-a', store=channel)
+    ingest(OWNER, make_event(GROUP, sender='3003', sender_kind='bot', text='build failed'), store=channel)
+    [call] = dispatch.to('worker-a')
+    assert 'sender_kind="bot"' in call['message']['content'] and 'disposition="context"' in call['message']['content']
+
+
 def test_disabled_account_ingests_nothing(store, router, dispatch, mailbox):
     store.update_account('dx', lambda account: {**account, 'enabled': False})
     assert ingest(OWNER, make_event(PRIVATE), store=store).outcome == 'disabled'
@@ -123,6 +151,15 @@ def test_outbox_echoes_are_never_input(channel, dispatch, records):
     recorded = make_event(GROUP, '7000000000000000012', sender=OWNER_UID)
     results = ingest_batch(OWNER, [marked, own, recorded], store=channel)
     assert [r.outcome for r in results] == ['echo', 'echo', 'echo']
+    assert dispatch.calls == [] and not records.keys('/event/')
+
+
+def test_an_owner_message_with_a_tofu_marker_of_no_outbox_item_is_an_echo(channel, dispatch, records):
+    """Only an API sets the marker field, so another Tofu send path stamped it: never an owner command
+    (x-selfEcho origin_marker; the 2026-11-09 restore replayed such sends as commands)."""
+    stamped = make_event(COMMAND, '7000000000000000013', sender=OWNER_UID, text='sent by a tool',
+                         outbox_marker='tool-7f3a')
+    assert ingest(OWNER, stamped, store=channel).outcome == 'echo'
     assert dispatch.calls == [] and not records.keys('/event/')
 
 
@@ -192,6 +229,74 @@ def test_failed_delivery_keeps_the_event_unrouted_and_the_watermark_behind(chann
     assert ingest(OWNER, event, store=channel).outcome == 'recorded'
     assert channel.event(event.thread, event.external_id)['state'] == 'routed'
     assert len({c['command_id'] for c in dispatch.calls}) == 1  # same deterministic command
+
+
+def _targets(store, event):
+    return sorted((d['conversationId'], d['kind'])
+                  for d in store.event(event.thread, event.external_id)['deliveries'])
+
+
+def test_partial_route_failure_replays_only_the_targets_that_did_not_accept(
+        channel, dispatch, mailbox, monkeypatch):
+    monkeypatch.setattr('lib.channels.service._require_owned_conversation', lambda owner, conv: None)
+    from lib.channels import service
+    _watch(channel)
+    service.subscribe(OWNER, GROUP, 'worker-a', store=channel)
+    first = make_event(GROUP, '7000000000000000001', text='first')
+    command = make_event(COMMAND, '7000000000000000005', sender=OWNER_UID, text='do it')
+    dispatch.outcomes[ROUTER] = 'busy'
+    with pytest.raises(DeliveryFailed):
+        ingest_batch(OWNER, [first, command], store=channel)
+    # The subscriber and the observation accepted before the router failed: recorded, still pending.
+    assert channel.event(first.thread, first.external_id)['state'] == 'pending'
+    assert _targets(channel, first) == [(ROUTER, 'observation'), ('worker-a', 'turn')]
+    assert channel.event(command.thread, command.external_id)['state'] == 'pending'
+    assert channel.thread(first.thread).get('watermark') is None
+    assert (channel.thread(command.thread) or {}).get('watermark') is None
+
+    dispatch.outcomes[ROUTER] = 'started'
+    second = make_event(GROUP, '7000000000000000002', text='second')
+    results = ingest_batch(OWNER, [first, second, command], store=channel)  # replay from the watermark
+    assert [r.outcome for r in results] == ['recorded', 'recorded', 'recorded']
+    worker = dispatch.to('worker-a')
+    assert [call['message']['origin']['channel']['eventIds'] for call in worker] == [
+        [first.event_id], [second.event_id]]
+    assert 'first' not in worker[1]['message']['content']
+    assert len(mailbox) == 2 and first.event_id not in mailbox[1]['content']
+    assert second.event_id in mailbox[1]['content']
+    assert [call['message']['content'] for call in dispatch.to(ROUTER)] == ['do it', 'do it']
+    for event in (first, second, command):
+        assert channel.event(event.thread, event.external_id)['state'] == 'routed'
+    assert _targets(channel, first) == _targets(channel, second) == [
+        (ROUTER, 'observation'), ('worker-a', 'turn')]
+    assert _targets(channel, command) == [(ROUTER, 'human')]
+    assert channel.thread(first.thread)['watermark'] == second.external_id
+    assert ingest_batch(OWNER, [first, second, command], store=channel)[0].outcome == 'duplicate'
+    assert len(dispatch.calls) == 4 and len(mailbox) == 2
+
+
+def test_a_failed_subscriber_is_retried_without_redelivering_to_the_ones_that_accepted(
+        channel, dispatch, mailbox, monkeypatch):
+    monkeypatch.setattr('lib.channels.service._require_owned_conversation', lambda owner, conv: None)
+    from lib.channels import service
+    _watch(channel)
+    for subscriber in ('worker-a', 'worker-b'):
+        service.subscribe(OWNER, GROUP, subscriber, store=channel)
+    event = make_event(GROUP)
+    dispatch.outcomes['worker-b'] = 'start_failed'
+    with pytest.raises(DeliveryFailed):
+        ingest(OWNER, event, store=channel)
+    assert _targets(channel, event) == [('worker-a', 'turn')]
+    assert mailbox == []  # the observation follows the subscribers and was never attempted
+    dispatch.outcomes['worker-b'] = 'started'
+    assert ingest(OWNER, event, store=channel).outcome == 'recorded'
+    assert len(dispatch.to('worker-a')) == 1
+    retried = dispatch.to('worker-b')
+    assert len(retried) == 2 and retried[0]['command_id'] == retried[1]['command_id']
+    assert len(mailbox) == 1
+    record = channel.event(event.thread, event.external_id)
+    assert record['state'] == 'routed'
+    assert _targets(channel, event) == [(ROUTER, 'observation'), ('worker-a', 'turn'), ('worker-b', 'turn')]
 
 
 def test_missing_subscriber_is_unsubscribed_and_candidates_return_to_router(
@@ -308,6 +413,21 @@ def test_oversized_text_is_spilled_and_recallable_never_inlined(channel, dispatc
         assert 'artifact_ref' not in content
     # The full text stays recallable from the event record either way.
     assert channel.event(event.thread, event.external_id)['text'] == text
+
+
+def test_a_push_after_an_unreplayed_gap_is_routed_but_leaves_the_watermark_to_the_replay(channel, dispatch):
+    _watch(channel)
+    first = make_event(GROUP, '7000000000000000001')
+    ingest(OWNER, first, store=channel)
+    pushed = make_event(GROUP, '7000000000000000009', text='after the gap')
+    assert ingest(OWNER, pushed, store=channel, advance_watermark=False).outcome == 'recorded'
+    assert 'after the gap' in dispatch.to(ROUTER)[-1]['message']['content']
+    assert channel.thread(ThreadKey.parse(GROUP))['watermark'] == first.external_id
+    # The replay from the watermark routes the gap and absorbs the push.
+    gap = make_event(GROUP, '7000000000000000005', text='the gap')
+    assert [r.outcome for r in ingest_batch(OWNER, [gap, pushed], store=channel)] == ['recorded', 'duplicate']
+    assert 'the gap' in dispatch.to(ROUTER)[-1]['message']['content']
+    assert channel.thread(ThreadKey.parse(GROUP))['watermark'] == pushed.external_id
 
 
 def test_a_late_push_below_the_watermark_is_delivered_not_mistaken_for_a_duplicate(channel, dispatch):

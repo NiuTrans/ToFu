@@ -73,7 +73,7 @@ def test_clipped_sections_do_not_reconstruct_structured_items(tail):
 
 
 def test_persisted_partial_launch_reconstructs_only_its_owned_structured_receipt():
-    from lib.storage.storage_projection import _swarm_stub_snapshot_from_handle
+    from lib.task_replay.persistence_projection import _swarm_stub_snapshot_from_handle
     from lib.swarm.snapshot import _round_handle, matching_snapshot_ids
     receipt = {'swarm_run_id': 'owned-run', 'agents': [
         {'id': 'owned-child', 'role': 'reader', 'objective': 'Read original evidence.'}]}

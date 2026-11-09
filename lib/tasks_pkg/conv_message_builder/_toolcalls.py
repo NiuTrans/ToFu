@@ -227,6 +227,8 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
             tool_results.append(tool_result)
             # First-seen assistantContent / thinking in the batch become the
             # assistant message's text + reasoning (Claude-style prefix).
+            if not assistant_text and r.get('assistantModelContent'):
+                assistant_text = r['assistantModelContent']
             if not assistant_text and r.get('assistantContent'):
                 assistant_text = r['assistantContent']
             if not assistant_thinking and r.get('thinking'):

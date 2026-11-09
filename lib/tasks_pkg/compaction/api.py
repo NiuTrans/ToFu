@@ -13,6 +13,7 @@ from lib.tasks_pkg.compaction._budget import (
     clamp_tool_result_text,
     enforce_round_aggregate_budget,
     enforce_round_aggregate_budget_v2,
+    fits_tool_result_budget,
     mark_empty_result,
 )
 from lib.tasks_pkg.compaction._layer1 import micro_compact
@@ -61,6 +62,7 @@ __all__ = (
     'enforce_round_aggregate_budget',
     'enforce_round_aggregate_budget_v2',
     'execute_compact_tool',
+    'fits_tool_result_budget',
     'force_compact_if_needed',
     'get_step',
     'get_step_spec',

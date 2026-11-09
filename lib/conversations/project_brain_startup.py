@@ -51,7 +51,8 @@ def ensure_project_brain_cutover() -> dict:
 def recover_active_work_items() -> int:
     """Finish orphaned work only after its workspace intent is acknowledged."""
     from lib.tasks_pkg.workspace_delivery import (
-        record_task_workspace_intents, task_outcome, work_result_summary,
+        RESTART_INTERRUPTED, record_task_workspace_intents, work_result_summary,
+        workspace_outcome,
     )
 
     client = get_storage_client(write=True)
@@ -108,7 +109,7 @@ def recover_active_work_items() -> int:
                     for key in ('finishReason', 'streamState', 'aborted', '_abort_reason'):
                         if key not in task and key in metadata:
                             task[key] = metadata[key]
-                status = task_outcome(task)
+                status = workspace_outcome(task)
                 if status == 'cancelled':
                     summary = 'Execution was cancelled before server restart recovery.'
                 elif status == 'completed':
@@ -131,6 +132,15 @@ def recover_active_work_items() -> int:
                     logger.warning(
                         '[ProjectBrain] recovery intent pending work=%s task=%s: %s',
                         work_id, task_id, exc)
+                    continue
+                if status == RESTART_INTERRUPTED:
+                    # The restart paused this task: its non-denied workspace receipt
+                    # is recorded above, and its resumed attempt keeps the same task
+                    # identity and settles the work item. Finishing it here closed
+                    # resumed lanes' work as 'cancelled' (2026-11-06, 18 items).
+                    logger.info('[ProjectBrain] work=%s task=%s paused by the restart; '
+                                'left active for its resumed attempt', work_id, task_id)
+                    settled_work.add(identity)
                     continue
                 delivery_summary = work_result_summary(recovery_task)
                 if delivery_summary:

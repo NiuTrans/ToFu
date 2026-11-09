@@ -152,7 +152,7 @@ def _schedule_one_settled_visible_turn(
         )
         logger.info(
             "[AutoTranslate] scheduled settled flow turn conv=%s turn=%s",
-            conversation_id[:8], turn_id[:8],
+            conversation_id, turn_id[:8],
         )
         return True
     except Exception as exc:
@@ -208,7 +208,7 @@ def _translate_settled_turns(task: dict[str, Any]) -> None:
             except Exception as exc:
                 logger.warning(
                     "[AutoTranslate] cannot read conv=%s turn=%s: %s",
-                    conversation_id[:8], turn_id[:8], exc,
+                    conversation_id, turn_id[:8], exc,
                 )
                 continue
             if turn.get("status") in {"pending", "running", "waiting_for_user"}:
@@ -253,7 +253,7 @@ def _translate_settled_turns(task: dict[str, Any]) -> None:
     except Exception as exc:
         logger.error(
             "[AutoTranslate] coordinator failed conv=%s: %s",
-            conversation_id[:8], exc, exc_info=True,
+            conversation_id, exc, exc_info=True,
         )
     finally:
         if not incremental_handoff:
@@ -295,7 +295,7 @@ def _conversation_translate_settings(
     except Exception as exc:
         logger.debug(
             "[AutoTranslate] settings read failed conv=%s: %s",
-            conversation_id[:8], exc,
+            conversation_id, exc,
         )
         return {}
 
@@ -352,7 +352,7 @@ def run_boot_translation_sweep(
             except Exception as exc:
                 logger.debug(
                     "[AutoTranslate] boot sweep conv=%s failed: %s",
-                    conv_id[:8], exc,
+                    conv_id, exc,
                 )
         if summary["respawned"]:
             logger.info("[AutoTranslate] boot translation sweep: %s", summary)
@@ -468,18 +468,18 @@ def sweep_conversation_translations(
             except Exception as exc:
                 logger.debug(
                     "[AutoTranslate] sweep skipped one turn conv=%s: %s",
-                    conversation_id[:8], exc,
+                    conversation_id, exc,
                 )
         if respawned:
             logger.info(
                 "[AutoTranslate] sweep respawned %d translation(s) conv=%s",
-                respawned, conversation_id[:8],
+                respawned, conversation_id,
             )
         return respawned
     except Exception as exc:
         logger.warning(
             "[AutoTranslate] conversation sweep failed conv=%s: %s",
-            conversation_id[:8], exc,
+            conversation_id, exc,
         )
         return respawned
 
@@ -570,18 +570,18 @@ def schedule_translation_recovery(
                 logger.info(
                     "[AutoTranslate] open-path recovery respawned %d "
                     "translation(s) conv=%s",
-                    respawned, conversation_id[:8],
+                    respawned, conversation_id,
                 )
         except Exception as exc:
             logger.debug(
                 "[AutoTranslate] open-path recovery failed conv=%s: %s",
-                conversation_id[:8], exc,
+                conversation_id, exc,
             )
 
     threading.Thread(
         target=_run,
         daemon=True,
-        name=f"translate-recovery-{conversation_id[:8]}",
+        name=f"translate-recovery-{conversation_id}",
     ).start()
     return True
 
@@ -609,7 +609,7 @@ def _spawn_whole_turn_translation(
     if (conversation_id, turn_id) in _active_whole_turn_keys():
         logger.debug(
             "[AutoTranslate] turn already translating conv=%s turn=%s",
-            conversation_id[:8], turn_id[:8],
+            conversation_id, turn_id[:8],
         )
         return False
 

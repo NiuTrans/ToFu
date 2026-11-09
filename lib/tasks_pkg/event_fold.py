@@ -105,7 +105,7 @@ def fold_cold_state(task_id, checkpoint_content='', checkpoint_thinking='',
                 event_ids.append(int(ev['event_id']))
     except Exception as e:
         logger.warning('[EventFold] fold failed for task=%s: %s — using checkpoint',
-                       (task_id or '')[:8], e)
+                       (task_id or ''), e)
         return (checkpoint_content or '', checkpoint_thinking or '',
                 checkpoint_epoch)
     log_complete = (
@@ -120,7 +120,7 @@ def fold_cold_state(task_id, checkpoint_content='', checkpoint_thinking='',
             '[EventFold] newer content epoch ignored for task=%s because the '
             'event log is incomplete (checkpoint_epoch=%d event_epoch=%d '
             'rows=%d first=%s last=%s)',
-            (task_id or '')[:8], checkpoint_epoch, event_epoch,
+            (task_id or ''), checkpoint_epoch, event_epoch,
             len(events or []), event_ids[0] if event_ids else None,
             event_ids[-1] if event_ids else None)
         return (checkpoint_content or '', checkpoint_thinking or '',

@@ -473,7 +473,7 @@ Verify `test_edit_file_atomic_preflight.py`, `test_project_dispatch_scope.py`,
 
 ## Direct-write journal failure
 
-Text writes, uploads, replacements, insertions, and batch edit groups require
+Text writes, uploads, replacements, and batch edit groups require
 an explicit successful journal acknowledgement when the target is tracked.
 A missing acknowledgement or journal exception after atomic file replacement
 returns `undo-record-failed`, with `mutationApplied: true` and
@@ -777,7 +777,7 @@ Original-file reads are bounded before decoding or allocating recovery evidence 
 replacement fail before mutation when the existing file cannot be read.
 Text overwrite preserves the exact UTF-8 pre-image (including CR/LF and BOM)
 or stores undecodable originals using the existing binary history encoding.
-Append, replacement, and insertion edits require strict UTF-8 and preserve
+Append and replacement edits require strict UTF-8 and preserve
 newline bytes during reads; lossy replacement decoding never becomes the
 content to publish or the evidence to undo. Missing original bytes are never
 interpreted as proof that an existing file was newly created.
@@ -809,7 +809,7 @@ cooperative transaction.
 
 ## Complete edit batch admission
 
-Problem: legacy replacement/insertion batches silently discarded entries after
+Problem: legacy replacement batches silently discarded entries after
 30, while unified `edit_file` both declared and enforced the same private count
 ceiling. A late failed preflight could therefore disappear and let an atomic
 call publish changes whose complete requested batch was invalid. Decision:
@@ -819,15 +819,14 @@ including late invalid entries and subsequent valid work.
 
 Grouped replacements still compute in order and publish one physical replacement
 and one verified undo transition per file. Atomic preflight considers every
-requested operation before publication. Insertion keeps its existing per-edit
-undo transitions. Path/read-only authority, freshness, real write failures and
+requested operation before publication. Path/read-only authority, freshness, real write failures and
 recovery-evidence checks retain their owners; count admission grants no write
 authority. Alternatives considered: raising the threshold still drops work;
 separate small calls erase batch-wide preflight and grouping semantics.
 
 `test_project_edit_demand.py` verifies schema admission and actual 64-edit
 chains with exact undo, a failed 41st atomic preflight with zero publication,
-a late invalid operation followed by successful work, 32 ordered inserts
-with complete undo, and a physical failure on the 32nd of 40 files that leaves
+a late invalid operation followed by successful work, 32 ordered additions
+with one complete undo transition, and a physical failure on the 32nd of 40 files that leaves
 39 completed files independently undoable and no false success history. Atomicity, write-failure, ownership and recovery neighbors
 remain required; independent byte/recovery policies are separate audit targets.

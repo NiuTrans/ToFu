@@ -118,3 +118,45 @@ def test_main_coordinator_card_header_and_health_checks(page, monkeypatch, tmp_p
     expect(page.locator('#projectBar')).to_be_hidden()
     expect(header.locator('.router-watchdog summary')).to_have_text('故障巡检：已开启')
     page.screenshot(path=str(output / 'main-coordinator-zh.png'), animations='disabled')
+
+
+def test_folder_without_directory_keeps_its_coordinator_slot(page, monkeypatch, tmp_path, assert_no_js_errors):
+    from tests.conftest import _dismiss_onboarding_modals
+    import routes.api_v1.folders as folders
+
+    monkeypatch.setattr(folders, '_FOLDERS_PATH', str(tmp_path / 'folders.json'))
+    origin = page.url.split('/?', 1)[0].rstrip('/')
+    folder = page.request.post(origin + '/api/v4/folders', data={'name': '面试'})
+    assert folder.ok, folder.text()
+    folder_id = folder.json()['data']['id']
+    root = tmp_path / '面试材料'
+    root.mkdir()
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('localStorage.setItem("tofu_ui_lang", "zh")')
+    page.reload()
+    _dismiss_onboarding_modals(page)
+    card = page.locator('#globalRouterEntry .coordination-leader')
+    expect(card).to_be_visible(timeout=20000)
+
+    page.locator(f'.folder-tab[data-folder-id="{folder_id}"]').click()
+    expect(page.locator('#globalRouterEntry')).to_be_hidden()
+    row = page.locator('#projectCoordinatorEntry .coordination-leader')
+    expect(row.locator('.coordination-leader-label')).to_have_text('项目负责人')
+    expect(row.locator('.coordination-leader-meta')).to_have_text('这个文件夹还没有项目目录；在项目设置中添加后即可创建负责人。')
+    expect(page.locator('#sidebar .coordination-leader:visible')).to_have_count(1)
+
+    # The row opens this folder's Project settings; a directory in any script makes it a bindable project.
+    row.get_by_role('button', name='项目设置', exact=True).click()
+    dialog = page.locator('dialog:has(form.folder-settings)')
+    expect(dialog.locator('input').first).to_have_value('面试')
+    browse = dialog.locator('.folder-browser-filter')
+    browse.fill(str(tmp_path))
+    browse.press('Enter')
+    dialog.locator(f'.folder-browser-row[data-dir-path="{root}"] [data-action="add"]').click()
+    dialog.locator('button[type="submit"]').click()
+    expect(row.get_by_role('button', name='创建项目负责人', exact=True)).to_be_visible(timeout=20000)
+    saved = page.request.get(origin + '/api/v4/folders').json()['data']['items']
+    assert [item['projectPaths'] for item in saved if item['id'] == folder_id] == [[str(root)]]
+
+    page.locator('.folder-tab-uncat').click()
+    expect(card).to_be_visible()

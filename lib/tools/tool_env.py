@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from lib.log import audit_log, get_logger
+from lib.log import audit_log, get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -183,7 +183,7 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
     with _client_results_lock:
         if registry_key in _client_results:
             logger.error('[CustomTool] duplicate pending client handoff '
-                         'task=%s call_id=%s', task_id[:8], call_id)
+                         'task=%s call_id=%s', task_log_tag(task_id), call_id)
             return (
                 f'Custom tool call {call_id} is already pending for this task.',
                 True,
@@ -273,13 +273,13 @@ def resolve_client_tool_result(
         entry = _client_results.get(registry_key)
         if not entry or entry.get('resolved'):
             logger.warning('[CustomTool] resolve for unknown task=%s call_id=%s '
-                           '(expired or already resolved)', task_id[:8], call_id)
+                           '(expired or already resolved)', task_log_tag(task_id), call_id)
             return False
         if (entry.get('task_id') != task_id
                 or int(entry.get('user_id') or 0) != int(user_id)):
             logger.warning(
                 '[CustomTool] rejected foreign resolve call_id=%s task=%s',
-                call_id, task_id[:8])
+                call_id, task_log_tag(task_id))
             return False
         # Bound before retaining the callback in the process-wide table.  The
         # downstream dispatch cap remains as defense in depth for webhook and
@@ -368,7 +368,7 @@ class ToolEnvironment:
                   round_entry) -> tuple[str, str, bool]:
         from lib.tasks_pkg.executor import _finalize_tool_round
         t0 = time.time()
-        tid = (task.get('id', '?') or '?')[:8]
+        tid = (task.get('id', '?') or '?')
         logger.info('[Task %s] [CustomTool:%s] mode=%s called', tid,
                     tool.name, tool.mode)
         try:

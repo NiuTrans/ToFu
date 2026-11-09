@@ -55,7 +55,7 @@ def _settle_started_goal_failure(
         # retire the still-active physical row; it must not conceal that cause.
         logger.error(
             '[FlowChat] GoalRun failure settlement failed task=%s: %s',
-            str(task.get('id') or '')[:8], goal_error, exc_info=True,
+            str(task.get('id') or ''), goal_error, exc_info=True,
         )
 
 
@@ -92,7 +92,7 @@ def finalize_unavailable_orchestration_chat_flow(
     )
     logger.warning(
         '[FlowChat] task=%s selected flow %s unavailable — failing closed',
-        str(task.get('id') or '')[:8], selected,
+        str(task.get('id') or ''), selected,
     )
     audit_log(
         'flow_via_chat_resolution_failed',
@@ -115,7 +115,7 @@ def finalize_orchestration_chat_flow_exception(
     ports = ports or OrchestrationChatFailurePorts.defaults()
     logger.error(
         '[FlowChat] task=%s label=%s FATAL error',
-        str(task.get('id') or '')[:8], label, exc_info=True,
+        str(task.get('id') or ''), label, exc_info=True,
     )
     audit_log(
         'flow_via_chat_failed',

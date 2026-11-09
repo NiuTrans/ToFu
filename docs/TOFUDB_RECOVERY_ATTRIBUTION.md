@@ -138,7 +138,7 @@ Decision: consult the existing content-addressed proof first, and record
 successful history and conservative-fallback verification in that same map.
 Each supplied payload is still hashed; a fresh lookup must verify its source
 again. Missing or damaged copies retain WAL repair, other I/O errors propagate,
-and identifiers outside the bounded map retain conservative resolution. No
+and unselected identifiers retain conservative resolution. No
 cross-open cache, new storage format, background worker or retention is added.
 The preliminary ID selection uses the existing strict non-copying envelope
 decoder; actual replay continues validating all carried bytes and references.
@@ -166,6 +166,48 @@ The deterministic regression changes repeated source reads from 512 to zero
 after first verification; a fresh pass still reaches an injected PermissionDenied.
 These measurements do not attribute the previously observed 111.267-second
 production authority open or establish its remaining duration.
+
+## Recovery history lookup covers the complete WAL reference set
+
+Problem: distinct WAL references each walked the same immutable history routing
+pages, both to recover content and to decide which loose copies need syncing.
+When those pages exceed the ordinary payload cache, the walk repeatedly evicts
+its own preceding pages. Recovery then performs history-sized I/O per WAL
+reference and can exhaust the supervised startup deadline. A 572,675,112-byte
+incident WAL contained 226,130 distinct references; the former 65,536-ID lookup
+cutoff left most references on that repeated path even after batching. Those
+counts are a read-only framing observation, not an integrity certificate.
+
+Decision: select every distinct reference in the chosen WAL and resolve packed
+and history locations in one verified pass. Each relevant history routing page
+is read and validated once; only candidate locations and exact absence survive
+until replay finishes. Candidate order, current source membership and payload
+content verification remain authoritative. An unreadable page records its error
+at the original position for each affected ID: an earlier valid copy may answer,
+but reaching that error preserves repair, alternate-copy fallback and I/O failure
+instead of consuming a transient fault. Cancellation discards preparation; every
+new open verifies its own sources. Sync staging consumes the same evidence.
+
+Temporary metadata follows distinct selected references and routing levels;
+it retains neither history page bytes nor another copy of carried payloads.
+It is released with this open. `activeWalRotation.recoveryLookupPolicy` replaces
+the internal build contract's recovery-location cutoff. Its former 65,536-entry
+value remains solely the unchanged persisted-hint retention limit, now named
+`payloadSegmentReadCache.maximumPersistedHints`. All build-time consumers move
+together; disk and wire formats, WAL admission and startup deadlines do not change.
+
+Alternatives rejected: raising the startup timeout or the ID cutoff only moves
+the failure to a larger backlog; enlarging the ordinary cache moves it to a
+larger history; trusting cache files or skipping payload validation weakens
+recovery integrity. The regression exceeds the former cutoff with zero payload
+cache. Neighboring tests retain failed-source, valid-copy and cancellation checks.
+
+The original 128-distinct-reference fixture measured 118 history-page reads
+before batching and one after it, with the payload cache disabled. Loose-sync
+staging adds no page read. The expanded 65,537-reference regression also reads
+one page, including restoration and sync staging. This is work-count evidence, not a production
+restart-time or filesystem durability guarantee; the packed-catalog scan and
+actual payload validation remain separate costs.
 
 ## Fixed-image comparison boundary
 

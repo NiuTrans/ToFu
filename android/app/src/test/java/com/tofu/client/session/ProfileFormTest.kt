@@ -68,6 +68,13 @@ class ProfileFormTest {
         assertTrue(ProfileForm.validate("x", goodUrl, AuthType.INTERACTIVE_SSO, "", emptySet()).ok)
     }
 
+    @Test fun inbound_prefill_never_implicitly_overwrites_dirty_or_editing_form() {
+        assertTrue(ProfileForm.mayAutofill(editing = false, dirty = false))
+        assertFalse(ProfileForm.mayAutofill(editing = false, dirty = true))
+        assertFalse(ProfileForm.mayAutofill(editing = true, dirty = false))
+        assertFalse(ProfileForm.mayAutofill(editing = true, dirty = true))
+    }
+
     @Test
     fun toProfile_extracts_instance_uuid() {
         val p = ProfileForm.toProfile(0, "dc1", goodUrl, AuthType.CODE_SERVER_PASSWORD, 0)

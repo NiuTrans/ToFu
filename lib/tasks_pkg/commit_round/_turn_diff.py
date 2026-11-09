@@ -236,6 +236,6 @@ def build_turn_diff_block(
     if sections:
         block += '\n\n' + '\n\n'.join(sections)
     logger.info('[TurnDiff] task=%s files=%d +%d/−%d omitted=%d chars=%d',
-                (task.get('id') or '')[:8], files_changed, total_added,
+                (task.get('id') or ''), files_changed, total_added,
                 total_removed, files_omitted, len(block))
     return block

@@ -1,5 +1,6 @@
 //! Main-lane context selection with revision-proven text continuations.
-//! Reads compact authority indexes before materializing only the new suffix.
+//! Reads compact authority indexes before materializing only the new suffix;
+//! a Turn with more than one projection page travels as its page-0 head.
 //! Header walks stream one engine index page at a time: the v2 digest covers
 //! every header through the target while only the response page is retained,
 //! so lane length is never a ceiling (docs/TOFUDB_CONTEXT_READ.md).
@@ -150,6 +151,28 @@ fn read_turn(
         .transpose()
 }
 
+/// A Turn whose `turn.projection.page` pages are more than one travels as
+/// `{"pagedTurn": head}`; the client reads its pages pinned to the head's
+/// projection revision (docs/STORAGE.md, "Paged Turn storage", Decision 6).
+fn context_row(turn: Value, bytes: usize) -> io::Result<(Value, usize)> {
+    let (turn, paged) = super::projection_page::paged_head(turn)?;
+    if !paged {
+        return Ok((turn, bytes));
+    }
+    let mut row = Map::new();
+    row.insert("pagedTurn".to_owned(), turn);
+    crate::response_json::normalize_value_with_size(
+        Value::Object(row),
+        crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES,
+    )
+    .map_err(|_| invalid_data("context Turn head cannot be encoded"))
+}
+
+/// The Turn record of a response row; a paged Turn's row carries its head.
+fn row_turn(row: &Value) -> &Value {
+    row.get("pagedTurn").unwrap_or(row)
+}
+
 fn response(value: Value) -> io::Result<crate::response_json::EncodedResponse> {
     let encoded = crate::response_json::EncodedResponse::from_value(value)
         .map_err(|_| invalid_data("turn response cannot be encoded"))?;
@@ -242,6 +265,7 @@ impl<'a> Page<'a> {
             read_turn(database, transaction, self.conversation, id)?
                 .ok_or_else(|| invalid_data("context Turn disappeared"))?
         };
+        let (value, bytes) = context_row(value, bytes)?;
         if !self.turns.is_empty() && self.bytes.saturating_add(bytes) > self.limit {
             self.full = true;
             return Ok(());
@@ -265,14 +289,14 @@ impl<'a> Page<'a> {
         let next_turn_id = if self.full {
             self.turns
                 .last()
-                .and_then(|row| row.get("turnId"))
+                .and_then(|row| row_turn(row).get("turnId"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         } else {
             None
         };
         let eligible = self.turns.iter().all(|row| {
-            match row
+            match row_turn(row)
                 .get("projection")
                 .and_then(|value| value.get("attachments"))
             {

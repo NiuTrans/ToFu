@@ -20,7 +20,8 @@ def _accepted_then_drifted(r):
     r.service.publication_wake = lambda: None
     review = r.call('review_project_work', assignment_id=first['id'], result_revision=1,
                     decision='accept', note='Verified exact code', checkpoint_sha=pin['checkpointSha'])
-    assert review['canonicalDelivery'], review
+    assert 'error' not in review, review
+    assert review['canonical_delivery'], review
     r.turns[first['execution']['turnId']]['projectionRevision'] = 3
     return first, pin
 
@@ -89,22 +90,45 @@ def test_checkpoint_pin_retires_that_workers_held_receipt(run, checkpoint):
     assert released == ([(r.c.repo.project, task_id, r.c.repo.owner)] if checkpoint else [])
 
 
-def test_a_publication_hold_names_its_hidden_cause_once(monkeypatch, caplog):
+def test_a_publication_hold_names_its_hidden_cause_once_per_cause(monkeypatch, caplog):
     import logging
+    from types import SimpleNamespace
+    from lib import integration_control
     from lib.project_dispatch import admission, publication
+
+    refusal = ['Project publication requires explicit human authorization']
+    binding = {'owner': 1, 'projectPath': '/project', 'assignmentId': 'assignment',
+               'recipientId': 'worker', 'revision': 1}
 
     class Repository:
         def validate_publication(self, binding, task_id):
-            raise ProjectDispatchError('Project publication requires explicit human authorization')
+            if refusal[0]:
+                raise ProjectDispatchError(refusal[0])
+            return {'id': 'assignment', 'publication': {'checkpointSha': 'c' * 40},
+                    'grant': {'owner': 1, 'revision': 1, 'revoked': False},
+                    'request': {'projectPath': '/project', 'recipientId': 'worker',
+                                'profile': {'mode': 'project', 'writePaths': ['.']}}}
 
+    monkeypatch.setattr(publication, '_LOGGED_HOLD_CAUSES', {})
     monkeypatch.setattr(admission, 'repository_for', lambda binding: Repository())
-    binding = {'owner': 1, 'projectPath': '/project', 'assignmentId': 'assignment'}
-    row = {'task_id': 'task', 'user_id': 1, 'project_root': '/project',
-           'origin': {admission.KEY: binding}}
+    monkeypatch.setattr(integration_control, '_git', lambda *a, **k: SimpleNamespace(stdout=''))
+    row = {'task_id': 'task', 'user_id': 1, 'project_root': '/project', 'checkpoint_sha': 'c' * 40,
+           'origin': {admission.KEY: binding, 'sourceSnapshot': 'b' * 40}}
     reason = 'project_publication_authority_missing'
+    # The receipt already carries this hold, e.g. written by an earlier process.
+    held = {'state': 'blocked', 'reason': reason}
     with caplog.at_level(logging.WARNING, logger=publication.__name__):
-        assert publication.publication_reason(row, {'state': 'pending'}) == reason
-        # The receiver's later retries of the same hold stay quiet.
-        assert publication.publication_reason(row, {'state': 'blocked', 'reason': reason}) == reason
+        assert publication.publication_reason(row, held) == reason
+        # The receiver's later retries of the same cause stay quiet.
+        assert publication.publication_reason(row, held) == reason
+        refusal[0] = 'Grant withdrawn by durable conversation Stop'
+        assert publication.publication_reason(row, held) == reason
+        refusal[0] = ''
+        assert publication.publication_reason(row, held) == ''
+        # A hold that clears and returns names its cause again.
+        refusal[0] = 'Grant withdrawn by durable conversation Stop'
+        assert publication.publication_reason(row, held) == reason
     causes = [record.getMessage() for record in caplog.records]
-    assert len(causes) == 1 and 'requires explicit human authorization' in causes[0]
+    assert len(causes) == 3, causes
+    assert 'requires explicit human authorization' in causes[0]
+    assert all('durable conversation Stop' in cause for cause in causes[1:])

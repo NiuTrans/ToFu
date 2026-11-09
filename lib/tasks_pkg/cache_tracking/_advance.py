@@ -87,7 +87,7 @@ def advance_cache_observation(
                 except Exception as _pe:
                     logger.debug(
                         '[CacheTrack] cache-prefix sink failed conv=%s: %s',
-                        conv_id[:8], _pe,
+                        conv_id, _pe,
                     )
             if not _boundary_staged and scope is None:
                 try:
@@ -97,7 +97,7 @@ def advance_cache_observation(
                         conv_id, _durable_boundary, user_id=user_id)
                 except Exception as _pe:
                     logger.debug('[CacheTrack] advance_persisted_boundary '
-                                 'failed conv=%s: %s', conv_id[:8], _pe)
+                                 'failed conv=%s: %s', conv_id, _pe)
     # ── Persist the DURABLE round-1 read baseline (survives restart /
     #    stale-eviction / replica switch). This round's cache_read becomes
     #    the NEXT turn's cross-turn baseline; when that next turn starts on a
@@ -115,7 +115,7 @@ def advance_cache_observation(
             except Exception as _pe:
                 logger.debug(
                     '[CacheTrack] last-read sink failed conv=%s: %s',
-                    conv_id[:8], _pe,
+                    conv_id, _pe,
                 )
         if not _last_read_staged and scope is None:
             try:
@@ -125,7 +125,7 @@ def advance_cache_observation(
                     conv_id, observed_read, user_id=user_id)
             except Exception as _pe:
                 logger.debug('[CacheTrack] write_last_turn_cache_read '
-                             'failed conv=%s: %s', conv_id[:8], _pe)
+                             'failed conv=%s: %s', conv_id, _pe)
     if not prev.first_call_time:
         prev.first_call_time = now
     # Accumulate session-level stats

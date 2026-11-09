@@ -31,12 +31,18 @@ pub(super) fn refresh_live_projection(
 
 /// The shared constructor also recognizes exactly the pending records the old
 /// steer writer appended. Preview length is the existing steer wire contract.
-pub(super) fn pending_steer_record(command_id: &str, text: &str, author: Option<&Value>) -> Value {
+pub(super) fn pending_steer_record(
+    command_id: &str, text: &str, images: &[Value], author: Option<&Value>,
+) -> Value {
+    let mut preview = json!({"text": text.chars().take(1200).collect::<String>()});
+    if !images.is_empty() {
+        preview.as_object_mut().unwrap().insert("images".to_owned(), Value::Array(images.to_vec()));
+    }
     let mut record = json!({
         "blockId": format!("injection:user-steer:{command_id}"),
         "commandId": command_id,
         "count": 1,
-        "previews": [{"text": text.chars().take(1200).collect::<String>()}],
+        "previews": [preview],
         "deliveryState": "pending"
     });
     if let Some(author) = author {
@@ -99,8 +105,9 @@ pub(super) fn witnessed_legacy_steer_suffix(
         let Some(text) = record.get("previews").and_then(Value::as_array)
             .and_then(|previews| previews.first()).and_then(|preview| preview.get("text"))
             .and_then(Value::as_str) else { return Ok(false); };
+        // The old writer dropped images, so a legacy record never carries any.
         if record.get("author").is_some_and(|author| !author.is_object())
-            || *record != pending_steer_record(command_id, text, record.get("author"))
+            || *record != pending_steer_record(command_id, text, &[], record.get("author"))
         { return Ok(false); }
     }
     // This private candidate is only evidence. Recovery always keeps the full

@@ -11,7 +11,7 @@
     "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
     "literalAdmission": "checked-size-without-aggregate-byte-quota",
     "maximumLegacyDocumentBytes": 8388608,
-    "maximumExecutableOperations": 384
+    "maximumExecutableOperations": 386
   },
   "physicalBounds": {
     "maximumEntityKeyBytes": 3072,
@@ -522,7 +522,7 @@
     "appendAdmission": "checked-u64-offset-without-maintenance-byte-quota",
     "foregroundMaintenancePolicy": "notify-existing-rotation-driver;never-wait-for-history-encoding-or-publication",
     "recoveryPolicy": "buffered-frame-scan;validate-record-size-before-allocation;preserve-exact-durable-prefix-and-tail-truncation",
-    "maximumRecoveryPackedLocations": 65536,
+    "recoveryLookupPolicy": "all-distinct-selected-wal-references;one-verified-packed-and-history-index-pass;release-after-replay",
     "foregroundMaterializeTargetBytes": 8388608,
     "historyPreparationTargetBytes": 262144,
     "maximumHistoryPreparationBytes": 4194304,
@@ -646,6 +646,7 @@
     "catalogInvalidation": "when-a-replacement-catalog-drops-a-previously-referenced-segment-evict-its-verified-index-ids-absent-from-every-added-segment;clear-on-any-uncertainty;pure-additions-keep-verified-payloads"
   },
   "payloadSegmentReadCache": {
+    "maximumPersistedHints": 65536,
     "maximumResidentIndexAndFilterBytes": 67108864,
     "maximumResidentSegments": 4096,
     "maximumRecencyRecords": 8192,
@@ -3120,7 +3121,7 @@
       "constraints": [
         "task IDs are unique across owners within an authenticated numeric tenant and idempotency keys are unique per user",
         "enqueue document, task identity, idempotency identity, queued index, priority summary, receipt, and outbox commit atomically",
-        "claim_next requires one to 32 explicit task kinds and always prefers the earliest expired lease before queued work",
+        "claim_next requires one to 32 explicit task kinds and claims whichever became claimable first: the earliest reclaimable lease (expired and not retained by a live holder process), measured from its deadline on the lease clock with previous-epoch and legacy leases oldest, or the queued head, measured from its availability on UTC; ties order by priority, creation time, and task ID",
         "queued selection preserves priority, available time, creation time, and task ID order through a 1001-entry per-kind minimum-availability summary rather than an unbounded eligible-row sort",
         "claim, heartbeat, cancellation, and completion rekey every affected queue or lease index in the same fenced transaction",
         "fencing tokens and attempts increase on every claim while replay cursors, heartbeat times, and extended lease deadlines are monotonic",
@@ -3456,6 +3457,7 @@
       "conversationIndexNamespace": "raw_archives_by_conversation_created",
       "conversationStatsNamespace": "raw_archive_conversation_stats",
       "ownerAgeIndexNamespace": "raw_archives_by_owner_created",
+      "ownerBodyAgeIndexNamespace": "raw_archive_bodies_by_owner_created",
       "ownerAgeBackfillNamespace": "raw_archive_owner_age_backfill",
       "maximumStoredBytes": 16777216,
       "maximumDocumentBytes": 25165824,
@@ -3475,9 +3477,9 @@
         "archive identity is claimed tenant-globally so a re-put under another owner is a typed conflict while an identical re-put under the claiming owner replays idempotently",
         "put proves the owning attempt row under the same owner with matching conversation turn and task before any write and a missing owner is a typed not-found",
         "compressed part bytes travel inside the put step outside the shared 8 MiB literal pool and each part stays within 16 MiB with the pair within the same 16 MiB per-attempt budget",
-        "archives are reconstructible diagnostic evidence, not durable user state: before the owner or conversation archive ceiling or the tenant stored-byte budget would refuse or scrub a live put, the put reclaims the oldest archives in (created_at_ms, archive_id) order inside its own transaction, the conversation ceiling from that conversation and the owner ceiling and budget from the owner, at most 64 per put; idempotent replay and offline restore never reclaim",
-        "budget exhaustion that reclaiming cannot cure (parts larger than the budget, nothing left to reclaim, or the 64-archive bound) and free-space exhaustion scrub to a partial archive with empty parts and reason quota_exhausted, and per-attempt budget exhaustion scrubs likewise with reason attempt_limit",
-        "an owner-scoped age index of big-endian created_at_ms then id carries every archive's removal record; put, restore, reclamation, Attempt cleanup and conversation deletion maintain it atomically, and archives that predate it are backfilled from the conversation removal index through a persistent owner cursor, at most 512 rows per live put, before reclamation reads it",
+        "archives are reconstructible diagnostic evidence, not durable user state: before the conversation or owner archive ceiling, the per-attempt stored-byte budget or the tenant stored-byte budget would refuse or scrub a live put, the put reclaims the oldest archives in (created_at_ms, archive_id) order inside its own transaction, the conversation ceiling from that conversation, the per-attempt budget from that attempt, the owner ceiling from the owner age index and the tenant budget from the owner body age index, at most 64 per put; idempotent replay and offline restore never reclaim",
+        "a scrubbed partial archive with empty parts names the constraint that bound: quota_exhausted for free-space exhaustion or parts larger than the whole budget, otherwise attempt_limit while the attempt still exceeds its budget after reclaiming, otherwise quota_exhausted for tenant budget exhaustion that reclaiming cannot cure (nothing left to reclaim or the 64-archive bound)",
+        "an owner-scoped age index of big-endian created_at_ms then id carries every archive's removal record and an owner-scoped body age index with the same keys carries only archives with stored bytes; put, restore, reclamation, Attempt cleanup and conversation deletion maintain both atomically; archives that predate the age index are backfilled from the conversation removal index and then archives that predate the body age index from the age index, each through a persistent owner cursor, together at most 512 rows per live put before reclamation reads them, and the tenant budget reclaims from the age index until the body age index is complete",
         "part bytes ride inside one bounded document per archive that spills to an owner-bound blob so authority GC retains exactly the live archive bytes",
         "list order is (created_at_ms, archive_id) ascending reproduced by task and task+round covering indexes of big-endian timestamp then id, bounded by a 64-row page",
         "reads inflate strictly: a stored part must finish its zlib stream within 64 MiB decoded with no unused trailing bytes, and any violation is a typed integrity error",
@@ -4032,6 +4034,12 @@
     {
       "name": "conversation.trash.prune",
       "kind": "command",
+      "table": "conversations",
+      "receiptRequired": false
+    },
+    {
+      "name": "conversation.turn_usage",
+      "kind": "query",
       "table": "conversations",
       "receiptRequired": false
     },
@@ -5862,6 +5870,12 @@
     {
       "name": "turn.perception.record",
       "kind": "command",
+      "table": "conversation_turns",
+      "receiptRequired": false
+    },
+    {
+      "name": "turn.projection.page",
+      "kind": "query",
       "table": "conversation_turns",
       "receiptRequired": false
     },

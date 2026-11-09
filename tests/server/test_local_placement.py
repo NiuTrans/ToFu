@@ -154,8 +154,13 @@ def test_temporary_directories_are_never_placement_roots(tmp_path):
                          placement.PURPOSE_RUNTIME)
     age_cleaned = _choose(source, local, {**environment, 'TOFU_LOCAL_DIR': '/var/tmp/tofu'},
                           placement.PURPOSE_RUNTIME)
+    lanes = _choose(source, local, environment, placement.PURPOSE_LANES)
+    checkouts = _choose(source, local, {**environment, 'TOFU_LOCAL_WORKSPACES': 'on'},
+                        placement.PURPOSE_WORKSPACES)
 
     assert (pytest_tmp.selected, pytest_tmp.reason) == (False, 'candidate-persistence-ephemeral')
+    assert (lanes.selected, lanes.reason) == (False, 'candidate-persistence-ephemeral')
+    assert (checkouts.selected, checkouts.reason) == (False, 'candidate-persistence-ephemeral')
     assert (age_cleaned.selected, age_cleaned.reason) == (
         False, 'candidate-persistence-ephemeral')
 
@@ -185,9 +190,13 @@ def test_lanes_use_a_local_root_by_default_and_follow_the_operator_switch(
     disabled = _choose(source, local, {**environment, 'TOFU_LOCAL_WORKSPACES': 'off'},
                        placement.PURPOSE_LANES, mountinfo_text=overlay)
 
+    automatic_overlay = _choose(source, local, {**environment, 'TOFU_LOCAL_WORKSPACES': 'auto'},
+                                placement.PURPOSE_LANES, mountinfo_text=overlay)
+
     assert default_overlay.selected
     assert Path(default_overlay.root) == local / 'home' / '.local' / 'state' / 'tofu' / 'lanes'
     assert (disabled.selected, disabled.reason) == (False, 'disabled')
+    assert automatic_overlay.selected, 'auto never sends rebuildable lanes back to the data volume'
     assert placement.placement_mode(placement.PURPOSE_WORKSPACES, environment) == 'off'
 
 
@@ -195,24 +204,33 @@ def test_task_checkouts_stay_on_the_data_volume_unless_the_operator_opts_in(
         tmp_path, durable_tmp):
     source, local, environment = _layout(tmp_path)
     overlay = _mountinfo(source, local, local_fs='overlay')
+    forced = {**environment, 'TOFU_LOCAL_WORKSPACES': 'on'}
     automatic = {**environment, 'TOFU_LOCAL_WORKSPACES': 'auto'}
 
-    default = _choose(source, local, environment, placement.PURPOSE_WORKSPACES)
+    default_disk = _choose(source, local, environment, placement.PURPOSE_WORKSPACES)
+    default_overlay = _choose(source, local, environment, placement.PURPOSE_WORKSPACES,
+                              mountinfo_text=overlay)
+    forced_overlay = _choose(source, local, forced, placement.PURPOSE_WORKSPACES,
+                             mountinfo_text=overlay)
     automatic_overlay = _choose(source, local, automatic, placement.PURPOSE_WORKSPACES,
                                 mountinfo_text=overlay)
     automatic_disk = _choose(source, local, automatic, placement.PURPOSE_WORKSPACES)
-    forced_overlay = _choose(source, local, {**environment, 'TOFU_LOCAL_WORKSPACES': 'on'},
-                             placement.PURPOSE_WORKSPACES, mountinfo_text=overlay)
+    automatic_marginal = _choose(source, local, automatic, placement.PURPOSE_WORKSPACES,
+                                 latency_probe=_latency(source, slow=12.0, fast=5.0))
+    same_volume = _choose(source, local, forced, placement.PURPOSE_WORKSPACES,
+                          mountinfo_text=_mountinfo(source, local, local_device='0:60'))
 
-    assert (default.selected, default.reason) == (False, 'disabled')
+    assert (default_disk.selected, default_disk.reason) == (False, 'disabled')
+    assert (default_overlay.selected, default_overlay.reason) == (False, 'disabled')
     assert placement.placement_mode(
         placement.PURPOSE_WORKSPACES, {'TOFU_LOCAL_WORKSPACES': 'typo'}) == 'off'
-    assert (automatic_overlay.selected, automatic_overlay.reason) == (
-        False, 'candidate-persistence-unknown')
-    assert automatic_disk.selected
-    assert Path(automatic_disk.root) == (
-        local / 'home' / '.local' / 'state' / 'tofu' / 'workspaces')
-    assert forced_overlay.selected
+    assert forced_overlay.selected and automatic_overlay.selected and automatic_disk.selected
+    assert {Path(forced_overlay.root), Path(automatic_overlay.root),
+            Path(automatic_disk.root)} == {
+        local / 'home' / '.local' / 'state' / 'tofu' / 'workspaces'}
+    assert (automatic_marginal.selected, automatic_marginal.reason) == (
+        False, 'insufficient-speedup')
+    assert (same_volume.selected, same_volume.reason) == (False, 'candidate-on-source-volume')
 
 
 def test_a_shared_existing_root_is_never_adopted(tmp_path):

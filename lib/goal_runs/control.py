@@ -28,7 +28,7 @@ def request_goal_mode_arm(conversation_id: str, *, user_id: int) -> dict:
     except Exception as error:
         logger.warning(
             '[GoalMode] arm setting write failed conv=%s: %s',
-            conversation_id[:8], error,
+            conversation_id, error,
         )
         return {
             'armed': False,
@@ -79,7 +79,7 @@ def request_goal_mode_disarm(conversation_id: str, *, user_id: int) -> dict:
         setting_error = 'goal_setting_unavailable'
         logger.warning(
             '[GoalMode] disarm setting write failed conv=%s: %s',
-            conversation_id[:8], error,
+            conversation_id, error,
         )
     result = cancel_goal_mode(conversation_id, user_id=int(user_id))
     result.update({
@@ -104,7 +104,7 @@ def arm_goal_mode(conversation_id: str, *, user_id: int) -> dict:
         marker_cleared = False
         logger.warning(
             '[GoalMode] legacy arm marker cleanup failed conv=%s: %s',
-            conversation_id[:8], error,
+            conversation_id, error,
         )
     live_tasks = [
         task
@@ -172,7 +172,7 @@ def cancel_goal_mode(conversation_id: str, *, user_id: int) -> dict:
         marker_cleared = False
         logger.warning(
             '[GoalMode] legacy disarm marker cleanup failed conv=%s: %s',
-            conversation_id[:8], error,
+            conversation_id, error,
         )
     try:
         queued_continuations_cleared = clear_queue_kind(
@@ -184,7 +184,7 @@ def cancel_goal_mode(conversation_id: str, *, user_id: int) -> dict:
         queued_continuations_cleared = 0
         logger.warning(
             '[GoalMode] queued continuation cleanup failed conv=%s: %s',
-            conversation_id[:8], error,
+            conversation_id, error,
         )
     cancelled_ids: list[str] = []
     legacy_config_ids: list[str] = []
@@ -257,7 +257,7 @@ def get_goal_run_report(
     except Exception as error:
         logger.warning(
             '[GoalMode] report fetch failed conv=%s run=%s: %s',
-            conversation_id[:8], run_id, error,
+            conversation_id, run_id, error,
         )
         return {'error': 'report_unavailable'}
     if (

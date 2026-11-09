@@ -64,7 +64,7 @@ _EXTRA_KEEPERS = {
 
     # The internal canvas adapter is excluded publicly; keep its offline tests
     # private with that owner rather than publishing a dangling provider import.
-    'tests/evaluations/test_meituan_sandbox_submit_watch.py',
+    'tests/evaluations/test_yourprovider_sandbox_submit_watch.py',
     # Portable diagnostic dependencies are owned by the public keep-list;
     # this set contains only deliberately private source.
     'export.py',                                 # export infra (sanitization patterns)
@@ -106,8 +106,24 @@ _EXTRA_KEEPERS = {
     'scripts/release_open.sh',
     # ── Internal-only tooling: tracked on purpose, never public ─────────────
     # Syncs our template to the SSO-gated ModelPlaza catalog; exercised only by
-    # the internal bundles/meituan tier, useless to a public checkout.
-    'scripts/meituan_template_sync.py',
+    # the internal bundles/yourprovider tier, useless to a public checkout.
+    'scripts/yourprovider_template_sync.py',
+    # ── Landing verification / lane tooling (docs/modules/project_integration.md)
+    # Each is already negated in .gitignore because a clean clone needs it:
+    # scripts/verify.py and scripts/test_execution.py are the `make test`
+    # front door, scripts/benchmark_verification.py measures that selector,
+    # scripts/lane.py creates/recycles the per-unit-of-work checkouts,
+    # scripts/inspect_context.py reads a turn's composed context, and
+    # scripts/gen_command_control.py regenerates the execution-control
+    # protocol constants from contracts/command_control_v1.json. The public
+    # build does not run them, so they are keepers here rather than in
+    # export._OPENSOURCE_KEEP_FILES.
+    'scripts/verify.py',
+    'scripts/test_execution.py',
+    'scripts/benchmark_verification.py',
+    'scripts/lane.py',
+    'scripts/inspect_context.py',
+    'scripts/gen_command_control.py',
 }
 
 # ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────

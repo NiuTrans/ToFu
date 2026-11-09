@@ -182,7 +182,7 @@ def create_artifact(
     except Exception as exc:
         logger.error(
             '[Artifacts] insert failed conv=%s producer=%s size=%d: %s',
-            conv_id[:8], source, size, exc, exc_info=True)
+            conv_id, source, size, exc, exc_info=True)
         raise
 
     artifact = _presentation_artifact(result['artifact'])
@@ -202,13 +202,13 @@ def create_artifact(
                 raise ValueError('Publication collided with incompatible artifact evidence')
         logger.info(
             '[Artifacts] dedupe hit conv=%s existing=%s producer=%s size=%d',
-            conv_id[:8], artifact['id'][:8], source, size)
+            conv_id, artifact['id'][:8], source, size)
         return artifact
     logger.info(
         '[Artifacts] created id=%s conv=%s producer=%s format=%s size=%d '
         'task=%s version=%d parent=%s',
-        artifact['id'][:8], conv_id[:8], source, format, size,
-        (task_id or '')[:8], artifact['version'],
+        artifact['id'][:8], conv_id, source, format, size,
+        (task_id or ''), artifact['version'],
         (artifact['parent_id'] or '')[:8] or 'none')
     try:
         audit_log(

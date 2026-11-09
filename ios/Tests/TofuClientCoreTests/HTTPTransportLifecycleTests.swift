@@ -18,6 +18,16 @@ final class HTTPTransportLifecycleTests: XCTestCase {
         XCTAssertEqual(body["cookie"], "")
     }
 
+    func test_transient_callback_parameters_are_requests_not_saved_connections() async throws {
+        let server = try LoopbackHTTPFixture()
+        let target = server.origin + "/callback?code=transient&state=one"
+        XCTAssertNil(ServerUrl.parse(target))
+        let response = try await URLSessionHTTPClient().send(HTTPRequest(url: target))
+        XCTAssertEqual(response.status, 200)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: String])
+        XCTAssertEqual(body["path"], "/callback?code=transient&state=one")
+    }
+
     func test_declared_and_streaming_response_bounds_release_the_transport() async throws {
         let server = try LoopbackHTTPFixture()
         let client = URLSessionHTTPClient()

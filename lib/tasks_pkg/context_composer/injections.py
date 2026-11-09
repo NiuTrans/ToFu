@@ -93,7 +93,8 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
                      task: dict | None = None, round_num: int | None = None,
                      reason: str = '', contains_human_steer: bool = False,
                      flags: dict | None = None, action: str = 'prompt',
-                     record_note: bool = True, display_owner: str = '') -> dict | None:
+                     record_note: bool = True, display_owner: str = '',
+                     media: list[dict] | None = None) -> dict | None:
     """Append one registered chronological carrier and record its exact cost.
 
     Event identity is chronology, not text equality: identical retries in
@@ -104,6 +105,10 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
     Runtime events default to a system_note even when their spec omits a kind.
     Dedicated inbox lanes must declare their display owner instead; bootstrap
     contracts belong only to the Inspector, never the conversation timeline.
+
+    ``media`` content blocks (a human steer's images) precede ``text`` in the
+    same carrier, the layout of a user message with images; the receipt
+    counts their images beside the text cost.
     """
     spec = injection_spec(injection_id)
     if spec.lane not in ('event', 'inbox', 'bootstrap'):
@@ -154,7 +159,8 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
         raise ValueError('Bootstrap policy must precede dialogue; runtime cannot elevate authority')
     message: dict[str, Any] = {
         'role': 'system' if spec.lane == 'bootstrap' else 'user',
-        'content': text, '_contextInjectionId': injection_id,
+        'content': [*media, {'type': 'text', 'text': text}] if media else text,
+        '_contextInjectionId': injection_id,
     }
     if spec.lane == 'inbox':
         message.update(_isInboxInject=True, _containsHumanSteer=bool(contains_human_steer))
@@ -172,6 +178,8 @@ def append_injection(messages: list[dict], injection_id: str, text: str, *,
         'reason': (reason or spec.trigger)[:240], 'round': round_num,
         **display,
     }
+    if media:
+        row['images'] = sum(1 for block in media if block.get('type') == 'image_url')
     # Position/round/text can repeat after compaction or checkpoint recovery.
     # A receipt identity is minted once and travels with that carrier.
     row['eventId'] = uuid.uuid4().hex

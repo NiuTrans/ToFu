@@ -12,7 +12,7 @@ import uuid
 import weakref
 from typing import Any, Callable, Optional
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.agent_core.task_runtime import TaskRuntime as TaskRuntime, TASK_REPLAY_TERMINAL_STATUSES as TASK_REPLAY_TERMINAL_STATUSES
 
 logger = get_logger(__name__)
@@ -240,7 +240,7 @@ class ProductionRuntime:
         """
         def submit(_task_id, _owner, callback):
             worker = threading.Thread(target=callback,
-                name=f'{self.runtime.kind}-{task_id[:8]}', daemon=True)
+                name=f'{self.runtime.kind}-{task_log_tag(task_id)}', daemon=True)
             worker.start()
             return worker
         return self.runtime.submit_worker(task_id, submit, fn, *args, **kwargs)

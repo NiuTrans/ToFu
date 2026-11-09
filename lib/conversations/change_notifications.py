@@ -36,7 +36,7 @@ def notify_conv_changed(
             except (TypeError, ValueError):
                 logger.debug(
                     "[ConversationNotify] conv=%s non-int rev=%r dropped",
-                    conversation_id[:8],
+                    conversation_id,
                     rev,
                 )
         payload = build_push_frame(
@@ -45,7 +45,7 @@ def notify_conv_changed(
     except Exception as exc:
         logger.debug(
             "[ConversationNotify] push skipped conv=%s: %s",
-            conversation_id[:8],
+            conversation_id,
             exc,
         )
 

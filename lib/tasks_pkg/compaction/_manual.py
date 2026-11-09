@@ -117,7 +117,7 @@ def _push_compaction(conv_id: str, payload: dict, *, user_id) -> None:
         push_event(_COMPACTION_CHANNEL, conv_id, payload, user_id=user_id)
     except Exception as e:
         logger.debug('[ManualCompact] conv=%s push %s skipped: %s',
-                     conv_id[:8] if conv_id else '?', payload.get('type'), e)
+                     conv_id if conv_id else '?', payload.get('type'), e)
 
 # §10.1: 档B introduces two hyperparameters (intra-turn hot-round count +
 # manual-compact floor). Owner sign-off recorded in JOURNAL 2026-07-16. Emit a
@@ -612,7 +612,7 @@ def _schedule_working_view(conv_id, *, store, user_id, reason, protection):
         return {'ok': False, 'error': 'turn_protocol_unsupported'}
     woken, _claimed = _wake_live_tasks(conv_id, user_id=user_id)
     logger.info('[ManualCompact] conv=%s working-view compaction scheduled '
-                'request=%s created=%s reason=%s woken=%d', conv_id[:8],
+                'request=%s created=%s reason=%s woken=%d', conv_id,
                 marker['requestId'][:8], marker['created'], reason, woken)
     return {'ok': True, 'scheduled': True,
             'alreadyScheduled': not marker['created'],
@@ -648,7 +648,7 @@ def cancel_scheduled_compaction(conv_id: str, *, user_id, request_id: str, store
     _woken, applying = _wake_live_tasks(
         conv_id, user_id=user_id, request_id=request_id)
     logger.info('[ManualCompact] conv=%s scheduled compaction %s cancel: '
-                'cancelled=%s applying=%s', conv_id[:8], request_id[:8],
+                'cancelled=%s applying=%s', conv_id, request_id[:8],
                 cancelled, applying)
     return {'ok': True, 'cancelled': cancelled, 'applying': applying}
 
@@ -663,7 +663,7 @@ def _retire_superseded_schedule(conv_id, *, store, user_id):
     except Exception as exc:
         # The retained marker only costs the next reply one declined attempt.
         logger.warning('[ManualCompact] conv=%s superseded schedule kept: %s',
-                       conv_id[:8], type(exc).__name__)
+                       conv_id, type(exc).__name__)
 
 
 def schedule_protected_compaction(conv_id: str, *, user_id, messages=(), store=None):
@@ -716,7 +716,7 @@ def compact_conversation_now(
     never merely because the tail grew.
     """
     config = config or {}
-    log_id = conv_id[:8] if conv_id else '?'
+    log_id = conv_id if conv_id else '?'
     _audit_config_once()
     store = get_conversation_store()
 

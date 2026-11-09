@@ -277,5 +277,5 @@ def test_stage_timing_is_monotonic_content_free_and_preserves_failure(monkeypatc
                                                   'messages': ['PRIVATE']}, 2):
             raise error
     assert caught.value is error
-    assert recorded[0][1:] == ('abcdefgh', 2, 'l2', 'error', 2500.0)
+    assert recorded[0][1:] == ('abcdefgh-more', 2, 'l2', 'error', 2500.0)
     assert 'PRIVATE' not in str(recorded)

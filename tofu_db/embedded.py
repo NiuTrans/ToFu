@@ -323,10 +323,18 @@ class EmbeddedRuntime:
             if self._handle == _ffi.NULL:
                 return
             self._closing = True
-            for token in self._watch_tokens:
-                self._lib.tofudb_embed_watch_cancel(token)
-            while self._active_calls:
-                self._lifecycle.wait()
+            try:
+                for token in self._watch_tokens:
+                    self._lib.tofudb_embed_watch_cancel(token)
+                while self._active_calls:
+                    self._lifecycle.wait()
+            except BaseException:
+                # Interrupted before taking the handle (a signal-raised test
+                # timeout, KeyboardInterrupt): the close did not happen, so the
+                # runtime stays open and no later caller or closer waits for it.
+                self._closing = False
+                self._lifecycle.notify_all()
+                raise
             handle = self._handle
             self._handle = _ffi.NULL
         try:
@@ -353,9 +361,24 @@ class EmbeddedRuntime:
         self.close()
 
     def __del__(self) -> None:  # best-effort; close()/abandon() are explicit
+        # A finalizer runs at an arbitrary allocation point of any thread, so it
+        # never waits: it closes only an open, idle runtime and otherwise leaves
+        # the native handle to process exit. An unreachable runtime has no
+        # callers; a busy or closing state here was left by an interrupted close.
+        lifecycle = getattr(self, "_lifecycle", None)
+        if lifecycle is None or not lifecycle.acquire(blocking=False):
+            return
         try:
-            self.close()
-        except Exception:
+            if self._closing or self._active_calls or self._handle == _ffi.NULL:
+                return
+            handle, self._handle = self._handle, _ffi.NULL
+        finally:
+            lifecycle.release()
+        try:
+            self._lib.tofudb_embed_close(handle)
+        except AttributeError:
+            # Only a library lacking the close symbol (a partial test double)
+            # fails here; the C close itself cannot raise.
             pass
 
 

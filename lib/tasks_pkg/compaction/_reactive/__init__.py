@@ -62,7 +62,7 @@ preserving its summary/receipt and saving a detached final projection.
 
 from copy import deepcopy
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.compaction._archive import _archive_transcript, summary_dispatch_calls
 from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
@@ -121,7 +121,7 @@ def reactive_compact(messages: list, task: dict | None = None,
     preserve_source = bounded_summary_task(task)
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
-    task_id = task.get('id', '')[:8] if task else '?'
+    task_id = task_log_tag(task.get('id', '')) if task else '?'
     pfx = f'[Task {task_id}]'
 
     reported_tokens = _parse_reported_token_count(error_text or '')
@@ -142,7 +142,7 @@ def reactive_compact(messages: list, task: dict | None = None,
     logger.warning('%s [ReactiveCompact] Emergency compaction triggered for conv=%s '
                    '(request rejected; '
                    'reported_tokens=%s wire_bytes=%.1fMB)',
-                   pfx, conv_id[:8] if conv_id else '?',
+                   pfx, conv_id if conv_id else '?',
                    f'{reported_tokens:,}' if reported_tokens else '?',
                    wire_before / 1048576)
 

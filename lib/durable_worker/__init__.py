@@ -14,10 +14,13 @@ from dataclasses import dataclass, field
 import hashlib
 import threading
 import time
+from uuid import uuid4
 from typing import Any, Literal, Protocol
 
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
+from lib.storage.retry import is_transient_storage_error
+from lib.storage.worker_process import parse_worker_process
 from lib.storage.generated_worker_job_contract import (
     WORKER_TERMINAL_STATES,
     WorkerTerminalStatus,
@@ -387,7 +390,7 @@ class WorkerJobStore(Protocol):
 
     def claim_next(
         self, *, worker_id: str, task_kinds: tuple[str, ...],
-        now_ms: int, lease_ms: int,
+        now_ms: int, lease_ms: int, claim_id: str | None = None,
     ) -> Mapping[str, Any] | None: ...
 
     def claim_state(
@@ -424,19 +427,11 @@ def _storage_command_id(label: str, *parts: object) -> str:
 class StorageWorkerJobStore:
     """Production storage adapter; PostgreSQL/SQLite semantics stay in Sidecar."""
 
-    _retain_claim_receipts = True
-
-    def __init__(self, *, client_factory=None, retain_claim_receipts=True):
-        if type(retain_claim_receipts) is not bool:
-            raise TypeError('Worker receipt policy must be explicit')
+    def __init__(self, *, client_factory=None):
         if client_factory is not None:
             if not callable(client_factory):
                 raise TypeError('Worker client factory must be callable')
             self._client = client_factory
-        self._retain_claim_receipts = retain_claim_receipts
-
-    def _command_identity(self, label, *parts):
-        return _storage_command_id(label, *parts) if self._retain_claim_receipts else None
 
     @staticmethod
     def _client(*, write: bool = False) -> Any:
@@ -446,7 +441,7 @@ class StorageWorkerJobStore:
 
     def claim_next(
         self, *, worker_id: str, task_kinds: tuple[str, ...],
-        now_ms: int, lease_ms: int,
+        now_ms: int, lease_ms: int, claim_id: str | None = None,
     ) -> Mapping[str, Any] | None:
         return self._client(write=True).command(
             'worker_job.claim_next', {
@@ -454,8 +449,9 @@ class StorageWorkerJobStore:
                 'task_kinds': list(task_kinds),
                 'now_ms': now_ms,
                 'lease_ms': lease_ms,
+                'retain_claim': True,
             },
-            self._command_identity('claim', worker_id, now_ms),
+            _storage_command_id('claim', worker_id, claim_id or uuid4().hex),
         )
 
     def claim_horizon(self, *, task_kinds: tuple[str, ...]) -> int | None:
@@ -741,15 +737,18 @@ class SynchronousWorkerRunner:
                             context.claim, now_ms=self._now_ms(), lease_ms=self.lease_ms,
                             replay_cursor=context.replay_cursor)
                         context.observe_heartbeat(response)
-                    except Exception:
-                        context.mark_authority_lost()
+                    except Exception as exc:
+                        # Unreachable authority is not a revocation. Every new
+                        # effect still proves the token at its storage barrier.
+                        if not is_transient_storage_error(exc):
+                            context.mark_authority_lost()
                     if context.authority_lost:
                         return
             finally:
                 unsubscribe()
 
         thread = threading.Thread(target=monitor,
-            name=f'durable-worker-heartbeat:{context.claim.task_id[:32]}', daemon=True)
+            name=f'durable-worker-heartbeat:{context.claim.task_id}', daemon=True)
         try:
             thread.start()
         except BaseException:
@@ -757,18 +756,38 @@ class SynchronousWorkerRunner:
             raise
         return stop, thread
 
+    def _wait_for_store(self, operation):
+        """Wait for an exact authority operation; elapsed time is not a fence."""
+        wake = threading.Event()
+        while True:
+            try:
+                return operation()
+            except Exception as exc:
+                if not is_transient_storage_error(exc):
+                    raise
+                wake.wait(self.heartbeat_interval_ms / 1000.0)
+
     def _suspend(
         self,
         claim: WorkerJobClaim,
         outcome: WorkerJobSuspension,
     ) -> WorkerRunResult:
         try:
-            deferred = self.store.defer(
-                claim,
-                now_ms=self._now_ms(),
-                outcome=outcome,
-                observed_cancel_sequence=outcome.acknowledged_cancel_sequence,
-            )
+            now_ms = self._now_ms()
+
+            def defer():
+                return self.store.defer(
+                    claim,
+                    now_ms=now_ms,
+                    outcome=outcome,
+                    observed_cancel_sequence=outcome.acknowledged_cancel_sequence,
+                )
+
+            # Opaque leases can expire after an uncertain release. A live
+            # process-bound holder must explicitly release before returning.
+            deferred = (
+                self._wait_for_store(defer)
+                if parse_worker_process(claim.worker_id) is not None else defer())
         except Exception as exc:
             logger.exception(
                 "[DurableWorker] suspension result unknown job=%s", claim.task_id
@@ -790,12 +809,15 @@ class SynchronousWorkerRunner:
         if shutdown_event is not None and shutdown_event.is_set():
             return self._run_result('idle', detail='Worker is quiescing')
         task_kinds = self.require_claimable_task_kinds()
-        document = self.store.claim_next(
+        claim_now = self._now_ms()
+        claim_id = uuid4().hex
+        document = self._wait_for_store(lambda: self.store.claim_next(
             worker_id=self.worker_id,
             task_kinds=task_kinds,
-            now_ms=self._now_ms(),
+            now_ms=claim_now,
             lease_ms=self.lease_ms,
-        )
+            claim_id=claim_id,
+        ))
         if document is None:
             return self._run_result("idle")
         try:
@@ -804,6 +826,26 @@ class SynchronousWorkerRunner:
             )
         except WorkerProtocolError as exc:
             return self._run_result("protocol_error", detail=str(exc))
+
+        result = None
+        try:
+            result = self._execute_claim(claim, task_kinds, shutdown_event)
+            return result
+        finally:
+            # A live service process can outlast one invocation. Once the
+            # handler and heartbeat have joined, explicitly surrender uncertain
+            # claims so recovery does not wait for that service to exit. This
+            # releases transport ownership, never authorizes effect replay.
+            if (parse_worker_process(claim.worker_id) is not None
+                    and (result is None or result.state in {
+                        'protocol_error', 'lease_lost', 'settlement_unconfirmed',
+                        'terminal_unconfirmed', 'suspension_unconfirmed'})):
+                released = self._suspend(claim, WorkerJobSuspension(
+                    available_at_ms=self._now_ms(), replay_cursor=claim.replay_cursor))
+                if released.state == 'suspension_unconfirmed':
+                    logger.error('[DurableWorker] joined claim release unconfirmed job=%s', claim.task_id)
+
+    def _execute_claim(self, claim, task_kinds, shutdown_event):
         registration = self._registrations.get(claim.task_kind)
         if (
             registration is None
@@ -824,7 +866,7 @@ class SynchronousWorkerRunner:
                 available_at_ms=self._now_ms(), replay_cursor=context.replay_cursor,
                 acknowledged_cancel_sequence=context.cancellation_sequence))
         try:
-            state = self.store.claim_state(claim, now_ms=self._now_ms())
+            state = self._wait_for_store(lambda: self.store.claim_state(claim, now_ms=self._now_ms()))
             context.observe_claim_state(state)
         except Exception:
             context.mark_authority_lost()

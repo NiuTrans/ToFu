@@ -131,6 +131,25 @@ def req_id() -> str:
     return _request_id_var.get()
 
 
+# Every durable conversation attempt's task id starts with this prefix, so a
+# plain ``task_id[:8]`` tagged all of them 'conversa'.
+_DURABLE_TASK_ID_PREFIX = 'conversation-attempt:'
+
+
+def task_log_tag(task_id) -> str:
+    """The whole task id as log text, without the durable-attempt namespace.
+
+    A durable attempt's task id ``conversation-attempt:<attempt id>`` is logged
+    as its whole attempt id (a swarm child keeps its ``#agent:`` suffix); any
+    other id is logged whole. Log text never shortens an id: 8-character
+    prefixes made other runs' lines look like this task's (docs/LOGGING.md).
+    """
+    text = str(task_id or '')
+    if text.startswith(_DURABLE_TASK_ID_PREFIX):
+        text = text[len(_DURABLE_TASK_ID_PREFIX):]
+    return text
+
+
 # ══════════════════════════════════════════
 #  Principal — per-request authenticated identity
 # ══════════════════════════════════════════

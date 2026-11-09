@@ -168,6 +168,44 @@ def test_linked_rework_requires_current_review_and_fresh_human_grant(context):
     with pytest.raises(ValueError): c.repo.authorize(second, c.principal, 'invalid')
 
 
+def test_a_workers_root_preparation_is_its_liveness_before_its_first_round(context, repo, monkeypatch):
+    """Binding prepares a plain folder after worker entry and before any model round;
+    while that preparation advances the Worker is live, however long it takes."""
+    from lib.project_mod import managed_repository
+    from lib.tasks_pkg.liveness import judge
+    from lib.tasks_pkg.workspace_delivery import bind_worker_workspace
+    root, _, owner = repo
+    plain = (root.parent / 'plain-project').resolve()
+    (plain / 'allowed').mkdir(parents=True)
+    (plain / 'allowed' / 'notes.md').write_text('person notes\n')
+    f = file_context(context, (plain, None, owner), monkeypatch)
+    row = f.repository.authorize(f.request, f.principal, 'plain-liveness')
+    f.repository.bind_execution(row['id'], 'worker-turn', 'worker-attempt')
+    trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
+    cfg = trusted.capture({}, f.owner, trusted.principal, 'recipient')
+    cfg.update(_turnOwnerUserId=f.owner, _turnId='worker-turn', _attemptId='worker-attempt')
+    stale = time.time() - 1801
+    task = {'id': 'automatic', 'convId': 'recipient', 'config': cfg, 'status': 'running',
+        'messages': [], 'usage': {}, 'toolRounds': [], 'events': [], '_userId': f.owner,
+        '_principalContext': trusted.principal.to_payload(), '_attended': False,
+        '_turnId': 'worker-turn', '_attemptId': 'worker-attempt', 'abort_event': threading.Event(),
+        'created_at': stale, '_t_last_event': stale, '_dispatch_heartbeat': stale}
+    admission.bind_account(task)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_unresponsive', lambda: False)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_resumed_at', lambda: (0.0, 0.0))
+    verdicts, walk = [], managed_repository.plan_content
+
+    def walked(*args, **kwargs):
+        # No event has been emitted yet: only the preparation's own advances count.
+        verdicts.append((judge(task, time.time(), 1800, commands=[]).state,
+                         task['_t_last_event'] == stale))
+        return walk(*args, **kwargs)
+
+    monkeypatch.setattr(managed_repository, 'plan_content', walked)
+    bind_worker_workspace(task)
+    assert (plain / '.git').is_dir() and verdicts == [('alive', True)], verdicts
+
+
 @pytest.mark.parametrize('spelling', ['canonical', 'symlink', 'ancestor'])
 def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, repo, monkeypatch, spelling):
     """The RSI Exam shape: nobody ran Git, the folder holds notes and bulky data."""

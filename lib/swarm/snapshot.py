@@ -303,7 +303,7 @@ def reconcile_spawn_round_from_active_session(
             logger.warning(
                 '[SwarmSnapshot] active session has no agents matching the '
                 'settled spawn handle (task=%s)',
-                str(task.get('id') or '')[:8],
+                str(task.get('id') or ''),
             )
             return False
         return stamp_round(round_entry, filter_snapshot(snapshot, scoped_ids))
@@ -312,7 +312,7 @@ def reconcile_spawn_round_from_active_session(
         # never turn a successfully launched swarm tool into a failed tool.
         logger.warning(
             '[SwarmSnapshot] spawn-settlement compensation failed task=%s: %s',
-            str(task.get('id') or '')[:8], e, exc_info=True,
+            str(task.get('id') or ''), e, exc_info=True,
         )
         return False
 
@@ -399,7 +399,7 @@ def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,
         # Fail closed: a sidecar read error must never reroute a possibly
         # turn-native transcript into the v1 archive writer.
         logger.warning('[SwarmSnapshot] conv=%s turn read failed: %s',
-                       conv_id[:8], e)
+                       conv_id, e)
         return False
 
     if not turns:
@@ -431,7 +431,7 @@ def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,
             live_matched = True
             logger.debug('[SwarmSnapshot] conv=%s turn=%s is live — durable '
                          'projection left to the owning attempt',
-                         conv_id[:8], str(turn.get('turnId') or '')[:8])
+                         conv_id, str(turn.get('turnId') or '')[:8])
             continue
         try:
             result = update_turn_projection(
@@ -442,7 +442,7 @@ def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,
                 user_id=user_id)
         except LifecycleConflict as e:
             logger.debug('[SwarmSnapshot] conv=%s turn=%s projection CAS miss: %s',
-                         conv_id[:8], str(turn.get('turnId') or '')[:8], e)
+                         conv_id, str(turn.get('turnId') or '')[:8], e)
             return 'retry'
         applied_turns += 1
         latest_rev = result.get('conversationRevision')
@@ -451,16 +451,16 @@ def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,
         logger.warning('[SwarmSnapshot] conv=%s no spawn round matched '
                        '%d agent id(s) in turn projections — snapshot not '
                        'persisted (handle not yet on disk, or agent-id drift)',
-                       conv_id[:8], len(list(agent_ids or [])))
+                       conv_id, len(list(agent_ids or [])))
         return False
     if not applied_turns:
         if not live_matched:
             logger.debug('[SwarmSnapshot] conv=%s turn projections already current',
-                         conv_id[:8])
+                         conv_id)
         return False
 
     logger.info('[SwarmSnapshot] conv=%s persisted snapshot (%d agents, v=%d) '
-                'onto %d turn projection(s)', conv_id[:8],
+                'onto %d turn projection(s)', conv_id,
                 len(snapshot.get('agents') or []), _snapshot_version(snapshot),
                 applied_turns)
     try:
@@ -468,7 +468,7 @@ def _persist_snapshot_to_turns(conv_id: str, agent_ids, snapshot: dict, *,
         notify_conv_changed(conv_id, rev=latest_rev, user_id=user_id)
     except Exception as e:
         logger.debug('[SwarmSnapshot] conv-changed notify skipped conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
     return True
 
 
@@ -492,16 +492,16 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids, snapshot: dict,
             if turn_result != 'retry':
                 return bool(turn_result)
             logger.debug('[SwarmSnapshot] conv=%s projection CAS miss attempt '
-                         '%d/%d — retrying', conv_id[:8], attempt + 1,
+                         '%d/%d — retrying', conv_id, attempt + 1,
                          _MAX_CAS)
             _time.sleep(0.05 * (attempt + 1))
         except Exception as e:
             logger.warning('[SwarmSnapshot] conv=%s persist attempt %d failed: %s',
-                           conv_id[:8], attempt + 1, e, exc_info=True)
+                           conv_id, attempt + 1, e, exc_info=True)
             return False
     # Durability loss — the snapshot for this round did NOT land. NOT routine:
     # on reload the panel falls back to the (less complete) handle recovery.
     logger.warning('[SwarmSnapshot] conv=%s gave up after %d CAS misses (frontend '
                    'kept winning the row) — snapshot v=%d not persisted this round',
-                   conv_id[:8], _MAX_CAS, _snapshot_version(snapshot))
+                   conv_id, _MAX_CAS, _snapshot_version(snapshot))
     return False

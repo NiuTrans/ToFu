@@ -7,7 +7,7 @@ import re
 import threading
 import time
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.project_mod.config import MAX_COMMAND_OUTPUT
 from lib.tasks_pkg.executor import (
     _build_simple_meta,
@@ -168,7 +168,7 @@ class _RunCommandSpawnLifecycle:
             logger.warning(
                 '[code_exec] live-start event failed (non-fatal) task=%s '
                 'round=%s: %s',
-                (self._task.get('id') or '?')[:8], self._rn, exc)
+                (self._task.get('id') or '?'), self._rn, exc)
 
         # Output may only overtake the empty live-start frame after that frame
         # has passed through append_event, preserving presentation order.
@@ -192,7 +192,7 @@ class _RunCommandSpawnLifecycle:
                 logger.warning(
                     '[code_exec] spawn checkpoint failed (non-fatal) '
                     'task=%s round=%s: %s',
-                    (self._task.get('id') or '?')[:8], self._rn, exc)
+                    (self._task.get('id') or '?'), self._rn, exc)
         with self._condition:
             self._publishing = False
             self._condition.notify_all()
@@ -509,7 +509,7 @@ def _make_run_command_progress_cb(
                 })
                 logger.info('[code_exec] surfaced %d live QR code(s) for a '
                             'still-running command (task=%s)',
-                            len(fresh), task.get('id', '?')[:8])
+                            len(fresh), task_log_tag(task.get('id', '?')))
 
     def _delayed_flush():
         with state['lock']:

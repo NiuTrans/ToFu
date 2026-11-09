@@ -232,6 +232,98 @@ def test_a_failed_preparation_leaves_the_folder_as_it_was(folder, monkeypatch):
     assert not list(folder.glob(mr._STAGING_PREFIX + '*'))
 
 
+def test_preparation_reports_each_walked_path_and_completed_step_as_progress(folder):
+    """A caller judged by its silence publishes these advances as its liveness."""
+    advances = []
+    prepare_managed_repository(str(folder), policy=SMALL, progress=lambda: advances.append(1))
+    assert len(advances) > len(tracked(folder))
+    advances.clear()
+    assert prepare_managed_repository(str(folder), policy=SMALL,
+                                      progress=lambda: advances.append(1)).state == 'unchanged'
+    assert advances, 'a refresh walks the folder again'
+
+
+def _prepare_in_thread(folder, **kwargs):
+    import threading
+    outcome = []
+
+    def prepare():
+        try:
+            outcome.append(prepare_managed_repository(str(folder), policy=SMALL, **kwargs))
+        except BaseException as error:  # the assertion below names it
+            outcome.append(error)
+
+    worker = threading.Thread(target=prepare, daemon=True)
+    worker.start()
+    return worker, outcome
+
+
+def _retire(marker):
+    import signal
+    if marker.exists():
+        try:
+            os.kill(int(marker.read_text()), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
+
+
+def test_hung_whole_tree_git_is_retired_after_one_stall_window(folder, tmp_path, monkeypatch):
+    """Whole-tree Git waits as long as the volume does: no wall clock refuses a slow
+    one, and only a tree that stopped executing for the shared window is retired."""
+    from tests.support.volume_git import volume_git
+    window = 1.0
+    monkeypatch.setattr(mr, 'GIT_STALL_SECONDS', window, raising=False)
+    script, marker = volume_git(tmp_path, 'hung', 'ls-files')
+    monkeypatch.setattr(mr, 'git_executable', lambda: str(script))
+    worker, outcome = _prepare_in_thread(folder)
+    worker.join(window + 30)
+    try:
+        assert not worker.is_alive(), 'a hung whole-tree Git must end after one stall window'
+    finally:
+        if worker.is_alive():
+            _retire(marker)
+            worker.join(30)
+    assert isinstance(outcome[0], ManagedRepositoryUnavailable), outcome
+    assert 'executed for 1s' in str(outcome[0])
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(marker.read_text()), 0)
+    assert not (folder / '.git').exists() and not (folder / 'AGENTS.md').exists()
+    assert not list(folder.glob(mr._STAGING_PREFIX + '*'))
+
+
+def test_stop_ends_a_preparation_and_leaves_the_folder_as_it_was(folder, tmp_path, monkeypatch):
+    import threading
+    import time
+    from lib.project_mod.tool_admission import Cancellation
+    from tests.support.volume_git import volume_git
+    script, marker = volume_git(tmp_path, 'hung', 'add')
+    monkeypatch.setattr(mr, 'git_executable', lambda: str(script))
+    task = {'aborted': False}
+
+    def stop_when_blocked():
+        deadline = time.monotonic() + 30
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        task['aborted'] = True
+
+    stopper = threading.Thread(target=stop_when_blocked)
+    stopper.start()
+    worker, outcome = _prepare_in_thread(folder, cancel=Cancellation(task))
+    stopper.join(35)
+    worker.join(30)
+    try:
+        assert not worker.is_alive(), 'Stop must retire a blocked preparation'
+    finally:
+        if worker.is_alive():
+            _retire(marker)
+            worker.join(30)
+    assert isinstance(outcome[0], mr.PreparationCancelled), outcome
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(marker.read_text()), 0)
+    assert not (folder / '.git').exists() and not (folder / 'AGENTS.md').exists()
+    assert not list(folder.glob(mr._STAGING_PREFIX + '*'))
+
+
 def test_a_crashed_preparation_is_discarded_and_redone(folder):
     stale = folder / (mr._STAGING_PREFIX + 'crashed')
     write(stale / 'objects' / 'junk')

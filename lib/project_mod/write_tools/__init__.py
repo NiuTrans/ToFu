@@ -1,4 +1,4 @@
-"""Project write tools — write_file, edit_file, apply_diff(s), insert_content(s).
+"""Project write tools — write_file, edit_file, apply_diff(s).
 
 Was a single 1565-line ``write_tools.py``; decomposed into function-seam
 submodules behind this facade so every existing import — ``from
@@ -9,7 +9,7 @@ working byte-for-byte:
 
   * ``_text``  — pure fuzzy-match / unicode-escape / duplicate-describe / vscode-touch
   * ``_paths`` — the write-path CORE (temp/root-signal/resolve/attribution)
-  * ``_ops``   — the write/edit operations (write_file / upload / apply_diff(s) / insert_content(s))
+  * ``_ops``   — the write/edit operations (write_file / upload / edit_file / apply_diff(s))
 
 Re-exported via ``lib/project_mod/tools.py`` for the historic flat-module
 import surface too.
@@ -43,14 +43,11 @@ from ._ops import (
     _apply_one_diff,
     _dedupe_target,
     _fail_tag,
-    _insert_one,
     _invalid_edit_entry_msg,
     save_uploaded_file,
     tool_apply_diff,
     tool_apply_diffs,
     tool_edit_file,
-    tool_insert_content,
-    tool_insert_contents,
     tool_write_file,
 )
 
@@ -61,7 +58,5 @@ __all__ = [
     'tool_apply_diff',
     'tool_apply_diffs',
     'tool_edit_file',
-    'tool_insert_content',
-    'tool_insert_contents',
     'drain_root_added_signals',
 ]

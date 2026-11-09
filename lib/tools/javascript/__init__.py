@@ -23,6 +23,7 @@ from lib.tools.program_contract import (
     MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES, MAX_TOOL_CALLS, ProgramExecutionError,
     catalog_search_arguments, observation_payload, receipt_value,
 )
+from lib.tools.result_value import well_formed_text
 
 ROOT = Path(__file__).parent
 WASM_SHA256 = 'd4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9'
@@ -315,7 +316,9 @@ class _Program:
                 length = struct.unpack('<I', self.memory.read(context, length_pointer, length_pointer + 4))[0]
                 if length > self.wire_limit_bytes:
                     raise ProgramExecutionError('output_limit', 'JavaScript transport exceeds byte limit')
-                return bytes(self.memory.read(context, pointer, pointer + length)).decode('utf-8')
+                # QuickJS writes an unpaired surrogate as its three-byte form.
+                return well_formed_text(bytes(self.memory.read(
+                    context, pointer, pointer + length)).decode('utf-8', 'surrogatepass'))
             finally:
                 self.fn('qjs_free_cstring', pointer, caller=caller)
         finally:
@@ -342,7 +345,9 @@ class _Program:
             raise ProgramExecutionError('invalid_output', 'Invalid JavaScript value encoding')
         tag = value.get('t')
         if tag == 'p':
-            return value.get('v')
+            # JSON.stringify escapes an unpaired surrogate; json.loads restores it.
+            primitive = value.get('v')
+            return well_formed_text(primitive) if isinstance(primitive, str) else primitive
         if tag == 'i':
             try:
                 return int(value['v'])
@@ -352,7 +357,7 @@ class _Program:
         if tag == 'a':
             return [self.decode(value['v'][str(i)], depth + 1) for i in range(value['n'])]
         if tag == 'o':
-            return {k: self.decode(v, depth + 1) for k, v in value['v'].items()}
+            return {well_formed_text(k): self.decode(v, depth + 1) for k, v in value['v'].items()}
         if tag == 'r':
             original = self.receipts.get(value['id'])
             if original is None:

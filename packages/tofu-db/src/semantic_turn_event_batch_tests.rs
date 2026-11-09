@@ -448,17 +448,19 @@ fn turn_event_batch_with_large_entries(attempt_id: &str, base: u64, large: &str,
 }
 
 /// Grows the projection by 3 MiB of high-entropy tool output, then streams
-/// text: the next structural record retires that text tail and writes the
-/// whole projection as one checkpoint, like a long-running Turn. Returns the
-/// committed revision.
+/// more text revisions than the patch chain can absorb: the next structural
+/// record retires that text tail and writes the whole projection as one
+/// checkpoint, like a long-running Turn. Returns the committed revision.
 fn turn_event_batch_stream_after_a_large_projection(database: &mut AuthorityDatabase, attempt_id: &str, base: u64) -> u64 {
     let mut state = 0x7c15_9e37_79b9_7f4a_u64;
-    let operations = [
+    let operations: Vec<_> = std::iter::once(
         json!([{"op": "set", "path": ["toolRounds"], "value": [{"roundNum": 0, "toolCallId": "call-0",
             "toolName": "read_file", "status": "done",
-            "toolContent": turn_event_batch_noise_text(&mut state, 3 * 1024 * 1024)}]}]),
-        json!([{"op": "append_text", "path": ["content"], "value": "streamed text"}]),
-    ];
+            "toolContent": turn_event_batch_noise_text(&mut state, 3 * 1024 * 1024)}]}]))
+        .chain((0..crate::generated_tofudb_ir::MAX_TURN_PROJECTION_HEAD_PATCHES).map(|_|
+            json!([{"op": "append_text", "path": ["content"], "value": "streamed text"}])))
+        .collect();
+    let revisions = operations.len() as u64;
     for (offset, operations) in (0_u64..).zip(operations) {
         let result = execute(database, &request("turn.event.record", 11, json!({
             "attempt_id": attempt_id, "user_id": 11, "task_id": TURN_EVENT_BATCH_TASK,
@@ -471,7 +473,7 @@ fn turn_event_batch_stream_after_a_large_projection(database: &mut AuthorityData
         }), Some(&format!("stream-{offset}"))), 1_500).unwrap();
         assert_eq!(result["applied"], true);
     }
-    base + 2
+    base + revisions
 }
 
 /// Records `entries` like `turn_lifecycle._record_task_events_locked`: a

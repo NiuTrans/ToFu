@@ -658,24 +658,28 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         config.resource_budget.checkpoint_materialize_batch_bytes,
         config.resource_budget.payload_segment_cache_bytes,
     )?;
-    let wal_barrier_driver = if config.wal_durability == crate::wal::WalDurability::Normal {
+    // Both tiers keep their acknowledgement contract while the physical WAL
+    // write and the barrier move to the barrier driver's threads: every
+    // connection's commits queue their frame under the authority mutex and
+    // wait outside it, Strict for the worker's fsync (one fsync covers every
+    // commit posted during it) and Normal for the writer thread's write (the
+    // syncer's fsync stays the interval-bounded backstop). A slow write on the
+    // volume therefore delays the responses that depend on it, never every
+    // authority holder.
+    if config.wal_durability == crate::wal::WalDurability::Normal {
         authority.set_wal_durability(config.wal_durability)?;
-        authority.start_wal_flusher(config.wal_flush_interval)?;
-        None
-    } else {
-        // Strict durability keeps its acknowledgement contract, but the
-        // barrier itself moves to a coordinator thread: every connection's
-        // commits post their witness and wait outside the authority mutex,
-        // so concurrent commits share one fsync (group-barrier pipelining).
-        let (barrier, driver) = crate::wal::WalBarrierDriver::start_with_write_buffer(
-            authority.wal_vfs()?,
-            authority.wal_path()?,
-            std::time::Duration::from_millis(1),
-            crate::wal::WalBarrierDriver::capacity_for_headroom(config.resource_budget.snapshot.memory_headroom_bytes),
-        )?;
-        authority.attach_wal_barrier(&barrier)?;
-        Some((barrier, driver))
-    };
+    }
+    let (wal_barrier, wal_barrier_driver) = crate::wal::WalBarrierDriver::start_buffered(
+        authority.wal_vfs()?,
+        authority.wal_path()?,
+        config.wal_durability,
+        match config.wal_durability {
+            crate::wal::WalDurability::Strict => std::time::Duration::from_millis(1),
+            crate::wal::WalDurability::Normal => config.wal_flush_interval,
+        },
+        crate::wal::WalBarrierDriver::capacity_for_headroom(config.resource_budget.snapshot.memory_headroom_bytes),
+    )?;
+    authority.attach_wal_barrier(&wal_barrier)?;
     if let Some(tenant) = config.scope.tenant_id {
         crate::conversation_header::trash_migration::require_no_pending(
             &authority,
@@ -843,7 +847,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     let maintenance_observer = maintenance.as_ref().map(MaintenanceScheduler::observer);
     let control_observers = crate::control_ops::ControlObservers {
         canonical_json_cache,
-        wal_write_buffer: wal_barrier_driver.as_ref().map(|(barrier, _)| barrier.clone()),
+        wal_write_buffer: Some(wal_barrier.clone()),
         decoded_chunk_cache,
         blob_codec_pool,
         published_queries: Some(published_queries.observer()),
@@ -876,7 +880,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
             config.resource_budget.maximum_frame_bytes,
         )?,
         AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),
-        wal_barrier_driver.as_ref().map(|(barrier, _)| barrier.clone()),
+        Some(wal_barrier.clone()),
         control_observers,
         rotation_barrier,
         Some(published_queries),
@@ -931,10 +935,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         &database_for_shutdown,
         search_projection_for_shutdown.as_ref(),
     );
-    let _barrier_result = wal_barrier_driver
-        .as_ref()
-        .map(|(_, driver)| driver.stop_and_join())
-        .transpose();
+    let _barrier_result = wal_barrier_driver.stop_and_join();
     if std::env::var_os("TOFU_DB_FSYNC_STATS").is_some() {
         eprintln!("fsync_stats: {}", crate::fsync_stats::report());
         eprintln!("resource_exhaustion_reasons: {:?}", crate::resource_exhaustion::resource_exhaustion_snapshot());

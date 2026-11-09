@@ -198,8 +198,8 @@ def render_engine(document, tables) -> list[str]:
         f"{resource_gate['referenceTotalMicros']};",
         "pub const BLOCK_PAYLOAD_CACHE_ENTRY_OVERHEAD_BYTES: usize = "
         f"{block_payload_cache['entryOverheadBytes']};",
-        "pub const MAX_RECOVERY_PACKED_LOCATIONS: usize = "
-        f"{wal_rotation['maximumRecoveryPackedLocations']};",
+        "pub const MAX_PERSISTED_PAYLOAD_HINTS: usize = "
+        f"{payload_read_cache['maximumPersistedHints']};",
         "pub const PAYLOAD_SEGMENT_CACHE_BYTES: usize = "
         f"{payload_read_cache['maximumResidentIndexAndFilterBytes']};",
         "pub const MAX_PAYLOAD_SEGMENT_CACHE_SEGMENTS: usize = "

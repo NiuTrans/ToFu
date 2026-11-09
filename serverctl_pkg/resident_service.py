@@ -169,22 +169,51 @@ class ResidentService:
         return bool(record and (not plan or record.get('plan') != plan
                                 or (reset_failed and record.get('state') == 'failed')))
 
-    def ensure(self, plan: dict, environment: dict[str, str]) -> str:
-        record = self.record()
+    def _stop_refusal(self, record: dict) -> str:
         if record.get('host') not in (None, socket.gethostname()):
-            raise RuntimeError(f'{self.service_name} service belongs to another host')
+            return f'{self.service_name} service belongs to another host'
+        # A different manager must first observe its predecessor's exit.
+        if (self.host_matches(record) and record.get('managerPid') != os.getpid()
+                and process_matches(record.get('managerPid'), record.get('managerStartTime'))):
+            return f'{self.service_name} service belongs to another live manager'
+        return ''
+
+    def _ensure_refusal(self, plan: dict, record: dict) -> str:
+        if record.get('host') not in (None, socket.gethostname()):
+            return f'{self.service_name} service belongs to another host'
         if self.host_matches(record):
             if (record.get('managerPid') != os.getpid()
                     or not process_matches(record['managerPid'], record.get('managerStartTime'))
                     or record.get('plan') != plan or record.get('state') == 'failed'):
-                raise RuntimeError(f'{self.service_name} replacement requires a drained worker')
+                return f'{self.service_name} replacement requires a drained worker'
             control = record.get('managerControl')
             if control is not None and (not isinstance(control, dict)
                     or not manager_control_matches(record, control.get('fd'), write=True)):
-                raise RuntimeError(f'{self.service_name} manager control was lost; drain the host')
-            return self.result_path()
+                return f'{self.service_name} manager control was lost; drain the host'
+            return ''
         if record.get('state') == 'failed':
-            raise RuntimeError(f'{self.service_name} service failed; explicit restart required')
+            return f'{self.service_name} service failed; explicit restart required'
+        return ''
+
+    def replacement_refusal(self, plan: dict | None, *, replace: bool) -> str:
+        """Why an explicit replacement would refuse this host, decided while the old API serves.
+
+        ``replace`` stops the recorded host; otherwise ``plan`` keeps it. The
+        same checks guard ``stop`` and ``ensure``, so a refusal found here is
+        the one they would raise after the API had already stopped.
+        """
+        record = self.record()
+        if replace:
+            return self._stop_refusal(record)
+        return self._ensure_refusal(plan, record) if plan else ''
+
+    def ensure(self, plan: dict, environment: dict[str, str]) -> str:
+        record = self.record()
+        refusal = self._ensure_refusal(plan, record)
+        if refusal:
+            raise RuntimeError(refusal)
+        if self.host_matches(record):
+            return self.result_path()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = acquire_service_lock(self.lock_path)
         manager_read = manager_write = None
@@ -246,27 +275,39 @@ class ResidentService:
         A host that exited without confirming a clean close keeps its failed
         record and raises, unless ``retire_failed_close`` lets an explicit
         replacement retire it: physical exit plus the released lease already
-        prove release, as a later explicit restart would find. Returns the
-        retired close failure, or ``''``.
+        prove release, as a later explicit restart would find. The same
+        replacement kills a host still alive after ``timeout`` (the kill is
+        its unconfirmed close) and grants the kill and the lease release one
+        more ``timeout``. Returns the retired close failure, or ``''``.
         """
         record = self.record()
-        if record.get('host') not in (None, socket.gethostname()):
-            raise RuntimeError(f'{self.service_name} service belongs to another host')
+        refusal = self._stop_refusal(record)
+        if refusal:
+            raise RuntimeError(refusal)
         retired = ''
+        deadline = time.monotonic() + timeout
         if self.host_matches(record):
-            # A different manager must first observe its predecessor's exit.
-            if (record.get('managerPid') != os.getpid()
-                    and process_matches(record.get('managerPid'), record.get('managerStartTime'))):
-                raise RuntimeError(f'{self.service_name} service belongs to another live manager')
             os.kill(record['pid'], signal.SIGTERM)
-            deadline = time.monotonic() + timeout
             while self.host_matches(record) and time.monotonic() < deadline:
                 time.sleep(0.05)
             if self.host_matches(record):
-                raise RuntimeError(f'{self.service_name} service has not finished draining')
+                if not retire_failed_close:
+                    raise RuntimeError(f'{self.service_name} service has not finished draining')
+                # The API is already gone: a host past its own stop budget is
+                # treated as crashed, like a worker past its shutdown budget.
+                try:
+                    os.kill(record['pid'], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                retired = f'did not stop within {timeout:.0f}s; killed'
+                deadline = time.monotonic() + timeout
+                while self.host_matches(record) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if self.host_matches(record):
+                    raise ServiceOwnerDraining(f'{self.service_name} service survived SIGKILL')
             stopped = self.record()
-            if (stopped.get('serviceId') != record.get('serviceId')
-                    or stopped.get('state') != 'stopped'):
+            if not retired and (stopped.get('serviceId') != record.get('serviceId')
+                                or stopped.get('state') != 'stopped'):
                 detail = str(stopped.get('error') or 'clean close was not confirmed')[:300]
                 if not retire_failed_close or stopped.get('serviceId') != record.get('serviceId'):
                     raise RuntimeError(f'{self.service_name} shutdown failed: {detail}')
@@ -276,7 +317,7 @@ class ResidentService:
             self._process = None
         # Missing/corrupt PID metadata cannot certify release of a live host.
         if self.lock_path.exists():
-            descriptor = acquire_service_lock(self.lock_path)
+            descriptor = self._acquire_released_lease(deadline if retire_failed_close else None)
             try:
                 if record and self.record().get('serviceId') == record.get('serviceId'):
                     close_manager_control(record)
@@ -284,3 +325,18 @@ class ResidentService:
             finally:
                 os.close(descriptor)
         return retired
+
+    def _acquire_released_lease(self, deadline: float | None) -> int:
+        """The lease of an exited host; an explicit replacement waits out its descriptor close.
+
+        A host's command line vanishes before its descriptors close, so the
+        lease can still be held just after the exit. Other callers keep the
+        immediate ``ServiceOwnerDraining`` and their own retry policy.
+        """
+        while True:
+            try:
+                return acquire_service_lock(self.lock_path)
+            except ServiceOwnerDraining:
+                if deadline is None or time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.05)

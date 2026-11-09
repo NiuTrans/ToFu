@@ -11,9 +11,9 @@ park and retain deadline/cancellation checks. Health-lane lock acquisition,
 session handshake and pool acquisition share the attempt deadline. A request whose budget expired before dispatch reports an explicit
 timeout without dispatch. Existing receipt/retry authority and frame budgets remain unchanged. This prevents a large pool from turning
 slow volume I/O into a mutex polling storm; adding connections alone does not. Session lifecycle: [native sessions](STORAGE_NATIVE_SESSIONS.md).
-Retryable command backpressure uses the existing aggregate deadline with capped
-exponential backoff and stable receipt identity. Sixteen fast retries are not a
-second, shorter timeout; persistent overload still returns a classified error. `StorageClient.request_timeout_seconds` and its native counterpart expose the already configured per-request timeout without opening a session; embedded transport inherits the native value. Native Goal recovery reads this policy when no explicit I/O override is supplied, independently of terminal ACK waiting.
+Retryable command backpressure uses capped exponential backoff and stable
+receipt identity; a supervised client rides it for as long as its authority is
+alive ([client retry contract](#client-retry-contract)). `StorageClient.request_timeout_seconds` and its native counterpart expose the already configured per-request timeout without opening a session; embedded transport inherits the native value. Native Goal recovery reads this policy when no explicit I/O override is supplied, independently of terminal ACK waiting.
 
 Boot recovery freezes its attempt creation cutoff and drains bounded
 `turn.recover` transactions until no eligible work remains. Positive progress
@@ -120,10 +120,9 @@ owns never trip the breaker; a deterministic `StorageStartRefused` reports
 Problem: a bounded restart can still drop task frames and produce avoidable
 503s. Decision: `StorageRuntime.client()` waits on readiness while a restart
 worker lives, bounded by `_FENCE_RESTART_WAIT_CAP_S` (default 30 s); degraded,
-refused, stopping and never-started states still fail fast. The storage.v2 client retries
-`database_unavailable` before the first response byte with the same
-(tenant, owner, command_id) identity and bounded
-`_COMMAND_MIN_RETRY_BUDGET_S`. A receipt-backed command replays its recorded
+refused, stopping and never-started states still fail fast. The storage.v2 client replays
+`database_unavailable` with the same (tenant, owner, command_id) identity
+under the [client retry contract](#client-retry-contract). A receipt-backed command replays its recorded
 outcome and never applies twice; a receipt-free command is re-executed, so its
 operation must be idempotent under re-execution. Provider ingress
 retries persist→push inline (`_DELIVERY_MAX_ATTEMPTS`, backoff capped by
@@ -386,7 +385,7 @@ backend is separate from proving complete source migration and safe cutover.
 - Reconstructible landing-test records use the private `lib/storage_authority_sql/impact_cache.py`
   cache owner. Project verification passes records/fingerprints and receives `ImpactCacheError`,
   never a connection or driver exception. This cache uses only the explicitly supplied
-  repository cache file; it never opens or selects an application authority.
+  repository cache directory; it never opens or selects an application authority.
 - Application services speak domain vocabulary; operation handlers translate
   that vocabulary into backend-neutral SQL authored inside the Sidecar.
 - SQLite and PostgreSQL expose the same operation/result/error behavior.
@@ -481,6 +480,10 @@ The lifecycle boundary hydrates the current owner-scoped public Turn only after 
 command service has published the live inbox wakeup. A failed post-commit read
 still returns accepted steering without `latestTurn`; the committed invalidation
 repairs presentation without inviting a duplicate human submission.
+Both authorities store a supplied `images` list unchanged as the pending record's
+`previews[0].images`; any other value stores none. Native legacy steer recovery
+(`turn/recovery_index.rs`) still accepts only image-free suffix records, because
+the writer that left recovery indexes stale never stored images.
 
 RPC accepts named operations and JSON-compatible payloads only. SQL, paths,
 connections, and transaction handles have no wire representation.
@@ -563,6 +566,36 @@ of 64; PostgreSQL keeps JSON scalar types rather than coercing numeric zero to
 text. Frozen pre-Turn archives load at most four stored documents per query and
 decode one at a time, preserving malformed-data failure and missing-timestamp
 fallback. Only the interval counts cross the storage frame.
+
+### Per-Turn usage projection
+
+`conversation.turn_usage` accepts an owner, one conversation, a millisecond
+window `[timestamp_gte, timestamp_lt)` and an optional
+`title_fallback_characters` (0..256). It returns `null` for a conversation the
+owner does not have, otherwise the header fields `id`, `title`, `created_at`,
+`updated_at` and the `model`/`preset`/`effort` settings, the main-lane
+`message_count`, and one row per usage-bearing main-lane message whose Turn
+time is in the window: `index` (its main-lane sequence), `usage`, `timestamp`
+and whichever of `model`, `preset`, `effort`, `provider_id`, `providerId` the
+projection stores. Turn time is the activity time `conversation.activity_dates`
+counts: the projection `timestamp` read as an integer (SQL ports the native
+`tolerant_activity_timestamp`), else the Turn's creation time; a zero time is
+returned for the caller to place by position. Native reads the compact
+activity index and materializes only the selected Turns; SQL preselects from
+the timestamp scalar. A frozen pre-Turn archive keeps raw message timestamps
+and omits a row only when its timestamp is a non-zero integer outside the
+window. When the title is empty, `title_fallback` is the first message's
+string content truncated to the requested number of characters. The response
+therefore grows with priced Turns, never with transcript bytes; stored `usage`
+and `apiRounds` are only read.
+
+Problem: the daily-report calendar priced each message's `usage` by hydrating
+whole transcripts of every candidate conversation, so its memory and storage
+work grew with transcript bytes. Decision: a read-only projection of exactly
+the attribution inputs. Alternatives rejected: windowed transcript reads
+still transfer every message body in the range; a write-time cost ledger would
+add a second durable cost authority beside the Turns and their invalidation
+rules.
 
 At rest, a versioned private projection codec interns only tool-segment
 ``input`` / ``result.content`` values that are exactly equal to the uniquely
@@ -666,6 +699,179 @@ Tofu-DB compiles delete, restore, purge, and clone through bounded lifecycle pri
 Conversation Sync v3 owns turn commands, snapshots, and replay; see
 [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md).
 
+## Paged Turn storage
+
+Owner decision 2026-11-08: Turns are stored in pages instead of one snapshot,
+removing the single-Turn ceiling. Stages 1 (the paged read) and 2 (model
+context) are current; the rollout below names what each later stage changes.
+
+**Problem.** Both authorities store, validate and return a Turn as one
+reconstructed document, so a Turn is capped near 64 MiB and every structural
+write costs O(Turn).
+
+- Native: the Turn document is bounded by `MAX_TURN_SNAPSHOT_BYTES`
+  (67,043,328; `turnSnapshots` in `contracts/tofudb_ir_v1.json`). A live Turn is
+  a projection-head checkpoint plus at most 64 patches (1 MiB) and text-tail
+  pages; every structural write materializes the checkpoint and a fold rewrites
+  the whole projection. `validate_settleable_turn_size`
+  (`packages/tofu-db/src/turn.rs`) refuses a non-terminal write once the
+  materialized envelope plus the terminal reserve (one 8 MiB request, the
+  96 KiB timing trace and 1 KiB, or the measured restart settlement) exceeds
+  the bound, and whole-Turn responses stop at `MAX_TURN_RESPONSE_BYTES`. A
+  2,269-round Turn reached it
+  ([TASK_EVENT_DELIVERY.md](TASK_EVENT_DELIVERY.md#a-turn-at-its-settleable-ceiling-closes-instead-of-wedging)).
+- SQL: one `projection_json` value per Turn and every read or write through one
+  64 MiB `storage.v1` frame (`lib/storage/protocol.py`), with no reserve, so the
+  same Turn fails as a frame refusal instead of a typed verdict.
+- The producer already elides the oldest tool results once `toolRounds`
+  payloads pass 16 MiB (`compact_tool_rounds_for_frame_budget` in
+  `lib/storage/storage_projection.py`, env
+  `TOFU_TOOL_ROUNDS_FRAME_BUDGET_BYTES`): durable evidence is lossy and governed
+  by a knob.
+
+The 8 MiB `storage.v2` frame is not the limit: the transport already streams
+large requests and responses in chunks without an aggregate quota. The limits
+are the domain bounds above, which exist because each path holds the Turn as
+one value:
+
+| Path | Whole Turn needed? |
+|---|---|
+| Producer projection and patch diff (`lib/turn_lifecycle.py::_task_projection`) | In process only; storage receives patches |
+| Native structural writes (`stage_projection_update`, `store_event_projection`, `execution_frame::record`, `text_tail::append`) | No: a patch touches the tail or one page |
+| `validate_settleable_turn_size` and the terminal reserve | No: the head and the touched page |
+| Settlement (`append_settled`, terminal events, `turn.recover`, settled projection edits, visible sync) | No: settlement rewrites only the head |
+| Envelope-only callers of `materialize_turn` (status transitions, deletion closure, attempt creation, event listing, metadata reads) | No: head only |
+| Public reads (`turn.get`, `turn.list`, `list_delta`, sync snapshot/page, legacy messages, transcript archive, export) | No: head plus the pages within a response window |
+| Model context (`turn.context.read`, `build_api_messages`) | The assembled context, in process, not in one response |
+| Search source extraction, clone, snapshot transfer, trash/restore | No: page by page or by recoverable range |
+| Browser TurnStore (`frontend/src/core/turn-state.ts`) | No: head plus loaded pages |
+
+**Decision.** A Turn is a head plus ordered pages.
+
+1. Paged members are `toolRounds`, `segments`, `apiRounds` (split between
+   items) and `content`, `thinking` (split between Unicode code points). Every
+   other projection field is bounded by its own schema (for example
+   `activityTimeline` and `timingTrace`) and stays in the head with the Turn
+   envelope.
+2. The page bound is one `storage.v2` frame payload (`frame.maximumPayloadBytes`,
+   generated as `MAX_FRAME_PAYLOAD_BYTES` in `lib/storage/generated_v2_semantics.py`
+   and `generated_storage_v2::MAX_PAYLOAD_BYTES`), the smallest frame of the
+   storage transports. A page always admits one unit, so only a single item
+   larger than a frame exceeds it, alone on its page and through the existing
+   streamed response. The ceiling moves from the Turn to its largest
+   indivisible item (`MAX_TURN_SNAPSHOT_BYTES`). There is no other size, count
+   or threshold.
+3. Read contract, `turn.projection.page` on both authorities (stage 1):
+   `{user_id, conversation_id, turn_id, page, projection_revision?}`. Page 0
+   carries `turn` (the `turn.get` record without its paged members) and
+   `pagedMembers` (member to length); every page carries `members` (member to
+   `{start, items}` or `{start, text}`, contiguous per member, in member
+   order), `page`, `pageCount`, `projectionRevision` and
+   `contract: tofu.turn-projection-page/v1`. A different `projection_revision`
+   answers `{stale: true, projectionRevision}` and the reader restarts at page
+   0; an absent Turn is `null`; a page past the last is
+   `database_protocol_error`. Concatenating each member reproduces `turn.get`
+   exactly. Each authority measures its own encoding, so boundaries are
+   authority-private: readers never compare them across authorities or
+   revisions. Stage 1 slices today's single document; implementations are
+   `lib/storage/turn_projection_pages.py` (SQL) and
+   `packages/tofu-db/src/turn/projection_page.rs` (native).
+   Page fences (stages 3 and 4 serve them): every page also carries
+   `pageRevision`, the projection revision at which its slices (member names,
+   starts and contents; for page 0 also the head) last changed, and page 0
+   carries `pageRevisions` for every page. A request may carry
+   `page_revision`; the page answers stale when its current `pageRevision`
+   differs or it no longer exists, and a `projection_revision` given as well
+   still applies. Equal page revisions mean byte-identical slices and starts,
+   so any change to a page's content or offsets, including a shifting
+   `remove`, bumps it. Reporting the current projection revision for every page
+   is always correct; a single-document Turn does so. The one client reader is
+   `read_turn_projection` / `read_paged_turn` in
+   `lib/storage/turn_projection_pages.py`. It returns the Turn at exactly the
+   revision of the page 0 that completed the read, or `null`. It fences later
+   pages by page revision when page 0 advertises them and by projection
+   revision otherwise, and after a stale answer restarts at page 0 keeping each
+   held page whose revision page 0 still advertises. A read pinned to one
+   revision raises `TurnProjectionRevisionMoved` instead of restarting.
+4. Physical layout (stages 3 and 4). Sealed pages hold a prefix of the member
+   sequence; the head holds the envelope, head fields, the unsealed tail and a
+   `tofu.turn-pages/v1` manifest (per page: start offsets, encoded bytes,
+   SHA-256 and the revision that last wrote it). A write that would grow the
+   tail beyond one page seals its prefix in the same transaction. A patch into
+   a sealed index rewrites that page copy-on-write, so every existing patch
+   stays valid and costs the pages it touches; array-shifting `remove` and
+   `truncate` (resume rollback, manual compaction) rewrite the affected pages
+   and offsets. Folds rewrite only the tail and manifest.
+   - Native: the head stays the Turn document under its key, with metadata
+     summaries, the patch chain and text-tail pages applied to the tail. Pages
+     are owner-bound versioned documents keyed by conversation, Turn and page
+     ordinal in a namespace inside the conversation's recoverable ranges, so
+     trash, restore, purge, GC and backup follow them. A paged head uses a
+     storage kind older engines refuse: a downgraded binary fails closed
+     instead of reading a truncated projection.
+   - SQL: a `storage_turn_projection_pages` table (Turn, ordinal, owner,
+     offsets, page JSON, bytes, digest, revision) plus trash rows; the manifest
+     rides in the private projection codec as version 2, which older Sidecars
+     refuse as `database_integrity`. Both authorities use the stage-1 planner.
+5. Validation, reserve and settlement are per page. Each page fits its bound
+   or is one item within `MAX_TURN_SNAPSHOT_BYTES`; the head plus the terminal
+   reserve fits `MAX_TURN_SNAPSHOT_BYTES`. Settlement writes only the head and
+   seals the final tail, so the reserve guards the head alone, and a
+   non-terminal write that would cross it seals first instead of being
+   refused. The settleable refusal remains only for head fields that cannot
+   page. The SQL authority applies the same head check, removing today's
+   parity gap.
+6. Readers: model-context assembly takes a Turn that does not fit its context
+   page as its page-0 head and fetches the pages under the same history proof
+   and revision: `turn.context.read` returns a Turn with more than one
+   `turn.projection.page` page as `{pagedTurn: head}`, and
+   `ModelContinuationStore.read_context` reads it with `read_paged_turn` pinned
+   to the head's revision; a moved, deleted or changed Turn restarts the context
+   read under a fresh proof
+   ([Paged Turns in context reads](TOFUDB_CONTEXT_READ.md#paged-turns-in-context-reads)).
+   Sync snapshots, history pages and Turn reads deliver a paged
+   Turn as head plus the newest pages within `windowBytes` and an older-page
+   cursor. Replay keeps positional patches for the tail (logical indexes); a
+   patch into a sealed page becomes a page invalidation that a browser refetches
+   only for a page it holds. Whole-Turn operations either read page by page or
+   keep their bound and refuse beyond it with an error naming
+   `turn.projection.page`.
+7. Compatibility: an existing single-document Turn is a Turn with no sealed
+   pages; readers accept both and nothing is backfilled. Until stage 7 every
+   Turn stays within `MAX_TURN_SNAPSHOT_BYTES`, so no stage creates a Turn that
+   an unmigrated consumer cannot read.
+
+Rollout; every stage lands alone with its tests and behavior changes only in
+stage 7:
+
+| Stage | Change (owners) | Executable specification |
+|---|---|---|
+| 1, current | `turn.projection.page` over single documents (`lib/storage/turn_projection_pages.py`, `operations_pkg/_turns_read.py`, `turn/projection_page.rs`, generated catalogs) and the shared client reader | `tests/storage/test_turn_projection_pages.py` and `test_turn_projection_reader.py` on SQLite, native and PostgreSQL; the `turn projection page` differential script; `turn::projection_page::tests` |
+| 2, current | Model context reads oversize Turns by page (`turn/model_context.rs`, `operations_pkg/_model_context.py`, `lib/storage/model_continuation.py`, `contracts/model_context_v1.schema.json`) | `tests/model_routing/test_model_context_read.py` with a Turn above one page on SQLite, native and PostgreSQL (identical messages, witnesses and proofs; a revision that moves mid-read; a deleted Turn), `tests/storage/test_model_context_paging.py`, `turn::model_context::tests` |
+| 3 | Native physical pages (`turn.rs` writers and validation, `text_tail`, `execution_frame`, `metadata_summary`, clone, trash ranges, migration export) | engine unit plus commit-fault and reopen tests, `large_turn_restart_recovery.rs`, the differential suite and the stage-1 spec unchanged, measured fold cost |
+| 4 | SQL physical pages (`schema.py` migration, codec version 2, `turn_projection_head.py`, `_turns_*` writers) | SQL contract suite on SQLite and PostgreSQL, migration tests, the stage-1 spec unchanged |
+| 5 | Sync v3 paged Turns (`contracts/conversation_sync_v3.yaml` page read and invalidation, generated clients, `turn-state.ts` and `projection-patch.ts` offsets) | wire fixtures, TurnStore tests, browser reload of a paged Turn |
+| 6 | Remaining whole-Turn readers (`conversation.get` messages and export, legacy messages and transcript archive, search sources, clone, snapshot transfer and the migration toolkit) | `tests/conversation/test_whole_history_reads.py`, transcript-archive, clone and migration suites |
+| 7 | Lift the ceiling: head-only `validate_settleable_turn_size`; delete `compact_tool_rounds_for_frame_budget` and `TOFU_TOOL_ROUNDS_FRAME_BUDGET_BYTES`; re-scope the ceiling section of TASK_EVENT_DELIVERY.md | a Turn of about 2,300 tool rounds above 64 MiB settles completed and reads back by page on SQLite, native and PostgreSQL |
+
+**Alternatives rejected.** Raising `MAX_TURN_SNAPSHOT_BYTES` or the response
+bound, or streaming whole Turns, moves the cliff, keeps O(Turn) folds and
+materialization, and leaves SQL at its 64 MiB frame. Producer elision or
+truncation, today's frame budget, loses durable evidence and is a knob. Fixed
+item counts or one page per tool round make the count a knob, multiply rows
+and still let a row exceed a frame. A separate append-only page log adds a
+second publication and recovery authority beside the Turn; attempt events
+already replay history but give no random access. Paging only settled Turns
+leaves the live ceiling and O(Turn) folds. Sealed pages that refuse patches
+would wedge Turns, because producers address any index (normalization,
+translation, rollback). Byte-exact cross-authority boundaries would make
+encoder differences (float spelling) a contract; readers need only coverage,
+order, bound and revision. Fencing pages only by the projection revision
+would make every read of a sealed page stale on each tail patch, so a
+streaming Turn could not be paged back through by a reloaded browser or
+reassembled by a reader. Per-reader assembly helpers would each
+reimplement the fence, restart and validation rules.
+
 ## Transaction model
 
 ### SQLite
@@ -694,11 +900,14 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
   cache (`TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB`). Probe failure uses 16 MiB,
   the 8 GiB reference host uses 32 MiB, adaptive personal mode stops at
   128 MiB, distributed mode uses 256 MiB, and explicit values stop at 1 GiB.
-  Entries are additionally capped at 256 and expire after ten idle minutes;
-  charged bytes are three times canonical stored bytes to cover hydrated
-  Python containers. Revision/owner/conversation/Turn/attempt mismatch,
-  terminal settlement, backend close, or LRU pressure discards an entry and
-  safely reloads durable authority.
+  Entries expire after ten idle minutes; charged bytes are three times
+  canonical stored bytes to cover hydrated Python containers, and they are the
+  only capacity bound. An entry count also evicted live baselines once
+  concurrent live Turns outnumbered it, so every event reloaded and refolded
+  its durable projection (`test_turn_projection_cache.py` keeps 1,000 live
+  Turns within the byte budget). Revision/owner/conversation/Turn/attempt
+  mismatch, terminal settlement, backend close, or LRU pressure discards an
+  entry and safely reloads durable authority.
 - Durable event batching retains frozen canonical payloads through ACK.
   Launch-probed bytes size RAM/file representation; excess bodies use owned
   anonymous files, with no pending item/aggregate-byte admission quota.
@@ -1032,11 +1241,68 @@ queries per bounded drain; errors remain best-effort and do not cancel pairs.
 
 `storage_worker_jobs` is the shared claim authority for accepted distributed
 work. Owner-scoped `worker_job.enqueue` is semantically idempotent. Claims list
-only complete handler kinds, increment attempt/fence and default to a 60-second
-lease with 20-second heartbeats and a monotonic replay cursor. Omission never
-means “claim everything”. Every heartbeat, cancellation poll and settlement
-proves task/holder/token and an unexpired lease; expiry revokes the old fence.
+only complete handler kinds and increment attempt/fence. Local services encode
+an observable kernel process incarnation in the existing `claimOwner`; the
+60-second horizon and 20-second heartbeat schedule recovery checks, never an
+execution deadline. Matching holder/token/current epoch retains authority until
+explicit release or proved process death. Foreign or inaccessible evidence does
+not authorize takeover. Legacy opaque workers still use expiring leases.
+Omission never means “claim everything”. Heartbeats, cancellation polls and
+settlement continue to prove the current holder/token and authority epoch.
 Redis may wake claimers but never decides state or correctness.
+
+Problem (2026-11-07): a 121,608 ms native authority hold delayed heartbeats
+past a 60-second lease and falsely fenced several living workers. Decision:
+process identity, explicit release and the storage epoch/token determine local
+ownership. A transient heartbeat/proof failure waits; it is not a revocation.
+Each local invocation has a distinct claim identity. Only a due claim sends
+`retain_claim=true` and an exact command ID: a lost ACK retries that acquisition
+through the existing receipt, without re-probing a horizon that could hide it.
+The runner then revalidates the current claim before dispatch. Idle horizons
+remain read-only and create no receipts.
+After invocation and heartbeat join, unsettled process-bound claims explicitly
+defer before returning to the service, preserving existing unknown-effect
+reconciliation. Opaque legacy callers preserve a failed deferral as
+`suspension_unconfirmed`; their expiring lease permits reclamation. Only
+process-bound invocations wait for explicit release, because their live process
+otherwise protects the claim. Alternatives rejected: increasing the timeout
+still kills work
+under a longer stall; ignoring the token permits obsolete workers; removing
+recovery altogether strands crashed workers. The bounded RPC deadline remains
+a transport budget, independent of task duration.
+
+Problem: a detached descendant's held-claim read after its root Turn settled
+turned transient storage pressure into a model-permission refusal. Decision:
+this proof uses the existing effect-free persistence wait, retaining the same
+claim and retrying only the read. Explicit Stop still interrupts waiting, and
+an authoritative revocation or cancellation still refuses the next request.
+Neither entry nor a provider request is replayed. Alternatives rejected: a
+one-shot read confuses availability with authority, and trusting cached context
+would admit work after a real revocation.
+
+Claim order: `worker_job.claim_next` takes whichever candidate became
+claimable first, the earliest reclaimable lease (expired and not protected by a
+live holder process; a lease from a previous authority lifecycle or a legacy
+lease is oldest) or the queued/suspended head (priority, then availability). Each wait is read on its own clock: lease deadlines follow
+the advancing lease clock, availability follows UTC. Ties order by priority,
+creation time and task ID. A queued job therefore waits only for leases that
+expired before it became claimable, and each takeover moves its lease past that
+point. Native TofuDB and both SQL backends implement the same order
+(`worker_job.rs::lease_claimable_first`, `_worker_jobs.py::_claim_candidate`).
+Problem: claims always preferred any expired lease. On 2026-11-07, 180+ jobs
+cycled through 60-second leases (about three expirations per second); a queued
+job won only in the rare instant with no expired lease, and a Stopped queued
+attempt sat unclaimed for 21+ minutes. Decision: one claimable-age order across
+both sets, keeping each set's internal order. Alternatives rejected: ordering
+queued work by availability before priority (background automation events would
+outrank human work, `tests/automations/test_event_delivery.py`); comparing raw
+deadline and availability values (after a UTC rollback the lease clock leads
+UTC and queued work would gain the rollback delta); alternating claims, a
+reserved queued share or a starvation threshold (tuning knobs that still let a
+large storm delay an old queued job). Specs: `a_steady_stream_of_expiring_leases_cannot_starve_queued_work`
+in `worker_job.rs`, `tests/storage_authority_sql/test_worker_lease_authority.py`
+and, through the conversation runner on all three authorities,
+`tests/conversation/test_durable_attempt_execution.py::test_queued_stop_outranks_later_lease_expiries_and_settles_without_running`.
 
 `worker_job.active.list` projects complete queued/running/suspended activity
 from the existing queue and lease indexes, ordered by creation time and task ID.
@@ -1059,10 +1325,12 @@ authority and can report a still-running task as idle after API restart.
 `worker_job.claim_horizon` is the read-only half of a claim. For the same
 explicit kinds and the same authority clocks it answers `claimableInMs`: 0 when
 `claim_next` would claim now (a due queued/suspended job, an expired
-current-epoch lease, or a lease from another authority lifecycle), the delay to
-the earliest availability or current-epoch lease expiry, or null when no such
-job exists. Native TofuDB serves it on the snapshot query lane from the same
-bounded lease ranges and per-kind priority summary a claim reads, without the
+unprotected current-epoch lease, or a lease from another authority lifecycle),
+the delay to the earliest availability/recovery check, or null when no job
+exists. Expired process-bound holders are checked in lease-index order; live
+holders cannot hide later recoverable or queued jobs. Their original lease
+interval schedules the next process check. Native TofuDB serves this on the
+snapshot query lane from the same epoch ranges and priority summary, without the
 writer mutex or a WAL barrier; SQL runs the claim's indexed probes in a read
 transaction without row locks or a writer job. It grants nothing:
 `claim_next` stays the only claim and re-validates under the writer, so a stale
@@ -1103,9 +1371,64 @@ result receives `usageComplete: false` and a typed manual-recovery error; this
 does not authorize wallet release or zero-cost settlement. The existing billing
 admission/invoice owners retain unresolved holds. Missing or foreign process
 evidence cannot trigger recovery, and a pending local persistence receipt stays
-unconfirmed. No effect is re-entered by recovery. The codec and executable
-cross-authority specs live in `conversation_sync/worker_recovery.py` and
-`tests/conversation/test_worker_exit_recovery.py`.
+unconfirmed. No effect is re-entered by recovery. An authority refusal of the
+receipt settles its worker job with `worker_exit_receipt_refused` as the
+durable reason instead of leaving the lease to lapse (decision in
+`docs/modules/task_engine.md`). The codec and executable cross-authority specs,
+including a refused receipt through the durable runner, live in
+`conversation_sync/worker_recovery.py`,
+`tests/conversation/test_worker_exit_recovery.py` and the joined-completion
+case in `tests/conversation/test_durable_attempt_execution.py`.
+
+Problem: a joined worker's retained `WorkerLeaseLost` was reported as a model
+generation failure. Decision: recovery verifies the original carrier against
+the immutable entry; when that carrier's claim authority ended, or a newer
+claim fenced the result it had not saved, recovery records `worker_lease_lost`
+as `failed/internal_fence_abort` with a `storage_fence` error. External effects
+remain unknown, usage remains incomplete and automatic retry stays disabled.
+Alternatives rejected: an expired lease alone cannot establish an exit cause,
+and relaxing the fence would allow an obsolete worker to continue effects.
+Process-death recovery retains its separate `server_restart` verdict.
+
+Problem: a joined carrier kept the terminal result it had not saved as
+`_terminalPersistencePending`. Once a newer claim recovers the job (the old
+lease expired, or a process-bound invocation released its unsettled claim as
+above, which makes this recovery's ordinary path), storage refuses every write
+under the old claim, so that debt can never commit; recovery refused on every
+re-claim ("terminal persistence is still pending") until a restart. A stopping
+service also fails its claims closed, and an in-process takeover reported that
+as a lost lease. Joined-exit proof needs the carrier itself, yet terminal TTL
+and memory-pressure reclamation could remove it before its exit was recorded;
+with the owner process alive, recovery then refused for the rest of that
+process ("requires physical-exit recovery evidence"). Decision: debt under the
+carrier's own current claim still waits. Under a replaced claim, recovery
+records the unknown exit and names the unsaved terminal status; after the
+receipt commits it fences the superseded claim for every holder, revokes that
+claim's undeliverable event lane (carrier eviction never frees a lane) and
+retires the carrier, so readers and retries reach only the durable
+settlement. A refused receipt instead keeps the carrier as the exit evidence
+its failure/Stop port re-proves; when that port settles the job it fences the
+superseded claim and clears the retention, leaving the carrier to ordinary TTL
+in case the runner must retry the job completion. A service-stopped worker
+settles `interrupted/server_restart` like process death. Binding a carrier to
+a claim marks `_exitReceiptPending`, which reclamation honors until the exit
+receipt is recorded or refused. Alternatives rejected: replaying the carrier's
+pending events under the new claim adopts unverified evidence; dropping debt
+when authority is lost lets reclamation erase the exit evidence before any
+takeover; inferring exit from a missing carrier trusts a registry that removes
+carriers; a retention period cannot prove exit; retiring the carrier on a
+refusal leaves its failure port without exit evidence, so every re-claim would
+refuse again.
+
+**Problem:** exit-receipt updates copied the saved checkpoint's
+`cache_prefix_hwm` and `last_turn_cache_read` command candidates without their
+cache-settings capability, rejecting settlement and repeatedly reclaiming old
+jobs ahead of queued work. **Decision:** omit those already committed
+candidates when updating the receipt; preserve output, metadata and accounting
+through the existing guarded CAS. Joined completion and process-death recovery
+share this rule. **Alternative rejected:** adding the capability to a changed
+receipt could overwrite a newer task's last-read statistic. A protocol refusal
+must never be hidden as successful settlement.
 
 Registered child births resolve the same root claim in storage, including nested
 births, Flow completion, checkpoint and replay batches with omitted proofs.
@@ -1545,7 +1868,92 @@ closed. A legacy message-array write receives
 `conversation_authority_conflict`; clients must use turn commands rather than
 GET/rebase/retry.
 
-**`deadline_elapsed` classification (decision 2026-09-19).** The native daemon emits `deadline_elapsed` with the wire `retryable=false` because that single flag also gates command replay; both server variants are nevertheless replay-safe for an identical operation — the admission variant is a pre-dispatch rejection by construction, the execution variant aborts the transaction pre-commit, and committed commands always leave a durable `(tenant, owner, command_id)` receipt whose replay returns the recorded outcome. The storage.v2 client therefore classifies retry eligibility by code for `database_timeout`: reads replay freely, commands replay with the preserved command ID inside the same bounded aggregate budget; a connection-level `database_unavailable` without dispatch proof stays fail-fast. Turn-critical writers (`deliver_invocation_event`, Flow chat turn commit) add one bounded backoff layer (`lib/storage/retry.py`) on top so a sub-minute authority brownout degrades to a wait instead of a fatal turn error — the 2026-09-19 incident killed a healthy 15-round conversation at round 16 from a single transient `deadline_elapsed` under cgroup memory pressure. Alternatives considered: (a) marking admission `deadline_elapsed` retryable on the wire was rejected — it conflates the two server variants behind one flag and requires a daemon rebuild for a client-side policy; (b) the 2026-09-18 rejection of client read retry (`docs/STORAGE_TOFUDB.md`, "would only queue more full scans") predates the server-side mid-operation deadline budgets that now bound every scan, so the amplification it feared no longer exists; (c) leaving each caller to invent its own classification (the `lib/evolution/records.py` precedent) was rejected — the policy belongs at one client chokepoint.
+### Client retry contract
+
+**Wait while the authority lives (owner decision 2026-11-08).** Problem: the
+storage.v2 client failed a replay-safe call after a fixed window (per-attempt
+deadline × attempts, at least 45 s for commands) while supervision still proved
+the authority alive. A starved authority that held its mutex for 121.6 s on
+2026-11-07 therefore surfaced as `storage_unavailable` 503s and failed task
+writes just before it answered, and the window was one more timing knob.
+Decision: a runtime-bound client (`lib/storage/v2_client.py`) waits out
+classified transient failures (`database_timeout`, `database_busy`,
+`database_unavailable`) of replay-safe calls — queries, and commands with their
+unchanged receipt identity — with no aggregate time window. Every replay keeps
+the full per-attempt wire deadline and the existing backoff: busy commands
+2 ms doubling to 250 ms; otherwise the server hint, then 0.5 s doubling to 8 s,
+jittered. Liveness comes only from existing supervision state: between attempts
+the client pauses on `StorageRuntime._recover_client`, which returns the ready
+generation while the runtime reports its authority ready (including a starved
+attachment the external monitor keeps and a managed child not yet recycled),
+waits out a restart in flight within the existing `_FENCE_RESTART_WAIT_CAP_S`
+window, and raises as soon as the authority is proven down: degraded by the
+crash breaker, start refused, stopping or stopped, or exited with no restart
+worker. `StorageRuntime.stop()` wakes paused callers. A non-transient code or a
+command without replay safety still raises on its first failure. Supervision's
+own verdicts (the unresponsive budget, the overload-bounded forced recycle)
+remain the only time-based fence, and a wedged holder cannot hide behind the
+wait: the engine's authority watch (`packages/tofu-db/src/authority_watch.rs`)
+reports `system.health` not ready once foreground contention passes its wedge
+threshold, so supervision recycles or detaches that authority and paused
+callers then fail.
+
+Bounded exceptions keep their attempt bound (`read_attempts`, or 16 for a busy
+command) and per-attempt deadlines, without a time window, because waiting
+there is unsafe: a client without a runtime (standalone tools and tests) has no
+liveness witness; `metrics()` observes the authority and must answer while it
+is slow (`health()` is already one attempt on its own lane); a call on a thread
+running an asyncio event loop would freeze the serving loop and is logged.
+Callers that own their retry, or are fail-soft by contract, decline the in-call
+wait with `storage_wait_owner(decline_storage_wait)` (`lib/agent_core/storage_waits.py`,
+re-exported by `lib/storage/retry.py`; storage-free runs import the former):
+the conversation event stream's steady-state change read, which must keep
+emitting degraded heartbeats; the warm-up probes, bounded by their own
+deadlines; the API-key audit touch, which defers itself and must not hold an
+authenticated request; and advisory browser site observations, which must never
+stall page research. Any other fail-soft caller with a short explicit deadline
+waits while the authority lives until it declares an owner the same way.
+
+Once a call has waited as long as a slow storage call (`SLOW_RPC_WARN_SECONDS`),
+the client reports each further pause to the owners entered on its thread,
+innermost first. `wait_for_persistence` presents its existing `Waiting for
+storage` phase and ends the wait on Stop or shutdown, handing shutdown debt back
+with the original failure; event delivery stamps the existing push-withheld
+marker, which snapshots and heartbeats carry as `pushWithheld` to the browser's
+`storage_wedged` phase. Retry log lines name the wait and its duration,
+throttled per operation.
+
+Callers audited on 2026-11-08. `turn_lifecycle.attempt_dispatch_lock` and
+`_task_projection_critical_section` hold a per-attempt or per-task lock across
+storage writes, and conversation worker recovery (exit receipts) runs under the
+same dispatch lock: every contender needs the same authority, the authority's
+progress never depends on these locks, and a proven-down verdict or stop
+releases them, so they wait instead of failing. Sync route handlers run on
+demand executors whose size is idle reuse only, so a long wait parks one thread
+without exhausting a pool. Health and readiness endpoints read in-memory runtime
+state and never RPC. At shutdown, owners end their waits on `server_shutdown`;
+an unowned call ends when the authority answers, when supervision proves it
+down, or when storage stops last.
+
+Alternatives rejected: a longer fixed window still converts the next longer
+stall into failures and keeps a knob; a client-side liveness probe duplicates
+supervision and loads a starved authority; waiting only in callers (as
+`wait_for_persistence` already did) leaves route handlers and repositories
+failing after the window; failing on every not-ready state turns each
+supervised restart into 503s; waiting through a restart without its window
+parks callers behind an attachment whose engine may never return. The SQL
+Sidecar client (`storage.v1`) keeps its three-attempt policy: it never replays
+an ambiguous command, so it cannot wait one out. Specs:
+`tests/storage/test_storage_v2_managed_recovery.py`,
+`tests/storage/test_storage_v2_deadlines.py`,
+`tests/tasks_pkg/test_agent_persistence_wait.py`,
+`tests/tasks_pkg/test_task_event_delivery.py`,
+`tests/conversation/test_conversation_stream_heartbeat.py`,
+`tests/storage/test_storage_warmup.py`,
+`tests/storage/test_credential_validation_budget.py` and
+`tests/browser/test_browser_research.py`.
+
+**`deadline_elapsed` classification (decision 2026-09-19).** The native daemon emits `deadline_elapsed` with the wire `retryable=false` because that single flag also gates command replay; both server variants are nevertheless replay-safe for an identical operation — the admission variant is a pre-dispatch rejection by construction, the execution variant aborts the transaction pre-commit, and committed commands always leave a durable `(tenant, owner, command_id)` receipt whose replay returns the recorded outcome. The storage.v2 client therefore classifies retry eligibility by code for `database_timeout`: reads replay freely, commands replay with the preserved command ID under the client retry contract above, as does a connection-level `database_unavailable`. Turn-critical writers (`deliver_invocation_event`, Flow chat turn commit) add one bounded backoff layer (`lib/storage/retry.py`) on top so a sub-minute authority brownout degrades to a wait instead of a fatal turn error — the 2026-09-19 incident killed a healthy 15-round conversation at round 16 from a single transient `deadline_elapsed` under cgroup memory pressure. Alternatives considered: (a) marking admission `deadline_elapsed` retryable on the wire was rejected — it conflates the two server variants behind one flag and requires a daemon rebuild for a client-side policy; (b) the 2026-09-18 rejection of client read retry (`docs/STORAGE_TOFUDB.md`, "would only queue more full scans") predates the server-side mid-operation deadline budgets that now bound every scan, so the amplification it feared no longer exists; (c) leaving each caller to invent its own classification (the `lib/evolution/records.py` precedent) was rejected — the policy belongs at one client chokepoint.
 
 **Availability retry spacing (decision 2026-09-22).** The flat
 `retry_after_ms` hint (50–100 ms) is tuned for a healthy authority's
@@ -1556,11 +1964,10 @@ re-attempting at hint spacing is the storm that keeps the authority starved
 the pool). The storage.v2 client therefore keeps the hint for the FIRST
 availability retry — a healthy blip pays nothing — and spaces consecutive
 `database_timeout`/`database_busy`/`database_unavailable` retries
-exponentially (0.5 s doubling, 8 s cap, jittered), but only when the
-remaining budget affords the wait (4x); small-budget callers keep the hint.
+exponentially (0.5 s doubling, 8 s cap, jittered).
 Problem: millisecond retries amplify authority pressure. Decision: classified
 pre-dispatch resource failures use congestion backoff, preserving command
-identity and budget. Authority busy retains fast WAL retries. The native client
+identity. Authority busy retains fast WAL retries. The native client
 has no pool-size or long-request admission refusal; its pool size controls idle
 reuse ([session lifecycle](STORAGE_NATIVE_SESSIONS.md)). Alternatives rejected:
 shrinking deadlines churns sessions and discards block-cache warming.
@@ -1575,7 +1982,7 @@ sequence, and the measured client-side latency of that operation against the
 live authority put its p98.8 at exactly 500 ms: roughly one percent of
 checkpoints were refused with `deadline_elapsed` — reported by the client as
 `database_timeout` — and the refusal repeated instead of clearing, because the
-availability backoff only engages for a caller whose aggregate budget can
+availability backoff then engaged only for a caller whose aggregate budget could
 afford the wait (a 0.5 s per-attempt budget leaves 1.0 s, below the 4x
 patience rule), so every attempt of one episode re-entered the same
 congestion. The ghost then migrates from writer to writer: `credential.touch`

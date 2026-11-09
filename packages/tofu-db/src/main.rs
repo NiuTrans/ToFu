@@ -44,7 +44,7 @@ use zeroize::Zeroize;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn usage() -> ! {
-    eprintln!("usage: tofu-db <init|inspect> --data-dir <persistent-path>\n       tofu-db serve --data-dir <existing-authority> --owner-id <positive-id> [--tenant-id <positive-id>] [--search-projection-dir <persistent-path>] [--durability strict|normal] [--wal-flush-interval-ms <1..1000>] [--backup-dir <persistent-path>] [--fastpath-dir <existing-local-base> [--fastpath-admission required|auto]] [--fastpath-sync-interval-ms <1000..3600000>]\n       tofu-db fastpath-export --data-dir <durable-seed> --backup-dir <NEW-authority-target>\n       tofu-db <certify-filesystem|{FILESYSTEM_CERTIFICATION_MATRIX_COMMAND}> --data-dir <persistent-empty-path>\n       tofu-db certify-resource-gate --data-dir <persistent-empty-path>\n       tofu-db collect-garbage --data-dir <existing-authority> [--execute [--max-rounds <1..{MAX_AUTHORITY_GC_SESSION_CALLS}>] [--budget-ms <1..{MAX_AUTHORITY_GC_OPERATOR_MILLISECONDS}>]]\n       tofu-db sql --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> < query.sql\n       tofu-db backfill-activity-index --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..256>] --execute\n       tofu-db backfill-integration-checkout-claims --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..128>] --execute\n       tofu-db migration-session --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> --execute\n       tofu-db backup --data-dir <source> --backup-dir <persistent-path>\n       tofu-db verify --data-dir <existing-authority>\n       tofu-db salvage --data-dir <existing-authority> --backup-dir <persistent-empty-target>\n       tofu-db restore --backup-dir <source> --data-dir <restore-target>\n       tofu-db certify-release --manifest <SHA256SUMS> --signature <SHA256SUMS.sig> --binary <packaged-tofu-db> [--pubkey <public-key.json>]\n       tofu-db certify-release-keygen --key-out <secret-key.json> --pubkey-out <public-key.json>");
+    eprintln!("usage: tofu-db <init|inspect> --data-dir <persistent-path>\n       tofu-db serve --data-dir <existing-authority> --owner-id <positive-id> [--tenant-id <positive-id>] [--search-projection-dir <persistent-path>] [--durability strict|normal] [--wal-flush-interval-ms <1..1000>] [--backup-dir <persistent-path>] [--fastpath-dir <existing-local-base> [--fastpath-admission required|auto]] [--fastpath-sync-interval-ms <1000..3600000>]\n       tofu-db fastpath-export --data-dir <durable-seed> --backup-dir <NEW-authority-target>\n       tofu-db <certify-filesystem|{FILESYSTEM_CERTIFICATION_MATRIX_COMMAND}> --data-dir <persistent-empty-path>\n       tofu-db certify-resource-gate --data-dir <persistent-empty-path>\n       tofu-db collect-garbage --data-dir <existing-authority> [--execute [--max-rounds <1..{MAX_AUTHORITY_GC_SESSION_CALLS}>] [--budget-ms <1..{MAX_AUTHORITY_GC_OPERATOR_MILLISECONDS}>]]\n       tofu-db sql --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> < query.sql\n       tofu-db backfill-activity-index --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..256>] --execute\n       tofu-db backfill-integration-checkout-claims --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..128>] --execute\n       tofu-db migration-session --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> --execute\n       tofu-db backup --data-dir <source> --backup-dir <persistent-path>\n       tofu-db verify --data-dir <existing-authority>\n       tofu-db rewrite-history-routing --data-dir <existing-authority> [--execute]\n       tofu-db salvage --data-dir <existing-authority> --backup-dir <persistent-empty-target>\n       tofu-db restore --backup-dir <source> --data-dir <restore-target>\n       tofu-db certify-release --manifest <SHA256SUMS> --signature <SHA256SUMS.sig> --binary <packaged-tofu-db> [--pubkey <public-key.json>]\n       tofu-db certify-release-keygen --key-out <secret-key.json> --pubkey-out <public-key.json>");
     std::process::exit(2)
 }
 
@@ -278,6 +278,13 @@ fn arguments() -> Arguments {
                 && search_projection_dir.is_none()
                 && maximum_rows.is_none()
                 && !execute => {}
+        "rewrite-history-routing"
+            if backup_dir.is_none()
+                && retain_generations.is_none()
+                && owner_id.is_none()
+                && tenant_id.is_none()
+                && search_projection_dir.is_none()
+                && maximum_rows.is_none() => {}
         "salvage"
             if backup_dir.is_some()
                 && retain_generations.is_none()
@@ -718,6 +725,31 @@ fn run() -> io::Result<()> {
             } else {
                 Ok(())
             };
+        }
+        "rewrite-history-routing" => {
+            // Engines before 2026-11-08 refuse routing-root version 2; this
+            // republishes it as version 1 (docs/STORAGE_OPERATIONS.md, engine rollback).
+            let at_rest_key = tofu_db::at_rest::key_from_launch_environment()?;
+            let mut database = AuthorityDatabase::open_with_key(&arguments.data_dir, at_rest_key)?;
+            let before = database.history_routing()?;
+            let started = Instant::now();
+            let rewritten = arguments.execute && database.rewrite_history_routing()?;
+            let elapsed_ms = started.elapsed().as_millis();
+            let after = database.history_routing()?;
+            drop(database);
+            let show = |value: Option<String>| value.unwrap_or_else(|| "none".to_owned());
+            println!(
+                "format=tofu-db.history-routing.v1 executed={} rewritten={rewritten} elapsed_ms={elapsed_ms} version_before={} version_after={} entries_before={} entries_after={} pages_before={} pages_after={} retained_sources={}",
+                arguments.execute,
+                show(before.map(|routing| routing.version.to_string())),
+                show(after.map(|routing| routing.version.to_string())),
+                show(before.map(|routing| routing.entries.to_string())),
+                show(after.map(|routing| routing.entries.to_string())),
+                show(before.map(|routing| routing.pages.to_string())),
+                show(after.map(|routing| routing.pages.to_string())),
+                show(after.map(|routing| routing.retained_sources.to_string())),
+            );
+            return Ok(());
         }
         "salvage" => {
             let target = arguments.backup_dir.as_ref().expect("validated above");

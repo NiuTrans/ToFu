@@ -89,9 +89,21 @@ def test_cancelled_queued_job_balances_retirement_accounting():
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_runtime_stops_reaper_and_detaches_loop_owned_globals():
+@pytest.fixture
+def push_hub(monkeypatch):
+    # The runtime binds whichever hub lib.agent_core.push names. Stopping the
+    # process-global hub would leave it draining, refusing every later
+    # registration in this worker.
+    from lib.agent_core import push
+
+    hub = push.PushHub()
+    monkeypatch.setattr(push, 'hub', hub)
+    return hub
+
+
+def test_runtime_stops_reaper_and_detaches_loop_owned_globals(push_hub):
     import lib.tasks_pkg.spawn as tasks_pkg
-    from lib.agent_core.push import hub
+    hub = push_hub
 
     async def exercise():
         loop = asyncio.get_running_loop()
@@ -139,9 +151,9 @@ def test_runtime_stops_reaper_and_detaches_loop_owned_globals():
     asyncio.run(exercise())
 
 
-def test_runtime_retires_burst_threads_without_reducing_capacity():
+def test_runtime_retires_burst_threads_without_reducing_capacity(push_hub):
     import lib.tasks_pkg.spawn as tasks_pkg
-    from lib.agent_core.push import hub
+    hub = push_hub
     from lib.observability import prometheus_lines, reset_for_tests
 
     async def exercise():

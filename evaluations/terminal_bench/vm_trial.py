@@ -8,6 +8,13 @@ uploaded only after the agent finished), install a prebuilt agent runtime, run
 the agent under a hard deadline, run ``tests/test.sh`` and write ``result.json``
 plus all evidence under the output directory, then pack it as ``<out>.tar.gz``.
 
+The reward channel is root's alone: ``/logs/verifier`` is a root:root 0700
+directory, emptied again right before the verifier runs, and every verifier
+command runs as uid 0, so a process the agent or the tests drop to another uid
+(e.g. 65534) can neither create, replace, remove nor read ``reward.txt``.
+``/logs/agent`` belongs to the image's user, who runs the agent, at 0755.
+Rewards are read only from regular files, never through a link.
+
 Every agent and verifier command runs as ``bash -lc`` (a login shell, like
 Harbor's ``setsid bash -lc``; ``setsid`` is omitted because without ``-w`` it
 forks and returns at once when the caller leads its process group, and the
@@ -26,6 +33,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -173,14 +181,17 @@ class CompletionMarker:
 
 
 def exec_with_deadline(container, program, env, marker, timeout_sec, stdout_path, stderr_path, workdir=None,
-                       completion=None):
+                       completion=None, user=None):
     """Run ``bash -lc program`` under ``MARKED_SHELL`` in the container; stop the tree at the deadline.
 
     With ``completion`` (a ``CompletionMarker``) the run counts as finished once
     the agent has written its final record, even if its process lingers on
     children it started: nothing is killed, so daemons stay up for the verifier.
+    ``user`` is passed to ``docker exec -u``; ``None`` runs as the image's user.
     """
     argv = ["docker", "exec"]
+    if user is not None:
+        argv += ["-u", user]
     if workdir:
         argv += ["-w", workdir]
     for key, value in sorted(env.items()):
@@ -215,6 +226,41 @@ def exec_with_deadline(container, program, env, marker, timeout_sec, stdout_path
                 proc.kill()
                 code = proc.wait()
     return {"exit_code": code, "timed_out": timed_out, "duration_s": round(time.time() - started, 1)}
+
+
+# ---------------------------------------------------------------- log directories
+
+def seal_verifier_logs(path):
+    """Make ``path`` (bind-mounted at /logs/verifier) an empty root:root 0700 directory.
+
+    The mode changes first, so no other uid can add an entry while the rest is
+    removed. Entries are removed without following links: whatever the agent
+    phase left, such as a planted ``reward.txt``, is never read as a reward.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    os.chown(str(path), 0, 0)
+    path.chmod(0o700)
+    for entry in os.scandir(str(path)):
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            os.unlink(entry.path)
+
+
+def read_regular_file(path):
+    """Text of ``path`` when it is a regular file, else ``None``; never follows a link or blocks on a FIFO."""
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        return None
+    with os.fdopen(descriptor, "rb") as handle:  # fdopen owns the descriptor from here
+        try:
+            return handle.read().decode("utf-8")
+        except OSError:
+            return None
 
 
 # ---------------------------------------------------------------- egress proxy
@@ -468,9 +514,8 @@ class Trial:
     def start_container(self):
         with self.phase("container") as entry:
             agent_logs, verifier_logs = self.out / "agent", self.out / "verifier"
-            for path in (agent_logs, verifier_logs):
-                path.mkdir(parents=True, exist_ok=True)
-                path.chmod(0o777)
+            agent_logs.mkdir(parents=True, exist_ok=True)
+            seal_verifier_logs(verifier_logs)
             proxy_url = "http://" + self.proxy.address
             env = {"TEST_DIR": "/tests"}
             for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
@@ -487,11 +532,15 @@ class Trial:
             argv += ["--entrypoint", "sh", self.spec["image"], "-c", "sleep infinity"]
             docker(*argv, phase="container")
             probe = docker("exec", self.container, "sh", "-c",
-                           'echo "$HOME|$(id -u)|$(command -v bash || true)"', phase="container")
-            home, uid, bash = (probe.stdout.decode().strip().split("|") + ["", "", ""])[:3]
+                           'echo "$HOME|$(id -u)|$(id -g)|$(command -v bash || true)"', phase="container")
+            home, uid, gid, bash = (probe.stdout.decode().strip().split("|") + ["", "", "", ""])[:4]
             if not bash:
                 raise InfraError("container", "image has no bash; Harbor-compatible exec needs bash -lc")
-            entry.update(home=home or "/root", uid=uid, name=self.container)
+            if not (uid.isdigit() and gid.isdigit()):
+                raise InfraError("container", "cannot resolve the image user's uid/gid: %r" % probe.stdout[-200:])
+            os.chown(str(agent_logs), int(uid), int(gid))
+            agent_logs.chmod(0o755)
+            entry.update(home=home or "/root", uid=uid, gid=gid, name=self.container)
             self.result["container_home"] = home or "/root"
 
     # -- agent runtime
@@ -592,7 +641,9 @@ class Trial:
     def run_verifier(self):
         self.proxy.phase = "verifier"
         with self.phase("verifier") as entry:
-            docker("exec", self.container, "mkdir", "-p", "/tests", "/logs/verifier", "/logs/agent", phase="verifier")
+            seal_verifier_logs(self.out / "verifier")
+            docker("exec", "-u", "0", self.container, "mkdir", "-p", "/tests", "/logs/verifier", "/logs/agent",
+                   phase="verifier")
             docker("cp", str(self.task_dir / "tests") + "/.", "%s:/tests" % self.container, phase="verifier")
             attempts = []
             for attempt in range(self.spec["verifier_attempts"]):
@@ -600,7 +651,7 @@ class Trial:
                     self.container, "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
                     dict(self.spec.get("verifier_env") or {}), "tbn-verifier-%d-%s" % (attempt, self.spec["trial_key"]),
                     self.spec["verifier_timeout_sec"],
-                    self.out / "verifier-exec.stdout", self.out / "verifier-exec.stderr")
+                    self.out / "verifier-exec.stdout", self.out / "verifier-exec.stderr", user="0")
                 attempts.append(outcome)
                 if not outcome["timed_out"]:
                     break
@@ -611,12 +662,12 @@ class Trial:
             self.result["verifier_timed_out"] = all(item["timed_out"] for item in attempts)
 
     def read_reward(self):
-        text_path = self.out / "verifier" / "reward.txt"
-        json_path = self.out / "verifier" / "reward.json"
-        if text_path.is_file() and text_path.read_text().strip():
-            return float(text_path.read_text().strip()), "reward.txt"
-        if json_path.is_file() and json_path.read_text().strip():
-            data = json.loads(json_path.read_text())
+        text = read_regular_file(self.out / "verifier" / "reward.txt")
+        if text and text.strip():
+            return float(text.strip()), "reward.txt"
+        text = read_regular_file(self.out / "verifier" / "reward.json")
+        if text and text.strip():
+            data = json.loads(text)
             if isinstance(data, dict):
                 value = data.get("reward", next(iter(data.values()), None) if len(data) == 1 else None)
             else:

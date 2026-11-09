@@ -376,6 +376,89 @@ def test_activity_counts_reject_malformed_authority_projection(response):
         )
 
 
+_TURN_USAGE = {
+    'metadata': {'id': 'c1', 'title': 'T', 'created_at': 1, 'updated_at': 2,
+                 'settings': {'model': 'm'}},
+    'message_count': 3,
+    'title_fallback': '',
+    'turns': [{'index': 2, 'timestamp': 150, 'usage': {'prompt_tokens': 4},
+               'providerId': 'p'}],
+}
+
+
+def test_turn_usage_reads_owner_scoped_usage_projection():
+    client = _Client({'conversation.turn_usage': _TURN_USAGE})
+
+    usage = _repository(client).turn_usage(
+        'c1', user_id=7, timestamp_gte=100, timestamp_lt=200,
+        title_fallback_characters=30)
+
+    assert usage.metadata['settings'] == {'model': 'm'}
+    assert usage.message_count == 3
+    assert usage.turns == _TURN_USAGE['turns']
+    assert client.calls == [('conversation.turn_usage', {
+        'user_id': 7, 'conv_id': 'c1', 'timestamp_gte': 100,
+        'timestamp_lt': 200, 'title_fallback_characters': 30,
+    })]
+
+
+def test_turn_usage_scan_lists_metadata_then_reads_each_projection():
+    class _UsageClient:
+        def __init__(self):
+            self.calls = []
+
+        def query(self, operation, payload):
+            self.calls.append((operation, payload))
+            if operation == 'conversation.list':
+                return [{'metadata': {'id': conversation_id}, 'messages': []}
+                        for conversation_id in ('c1', 'gone')]
+            if payload['conv_id'] == 'gone':
+                return None
+            return _TURN_USAGE
+
+    client = _UsageClient()
+    count, projections = _repository(client).scan_turn_usage(
+        user_id=7, updated_at_gte=100, created_at_lt=200,
+        timestamp_gte=100, timestamp_lt=200, limit=50)
+
+    assert count == 2
+    assert [usage.metadata['id'] for usage in projections] == ['c1']
+    operation, listing = client.calls[0]
+    assert operation == 'conversation.list'
+    assert listing['include_messages'] is False
+    assert listing['derive_messages'] is False
+    assert listing['settings_keys'] == []
+    assert [operation for operation, _ in client.calls[1:]] == [
+        'conversation.turn_usage', 'conversation.turn_usage']
+
+
+@pytest.mark.parametrize('response', [
+    [],
+    {**_TURN_USAGE, 'message_count': True},
+    {**_TURN_USAGE, 'title_fallback': None},
+    {**_TURN_USAGE, 'metadata': {**_TURN_USAGE['metadata'], 'settings': []}},
+    {**_TURN_USAGE, 'turns': [{'index': 3, 'usage': {}}]},
+    {**_TURN_USAGE, 'turns': [{'index': 0, 'usage': 'x'}]},
+])
+def test_turn_usage_rejects_malformed_authority_projection(response):
+    client = _Client({'conversation.turn_usage': response})
+    with pytest.raises(RuntimeError, match='turn usage projection'):
+        _repository(client).turn_usage(
+            'c1', user_id=7, timestamp_gte=1, timestamp_lt=2)
+
+
+@pytest.mark.parametrize('bounds', [
+    {'timestamp_gte': 2, 'timestamp_lt': 2},
+    {'timestamp_gte': True, 'timestamp_lt': 2},
+    {'timestamp_gte': 1, 'timestamp_lt': 2, 'title_fallback_characters': 257},
+])
+def test_turn_usage_rejects_invalid_window_before_storage(bounds):
+    client = _Client({})
+    with pytest.raises(ValueError):
+        _repository(client).turn_usage('c1', user_id=7, **bounds)
+    assert client.calls == []
+
+
 def test_search_returns_ids_without_leaking_storage_hits():
     client = _Client({'conversation.search': [
         {'id': 'c2', 'snippet': 'match'}, {'id': 'c3', 'snippet': 'match'},

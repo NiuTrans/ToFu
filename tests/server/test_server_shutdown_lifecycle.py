@@ -141,6 +141,7 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
     import lib.storage.warmup as warmup
     import lib.swarm.integration as swarm_integration
     import lib.tasks_pkg.manager as task_manager
+    import lib.tasks_pkg.event_delivery as event_delivery
     import lib.tasks_pkg.event_log as event_log
     import lib.usage_tracker as usage_tracker
     import routes
@@ -218,6 +219,11 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
     monkeypatch.setattr(
         mcp_startup, 'stop_mcp_auto_connect', sync_call('mcp-startup'))
     monkeypatch.setattr(admission.controller, 'shutdown', sync_call('admission'))
+    def stop_event_delivery(**kwargs):
+        sync_call('event-delivery')(**kwargs)
+        return True
+
+    monkeypatch.setattr(event_delivery, 'shutdown_event_delivery', stop_event_delivery)
     monkeypatch.setattr(push.hub, 'stop', sync_call('push'))
     monkeypatch.setattr(http_client, 'close_http_clients', close_http_clients)
     monkeypatch.setattr(timer_runtime, 'shutdown_timer_watchers', sync_call('timers'))
@@ -281,7 +287,7 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
     # final evidence flushes, and the storage boundary retire.
     assert names[12:] == [
         'automation', 'route-services', 'storage-warmup', 'pricing-refresh',
-        'mcp-startup', 'mcp', 'admission', 'push', 'http', 'runtime',
+        'mcp-startup', 'mcp', 'admission', 'event-delivery', 'push', 'http', 'runtime',
         'key-stats', 'usage', 'event-maintenance', 'event-batcher', 'storage',
     ]
     assert next(thread for name, thread, _ in calls if name == 'http') == loop_thread
@@ -300,6 +306,7 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(
     assert by_owner['netpath'] == {}
     assert by_owner['key-stats'] == {}
     assert by_owner['usage'] == {}
+    assert by_owner['event-delivery'] == {'timeout': 10.0}
     assert all(by_owner[name] == {'timeout': 2.0}
                for name in ('lan-discovery', 'cgroup', 'local-health', 'fs-keepalive', 'presence'))
     assert all(kwargs == {'timeout': 2.0} for name, _, kwargs in calls

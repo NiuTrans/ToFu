@@ -14,6 +14,8 @@ from urllib.parse import quote
 
 import pytest
 
+from tests.support.conversation_replay import ScriptedConversationRepository
+
 
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode("open")]
 
@@ -40,33 +42,6 @@ def _page(head: int, events: list[dict], *, has_more: bool = False) -> dict:
 
 def _backlog(conversation_id: str) -> list[dict]:
     return [_page(3, [_change(conversation_id, sequence, 40_000) for sequence in (1, 2, 3)])]
-
-
-class _ScriptedRepository:
-    """Per-conversation change pages; an exhausted script expires the cursor.
-
-    ``None`` is an absent conversation. An exception fails the first page read
-    after the ownership probe, as a storage failure in a live stream does.
-    """
-
-    def __init__(self, scripts: dict):
-        self.scripts = {
-            key: list(value) if isinstance(value, list) else value
-            for key, value in scripts.items()
-        }
-
-    def changes(self, conversation_id, _user_id, *, after_sequence, limit):
-        script = self.scripts.get(conversation_id)
-        if script is None:
-            return None
-        if limit == 1:
-            return _page(after_sequence, [])
-        if isinstance(script, Exception):
-            raise script
-        if script:
-            return script.pop(0)
-        return {"head": 0, "events": [], "resetRequired": True,
-                "resetReason": "cursor_expired"}
 
 
 def _frames(body: bytes) -> list[dict]:
@@ -123,7 +98,7 @@ def multiplex(flask_client, monkeypatch):
     def open_streams(scripts: dict, streams, *, query: dict | None = None) -> list[dict]:
         monkeypatch.setattr(
             sync_routes, "_service",
-            FastHeartbeatService(_ScriptedRepository(scripts)))
+            FastHeartbeatService(ScriptedConversationRepository(scripts, broker)))
         response = flask_client.get(ROUTE, query_string={
             "streamClientId": "page-a",
             "diagnosticPayload": "none",
@@ -219,6 +194,46 @@ def test_a_resumed_stream_replays_only_changes_after_its_cursor(multiplex):
 
     changes = [frame for frame in frames if frame["event"] == "conversation.activity"]
     assert [frame["id"] for frame in changes] == [_cursor(ALPHA, 3)]
+
+
+def test_scripted_cursor_expiry_finishes_the_real_stream(monkeypatch):
+    import asyncio
+
+    from lib.conversation_sync.broker import ConversationWakeBroker
+    from lib.conversation_sync.service import ConversationSyncService
+    from routes import conversation_sync_v3 as routes
+
+    broker = ConversationWakeBroker(owner_history_capacity=16)
+    repository = ScriptedConversationRepository(
+        {ALPHA: [_page(3, [_change(ALPHA, 3)])]}, broker)
+    monkeypatch.setattr(routes, "broker", broker)
+    monkeypatch.setattr(routes, "_service", ConversationSyncService(repository))
+
+    async def exercise():
+        unrelated = [broker.subscribe(1, BETA), broker.subscribe(2, ALPHA)]
+        body = routes._multiplexed_stream_frames(
+            0, {"conversationId": ALPHA, "streamGeneration": 1,
+                "after": _cursor(ALPHA, 2), "windowBytes": WINDOW_BYTES},
+            user_id=1, principal="owner:1", stream_client_id="page-a",
+            diagnostic_options={"diagnostic_payload": "none"},
+        )
+        try:
+            frames = _frames("".join([frame async for frame in body]).encode())
+            assert broker.snapshot()["active"] == len(unrelated)
+            for subscription in unrelated:
+                assert not await subscription.wait(0)
+        finally:
+            await body.aclose()
+            for subscription in unrelated:
+                subscription.close()
+        assert [frame["event"] for frame in frames] == [
+            "conversation.activity", "sync.reset_required", "stream.closed"]
+        assert frames[0]["id"] == _cursor(ALPHA, 3)
+        assert frames[1]["data"]["reason"] == "cursor_expired"
+        assert frames[2]["data"] == _closed(ALPHA, 204, "ended")
+        assert broker.snapshot()["active"] == 0
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("forward", [

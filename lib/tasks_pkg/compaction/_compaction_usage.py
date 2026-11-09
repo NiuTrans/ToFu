@@ -111,7 +111,7 @@ def record_compaction_usage(conv_id: str, usage: dict | None,
                 # explicit label so consumers need not re-derive semantics.
                 timing['ttftMeasurement'] = 'streaming_first_content_measured'
     logger.info('[CompactUsage] conv=%s +%s call: prompt=%s completion=%s',
-                conv_id[:8] if conv_id else '?', kind,
+                conv_id if conv_id else '?', kind,
                 usage.get('prompt_tokens') or usage.get('input_tokens'),
                 usage.get('completion_tokens') or usage.get('output_tokens'))
 

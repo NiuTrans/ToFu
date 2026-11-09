@@ -51,7 +51,7 @@ def test_same_human_resume_recovers_replays_reviews_and_finishes_original_worker
     assert second['request']['profile']['tools'] == first['request']['profile']['tools']
     end(r, first)
     assert r.call('review_project_work', assignment_id=first['id'], result_revision=1,
-                  decision='accept', note='Verified')['review']['actor'] == 'coordinator'
+                  decision='accept', note='Verified')['decision'] == 'accept'
     args = report(r)
     r.turns['human-report']['createdAt'] = int(r.c.now[0] * 1000) + 1
     assert 'Unfinished' in r.call('finish_project_request', **args)['error']
@@ -91,7 +91,7 @@ def test_new_human_steering_can_find_review_and_cancel_prior_work(run):
     assert {item['assignment_id'] for item in page['workers']} == {first['id'], second['id']}
     assert all(not item['current_request'] and item['source_turn_id'] == 'human-turn' for item in page['workers'])
     assert r.call('review_project_work', assignment_id=first['id'], result_revision=1,
-                  decision='accept', note='Checked earlier delivery')['review']['actor'] == 'coordinator'
+                  decision='accept', note='Checked earlier delivery')['decision'] == 'accept'
     assert r.call('cancel_project_work', assignment_id=second['id'])['revoked']
     assert r.attempts[second['execution']['attemptId']]['status'] == 'interrupted'
     assert len(r.created) == 2

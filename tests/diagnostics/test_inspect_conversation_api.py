@@ -363,19 +363,48 @@ def test_api_mode_scans_explicit_logs_dir_with_original_values(tmp_path, capsys)
 
 def test_api_mode_log_match_filters_before_the_cap_and_keeps_file_headers(tmp_path, capsys):
     (tmp_path / 'app.log').write_text(
-        '[ModelReplay] conv=conversa restore=checkpoint_missing\n'
+        '[ModelReplay] conv=conversation restore=checkpoint_missing\n'
         '[Chat] conversation queued\n'
-        '[Translate] committed field=content conv=conversa turn=t1\n'
-        '[Translate] committed field=content conv=conversa turn=t2\n', encoding='utf-8')
+        '[Translate] committed field=content conv=conversation turn=t1\n'
+        '[Translate] committed field=content conv=conversation turn=t2\n', encoding='utf-8')
     with api_server(pages) as url:
         assert inspector.main(['conversation', '--api-url', url, '--logs-dir', str(tmp_path),
                                '--logs', '2', '--log-match', r'ModelReplay|Translate\] committed']) == 0
     output = capsys.readouterr().out
     logs = output.split('== Logs ==', 1)[1].splitlines()
-    assert logs == [r' (--log-match ModelReplay|Translate\] committed)',
-                    '--- app.log: 2 line(s) (last 4 MiB)',
-                    '[Translate] committed field=content conv=conversa turn=t1',
-                    '[Translate] committed field=content conv=conversa turn=t2']
+    assert logs[0] == r' (--log-match ModelReplay|Translate\] committed)'
+    assert logs[1].startswith('  attribution: whole conversation ID; ')
+    assert logs[2:] == ['--- app.log: 2 line(s) (last 4 MiB)',
+                        '[Translate] committed field=content conv=conversation turn=t1',
+                        '[Translate] committed field=content conv=conversation turn=t2']
+
+
+def test_api_logs_mark_other_runs_only_when_every_turn_is_read(tmp_path, capsys):
+    own = 'ab50150c-1111-4222-8333-944445555666'
+    other = 'c6354b89-2222-4333-8444-955556666777'
+    own_line = f'[rid:{own}] [CacheTrack] conv=conversation call=3'
+    other_line = f'[rid:{other}] [ProjectMessage] steer conv=conversation'
+    (tmp_path / 'app.log').write_text(f'{own_line}\n{other_line}\n', encoding='utf-8')
+
+    def turns_of_one_attempt(request):
+        status, body = pages(request, total=30)
+        if isinstance(body.get('turn'), dict):
+            body['turn']['currentAttemptId'] = own
+        return status, body
+
+    with api_server(turns_of_one_attempt) as url:
+        assert inspector.main(['conversation', '--api-url', url,
+                               '--logs-dir', str(tmp_path)]) == 0
+        head_tail = capsys.readouterr().out.split('== Logs ==', 1)[1]
+        assert inspector.main(['conversation', '--api-url', url,
+                               '--logs-dir', str(tmp_path), '--json']) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+    # The head/tail read leaves 7 turns unread, whose runs are unknown.
+    assert 'other runs are not marked until every turn is read' in head_tail
+    assert '\u2691' not in head_tail and other_line in head_tail
+    # --json reads every turn, so a run none of them names is another's.
+    assert payload['logs'] == [own_line, '\u2691 other run | ' + other_line]
 
 
 JSON_KEYS = {'conversationId', 'found', 'exitCode', 'document', 'messages',
@@ -391,7 +420,7 @@ def test_api_json_mode_prints_one_document_with_every_read_turn(tmp_path, capsys
     captured = capsys.readouterr()
     assert captured.out.count('\n') == 1 and not captured.err
     payload = json.loads(captured.out)
-    assert set(payload) == JSON_KEYS | {'logs'}
+    assert set(payload) == JSON_KEYS | {'logs', 'logFiles'}
     assert (payload['conversationId'], payload['found'], payload['exitCode']) == (
         'conversation', True, 0)
     assert 'messages' not in payload['document']
@@ -403,6 +432,7 @@ def test_api_json_mode_prints_one_document_with_every_read_turn(tmp_path, capsys
     assert payload['compactionArchives'][0]['summary'] == 'retained summary'
     assert payload['anomalies'] == []
     assert payload['logs'] == ['conversation bootstrap ok']
+    assert payload['logFiles'] == ['--- app.log: 1 line(s) (last 4 MiB)']
 
 
 def test_api_json_mode_absence_errors_and_partial_evidence(monkeypatch, capsys):

@@ -40,6 +40,10 @@ _MARKER_TTL_S = {'': 300, '5m': 300, '1h': 3600}
 BUCKET_BREAKPOINT_LOST = 'breakpoint_lost'
 BUCKET_MID_WINDOW = 'cache_mid_out_of_window'
 BUCKET_WRITE_UNSETTLED = 'cache_write_unsettled'
+# The request's provider-visible tool names exceeded the route's measured
+# tool-name budget (lib.llm.tool_wire), so the route could not reuse its cache
+# for it: a client-side miss known at send time, never an upstream one.
+BUCKET_TOOL_NAME_BUDGET = 'tool_name_budget'
 BUCKET_UPSTREAM = 'upstream_identical'
 BUCKET_BODY_CHANGE = 'body_change'
 BUCKET_NO_BREAK = 'no_break'
@@ -380,6 +384,8 @@ def classify_verdict(verdict: dict | None) -> str:
         return BUCKET_INDETERMINATE
     if BUCKET_UNCACHED in verdict:
         return BUCKET_UNCACHED
+    if BUCKET_TOOL_NAME_BUDGET in verdict:
+        return BUCKET_TOOL_NAME_BUDGET
     if BUCKET_NAMESPACE in verdict:
         return BUCKET_NAMESPACE
     if BUCKET_WRITE_UNSETTLED in verdict:

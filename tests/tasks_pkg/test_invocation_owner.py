@@ -46,7 +46,7 @@ def test_explicit_owner_preserves_root_kickoff_and_cleanup(monkeypatch):
                         lambda: calls.append('clear'))
     invocation.execute_invocation(
         {'id': 'owner-kickoff'}, policy=invocation.ROOT_INVOCATION_POLICY)
-    assert calls == [('request', 'owner-ki'), 'kick', ('request', ''), 'clear']
+    assert calls == [('request', 'owner-kickoff'), 'kick', ('request', ''), 'clear']
 
 
 def test_owner_rejects_missing_carrier_id():

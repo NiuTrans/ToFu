@@ -80,7 +80,8 @@ def test_persisted_configuration_precedes_network_owned_services(monkeypatch):
             'PYTEST_CURRENT_TEST': '1',
         },
     )
-    assert calls == ['routes', 'proxy', 'key', 'delivery', 'netpath']
+    assert calls == ['routes', 'proxy', 'key', 'delivery']
+    assert 'netpath' not in calls  # Common route probes are demand-driven.
 
 
 

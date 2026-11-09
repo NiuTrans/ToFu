@@ -75,9 +75,11 @@ native passive replay target; that pre-existing product gap remains.
 **Alternatives.** Eager final checkpoints
 were rejected by the earlier high-entropy WAL counterexample. Trusting producer
 `projection_segments_stable`, byte counts or types alone was rejected because
-legacy guidance repair, normalization and depth are observable semantics. An
-unbounded projection cache would add a second lifecycle and hide work behind
-resident memory; bounded evidence on the existing durable head is sufficient.
+legacy guidance repair, normalization and depth are observable semantics. The
+witness stays the fast path for metadata patches: it needs no projection at
+all. Tool-round, segment and nested patches need the projection itself, which
+[committed live-head residency](TOFUDB_JSON_MATERIALIZATION.md#committed-live-head-residency)
+reuses with the durable head's own lifecycle instead of a separate cache.
 
 The experiment and counterexamples below describe the earlier implementation,
 not performance claims about this production path.
@@ -165,6 +167,32 @@ the ordinary path. Run
 `cargo test --manifest-path packages/tofu-db/Cargo.toml --lib execution_frame_large_history_reuses_recovery_proof_for_small_events -- --nocapture`;
 set `TMPDIR` to an isolated directory on the filesystem being measured.
 Metadata retention is measured in [storage operations](STORAGE_OPERATIONS.md#large-history-event-persistence).
+
+### Recovery evidence compatibility (2026-11-08)
+
+Problem: the recovery owner corrected `evidence` from `user_abort` to
+`system_recovery` without advancing the projection witness version. Both
+encodings were published as v2. The five-byte size difference made an upgraded
+reader reject valid historical Turns with `Turn frame recovery bytes differ`.
+
+Decision: new witnesses use v3 and exactly verify the current recovery encoding.
+A v2 reader verifies either published encoding against the fully materialized
+projection; the compatibility adapter changes only the old evidence label for
+measurement and reuses the shared recovery owner for every option. Field sizes,
+depth, revision, normalization and guidance checks remain mandatory. A v2
+recovery size never supplies fast write admission: an ordinary materialized
+write mints v3 first, so an old count cannot under-reserve the current settlement.
+Version 1 and future-version fallback keep their existing rules. Reads do not
+rewrite history or change the actual recovery verdict. The metadata shape and
+retention are unchanged; only the one-digit witness version advances.
+
+Alternatives rejected: accepting any size mismatch hides malformed evidence;
+reverting the recovery verdict mislabels a server restart as a human stop;
+reusing the old count can admit a Turn that cannot settle. Golden lengths for
+both published envelopes, exact rejection of other counts, public readback,
+lane-index parity, reopen and lazy upgrade are executable specifications in
+`turn_execution_frame_runtime_tests.rs`. Changing recovery serialization must
+preserve those historical fixtures and explicitly version new size evidence.
 
 ### Adjacent ordinary events in one transaction (2026-11-05)
 

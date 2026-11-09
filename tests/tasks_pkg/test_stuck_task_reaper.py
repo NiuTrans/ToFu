@@ -143,6 +143,30 @@ def test_reap_partial_output_then_wedged(reaper_env, put_task):
     assert t.get('_reap_had_output') is True  # it HAD produced output
 
 
+def test_reaped_root_settles_its_turn_failed_never_as_a_user_stop(reaper_env, put_task):
+    """The reaper force-fails a wedged root; its Turn must record that failure.
+
+    2026-11-09 (task 990b7f97): read as ``interrupted/user_abort``, the Turn showed a
+    phantom Stop while the task result said ``error``, and durable worker recovery,
+    which requires the two to agree, retried ``settlement_unconfirmed`` for hours.
+    """
+    from lib.turn_lifecycle import _settlement
+    from lib.turn_verdict import TurnStatus, derive_task_verdict
+    stale = time.time() - 400
+    put_task(_mk_task('wedged-root-verdict', content='ok', events=[{'type': 'delta', 'seq': 0}],
+                      _t_last_event=stale, _dispatch_heartbeat=stale, created_at=stale))
+    assert _reap() == 1
+    task = _get('wedged-root-verdict')
+    # The frame _finalize_reaped_stuck_task appends to settle the Turn.
+    done = {'type': 'done', 'error': task['error'], 'finishReason': 'error'}
+    verdict = derive_task_verdict(task, done)
+    assert verdict.status is TurnStatus.FAILED and verdict.cause == 'worker_lost'
+    status, settlement = _settlement(task, done, {'content': 'ok', 'toolRounds': []})
+    assert status == 'failed' and settlement['cause'] == 'worker_lost'
+    assert settlement['error']['kind'] == 'worker_lost'
+    assert 'terminated as wedged' in settlement['error']['detail']
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # (ii) NEUTER — the load-bearing gate. Same wedged-looking task, but the
 #      dispatch heartbeat is FRESH (a live slow / rate-limited dispatch). It
@@ -519,3 +543,70 @@ def test_silence_restarts_after_an_explained_wait_ends(reaper_env, put_task):
     task['_storageWaits'] = {}
     assert _reap() == 0, 'a just-acknowledged wait is not a wedge'
     assert task['status'] == 'running' and task['aborted'] is False
+
+
+def test_coordinator_status_read_wedge_is_reaped_within_one_silence_threshold(
+        reaper_env, put_task):
+    """A delegated wait explains nothing: the completed observation is the clock.
+
+    N11 (2026-11-04/05): a Coordinator parked in await_project_workers was
+    force-failed as worker_lost. Its per-poll heartbeat
+    (fdffeb72a4, live since 2026-11-05 09:59) owns that silence, exactly like a
+    ratified human wait. This spec binds the other half: the moment a status
+    read stops completing, the wait is an ordinary silence and the reaper owns
+    it — it must not be extended by a declared-wait marker.
+    """
+    from lib.tasks_pkg.liveness import judge
+    now = time.time()
+    stale = now - 400
+    task = _mk_task('coordinator-await-1',
+                    content='Delegating stage 2', thinking='',
+                    events=[{'type': 'tool_start', 'seq': 0}],
+                    _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale)
+    put_task(task)
+    # While the wait keeps observing Workers, its own clock is fresh: not reaped.
+    task['_dispatch_heartbeat'] = time.time()
+    assert judge(task, time.time(), reaper_env, commands=[]).state == 'alive'
+    assert _reap() == 0
+    assert _get('coordinator-await-1')['status'] == 'running'
+    # The status read then wedges: one threshold after the last completed
+    # observation, and no later, the Turn is force-failed.
+    task['_dispatch_heartbeat'] = time.time() - reaper_env - 1
+    task['_t_last_event'] = task['created_at'] = time.time() - reaper_env - 1
+    assert _reap() == 1, 'a blocked status read is a wedge, not a wait'
+    assert _get('coordinator-await-1')['aborted'] is True
+
+
+def test_task_waiting_on_a_claimed_device_command_not_reaped(reaper_env, put_task):
+    from lib.desktop import bridge
+    from lib.tasks_pkg.explained_wait import device_wait
+    now = time.time()
+    stale = now - 400
+    task = _mk_task('device-wait-1', _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale)
+    cmd = {'id': 'cmd-reaper-1', 'user_id': '1', 'claimed_agent_id': 'dev-1'}
+    bridge.command_queue['cmd-reaper-1'] = cmd
+    bridge._agents['dev-1'] = {'agent_id': 'dev-1', 'user_id': '1', 'last_seen': now,
+                               'active_command_ids': {'cmd-reaper-1'}}
+    try:
+        with device_wait(task, cmd):
+            put_task(task)
+            assert _reap() == 0, 'a claimed command on a connected device is not a wedge'
+            assert _get('device-wait-1')['status'] == 'running'
+    finally:
+        bridge.command_queue.pop('cmd-reaper-1', None)
+        bridge._agents.pop('dev-1', None)
+
+
+def test_unclaimed_device_command_stays_reapable(reaper_env, put_task):
+    """No device owns an unclaimed command, so its silence is not explained."""
+    from lib.tasks_pkg.explained_wait import device_wait
+    now = time.time()
+    stale = now - 400
+    task = _mk_task('device-unclaimed-1', _t_last_event=stale, _dispatch_heartbeat=stale,
+                    created_at=stale)
+    with device_wait(task, {'id': 'cmd-reaper-2', 'user_id': '1', 'claimed_agent_id': None}):
+        put_task(task)
+        assert _reap() == 1
+        assert _get('device-unclaimed-1')['aborted'] is True

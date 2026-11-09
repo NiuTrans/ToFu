@@ -54,9 +54,8 @@ def test_old_caller_timestamp_cannot_extend_an_expired_lease(semantic_authority)
     assert replacement['fencingToken'] == job['fencingToken'] + 1
 
 
+@pytest.mark.parametrize('semantic_authority', ['native'], indirect=True)
 def test_native_restart_invalidates_and_recovers_an_unexpired_holder(semantic_authority):
-    if semantic_authority[2] is None:
-        pytest.skip('Native authority restart contract')
     factory, owner, engine, kind, job = owned_claim(semantic_authority)
     assert 0 < horizon(factory, kind) <= 10000
     engine.crash_cycle()

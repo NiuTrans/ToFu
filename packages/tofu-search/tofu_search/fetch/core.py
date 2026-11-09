@@ -38,6 +38,7 @@ from tofu_search.fetch.utils import (
     _CACHE_EXTRACT_LIMIT,
     _HAS_LEGACY_SSL,
     _URL_RE,
+    SKIP_DOMAIN_DETAIL,
     _circuit,
     _decode_bytes,
     _fetch_cache,
@@ -53,6 +54,7 @@ from tofu_search.fetch.utils import (
     _session,
     _should_fetch,
 )
+from tofu_search.generated_url_blocklist import blocked_url
 from tofu_search.log import get_logger
 from tofu_search.providers import (
     get_auth_source_provider,
@@ -220,6 +222,13 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     _try_browser_fetch = _mk_deadline_browser(_page_budget_exhausted)
     _try_playwright_fallback = _mk_deadline_playwright(_page_budget_exhausted)
 
+    # A source ban refuses before the cache, the reader tier and the identity
+    # paths below. Fetch-quality skips stay in _should_fetch, after those tiers,
+    # so a reader-handled or connected URL on a skipped host is still read.
+    banned = blocked_url(url, cfg.skip_domains)
+    if banned:
+        return _diag('skip_domain', SKIP_DOMAIN_DETAIL % banned)
+
     # Rewrite code-hosting blob URLs to raw-content URLs (GitHub, GitLab, Bitbucket)
     url = _normalize_code_hosting_url(url)
     # PDF limits differ from ordinary page previews. Include the effective
@@ -246,7 +255,7 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     domain = urlparse(url).netloc.lower()
 
     # ── Reader tier (public no-login data endpoints) ──
-    # Runs BEFORE the skip-domain gate so a domain that is blunt-blocked as an
+    # Runs BEFORE the fetch-quality skip so a domain that is blunt-skipped as an
     # un-fetchable JS/social app (e.g. x.com) can still yield a clean text
     # block for a *recognized* URL (a tweet/status link) via its public
     # endpoint. A reader that matches but yields nothing (deleted/not-found)
@@ -369,7 +378,7 @@ def _fetch_page_with_budget(url, max_chars, pdf_max_chars, timeout, diag, cfg):
     if _page_budget_exhausted():
         return None
 
-    # ── Skip-domain / SSRF / binary-media / circuit gate ──
+    # ── Ban / fetch-quality skip / SSRF / binary-media / circuit gate ──
     # After the reader + auth-source bypasses so a connected or reader-handled
     # URL is not blunt-blocked, but before any anonymous network request.
     # `diag` is passed positionally-optional: _should_fetch is a documented

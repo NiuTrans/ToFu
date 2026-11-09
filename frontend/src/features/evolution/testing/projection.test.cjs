@@ -38,9 +38,9 @@ test('a compute-parked executor is a visible wait, and its placeholder result is
  assert.deepEqual(studioEvents(stalled,stalled),[]);
  const error="ModuleNotFoundError: No module named 'tofu_environments.capacity'";
  const routed=projectStudio({run:{...parked,compute_wait:{...parked.compute_wait,last_error:error,
-  last_error_origin:'tofu_meituan_environments/hope_catalog.py:3 in <module>',failed_since:1700000000,watchdog_signal_id:'sig-1'}},workspace});
+  last_error_origin:'tofu_yourprovider_environments/hope_catalog.py:3 in <module>',failed_since:1700000000,watchdog_signal_id:'sig-1'}},workspace});
  assert.deepEqual(routed.wait,{kind:'compute',operation:'job-9ec7',error,
-  origin:'tofu_meituan_environments/hope_catalog.py:3 in <module>',since:1700000000,routed:true});
+  origin:'tofu_yourprovider_environments/hope_catalog.py:3 in <module>',since:1700000000,routed:true});
  const asked=projectStudio({run:{...parked,compute_wait:{...parked.compute_wait,last_error:error}},workspace,questions:1});
  assert.equal(asked.primary,'answer','a pending human question still comes first');
 });

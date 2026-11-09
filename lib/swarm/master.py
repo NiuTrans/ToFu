@@ -361,6 +361,8 @@ def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple
         share_conversation_worker(session_parent, parent)
     from lib.project_dispatch.admission import share_dispatch_root
     share_dispatch_root(current if current is not None else session_parent, parent)
+    from lib.model_routing import share_request_routing_authority
+    share_request_routing_authority(current if current is not None else session_parent, parent)
     return parent, context
 
 
@@ -769,6 +771,8 @@ class MasterOrchestrator:
             share_execution_budget(parent_task, self._parent_task_proxy)
             from lib.project_dispatch.admission import share_dispatch_root
             share_dispatch_root(parent_task, self._parent_task_proxy)
+            from lib.model_routing import share_request_routing_authority
+            share_request_routing_authority(parent_task, self._parent_task_proxy)
             # A spawned swarm is fire-and-forget: sub-agents keep running (and
             # dependency-blocked specs keep WAITING) long after the spawning
             # chat task settles 'done'. Yet the shared execution-budget
@@ -2664,7 +2668,7 @@ class MasterOrchestrator:
                 return payload
             running_ids = (set(self._scheduler._running.keys())
                            if self._scheduler else set())
-            pending_ids = ({s.id for s in self._scheduler._pending}
+            pending_ids = ({s.id for s in self._scheduler._pending.values()}
                            if self._scheduler else set())
 
         if agent_id in running_ids:

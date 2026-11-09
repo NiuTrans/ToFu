@@ -1,4 +1,4 @@
-"""Delta projection + rebuild for ``messages_snapshot`` rows.
+"""Delta projection + rebuild for request snapshots and source-map evidence.
 
 Design: ``docs/FRONTEND_ARCHITECTURE.md`` §10. The unversioned v1 format is
 frozen and remains readable; new rows use a backward-compatible v2 scope.
@@ -34,6 +34,8 @@ interleave, and the request following a post-tool state often has the exact
 same messages, so v1 stored the new tool tail twice. V2 stamps a private
 version and shares one chronological baseline per ``(task, turn)``. Rebuild
 selects the key from each row's version, preserving mixed v1/v2 histories.
+Optional contextLineage sources on snapshots and wire projections reuse the
+same prefix encoder and replay chain with an independent stage-scoped baseline.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from lib.utils import sha256_holding_gil, update_holding_gil
 logger = get_logger(__name__)
 
 SNAPSHOT = 'messages_snapshot'
+WIRE_PROJECTION = 'tool_wire_projection'
 TOOLS_DICT = 'tools_dict'
 
 # Marker key that identifies an already-projected (delta) row. Legacy rows
@@ -227,10 +230,14 @@ class SnapshotProjector:
         When the payload is already in delta form, or is not a snapshot, it
         is returned unchanged (idempotent — the migration can be re-run).
         """
+        if isinstance(payload, dict) and payload.get('type') == WIRE_PROJECTION:
+            return self._project_lineage(task_id, payload)
         if not isinstance(payload, dict) or payload.get('type') != SNAPSHOT:
             return payload
         if DELTA_MARKER in payload:
             return payload  # already projected — idempotent
+
+        payload = self._project_lineage(task_id, payload)
 
         messages = payload.get('messages')
         if not isinstance(messages, list):
@@ -272,6 +279,22 @@ class SnapshotProjector:
 
         self._previous_scans[key] = scan
         return out
+
+    def _project_lineage(self, task_id, payload):
+        trace = payload.get('contextLineage')
+        if (not isinstance(trace, dict) or not isinstance(trace.get('sources'), list)
+                or 'sourceDeltaVersion' in trace):
+            return payload
+        sources = trace['sources']
+        key = _lineage_key(task_id, payload, payload.get('type'))
+        count, digest, scan = self._scan_message_prefix(sources, self._previous_scans.get(key))
+        encoded = {key: value for key, value in trace.items() if key != 'sources'}
+        encoded.update(sourceDeltaVersion=1, prefixLen=count, prefixHash=digest,
+                       sourceCount=len(sources))
+        if count < len(sources):
+            encoded['newSources'] = sources[count:]
+        self._previous_scans[key] = scan
+        return {**payload, 'contextLineage': encoded}
 
     def forget(self, task_id: str) -> None:
         """Drop per-task projection state (call at terminal state)."""
@@ -372,6 +395,40 @@ class _MessagePrefix:
         return (self.parent, self.tail, self.hasher)
 
 
+def _lineage_key(task_id, payload, event_type):
+    trace = payload.get('contextLineage') or {}
+    return (task_id, payload.get('turn') or '', event_type, trace.get('stage'), 'contextLineage')
+
+
+def _restore_lineage(trace, base):
+    """Use the same verified prefix chain as messages; missing evidence degrades."""
+    count = base.length if base else 0
+    prefix = trace.get('prefixLen')
+    reason = ''
+    if trace.get('sourceDeltaVersion') != 1:
+        reason = 'unsupported context source delta version'
+    elif type(prefix) is not int or not 0 <= prefix <= count:
+        reason = 'context source baseline missing or invalid'
+    kept = min(max(prefix, 0), count) if type(prefix) is int else 0
+    if not reason:
+        hasher = base.prefix_hasher(kept) if base else hashlib.sha256(b'[')
+        hasher.update(b']')
+        if hasher.hexdigest()[:16] != trace.get('prefixHash'):
+            reason = 'context source prefix hash mismatch'
+    tail = trace.get('newSources', [])
+    if not isinstance(tail, list) or any(not isinstance(row, dict) for row in tail):
+        reason = reason or 'invalid context source tail'
+        tail = []
+    history = _MessagePrefix(base, kept, tail)
+    if not reason and history.length != trace.get('sourceCount'):
+        reason = 'context source count mismatch'
+    header = {key: value for key, value in trace.items() if key not in (
+        'sourceDeltaVersion', 'prefixLen', 'prefixHash', 'sourceCount', 'newSources')}
+    if reason:
+        header.update(degraded=True, degradedReason=reason)
+    return header, history
+
+
 class SnapshotReplayState:
     """One verified chronological replay with explicitly releasable results.
 
@@ -384,13 +441,22 @@ class SnapshotReplayState:
         self.legacy_positions = set()
         self.tools_by_hash = {}
         self.baselines = {}
+        self.source_baselines = {}
+        self.source_records = {}
 
     def append(self, source_index, row):
         payload = row.get('payload') if isinstance(row, dict) else None
         if not isinstance(payload, dict):
             return
-        if (payload.get('type') or row.get('type') or '') != SNAPSHOT:
+        event_type = payload.get('type') or row.get('type') or ''
+        if event_type == WIRE_PROJECTION and isinstance(payload.get('contextLineage'), dict):
+            full = self._append_lineage(source_index, payload, event_type)
+            self.records[source_index] = (full, None)
+            self.legacy_positions.add(source_index)
             return
+        if event_type != SNAPSHOT:
+            return
+        payload = self._append_lineage(source_index, payload, event_type)
         if isinstance(payload.get('tools'), list):
             self.tools_by_hash[payload.get('toolsHash') or content_hash(payload['tools'])] = payload['tools']
         key = SnapshotProjector._key('', payload)
@@ -448,24 +514,48 @@ class SnapshotReplayState:
             self.baselines[('', payload.get('turn') or '')] = history
         self.records[source_index] = (full, history)
 
+    def _append_lineage(self, source_index, payload, event_type):
+        trace = payload.get('contextLineage')
+        if not isinstance(trace, dict):
+            return payload
+        key = _lineage_key('', payload, event_type)
+        if 'sourceDeltaVersion' in trace:
+            header, history = _restore_lineage(trace, self.source_baselines.get(key))
+        elif isinstance(trace.get('sources'), list):
+            header = {key: value for key, value in trace.items() if key != 'sources'}
+            history = _MessagePrefix(None, 0, trace['sources'])
+        else:
+            return payload
+        self.source_baselines[key] = history
+        self.source_records[source_index] = history
+        return {**payload, 'contextLineage': header}
+
     def discard(self, source_index):
         self.records.pop(source_index, None)
+        self.source_records.pop(source_index, None)
         self.legacy_positions.discard(source_index)
 
     def finish(self):
         """Release continuation-only dependencies after the final source fence."""
         self.baselines.clear()
+        self.source_baselines.clear()
         self.tools_by_hash.clear()
 
     def payload(self, source_index):
         metadata, history = self.records[source_index]
         if source_index in self.legacy_positions:
             # Legacy payloads pass through exactly, including absent/non-list fields.
-            return dict(metadata)
-        return {**metadata, 'messages': list(history.messages())}
+            result = dict(metadata)
+        else:
+            result = {**metadata, 'messages': list(history.messages())}
+        if source_index in self.source_records:
+            result['contextLineage'] = {**result['contextLineage'],
+                'sources': list(self.source_records[source_index].messages())}
+        return result
 
     def cache_components(self):
-        return (self.records, self.legacy_positions, self.baselines, self.tools_by_hash)
+        return (self.records, self.legacy_positions, self.baselines, self.tools_by_hash,
+                self.source_baselines, self.source_records)
 
 
 class SnapshotReplayIndex(SnapshotReplayState):
@@ -497,10 +587,11 @@ def rebuild_attempt_event_frames(events: list) -> list:
     for position, event in enumerate(events):
         payload = event.get('payload') if isinstance(event, dict) else None
         frame = payload.get('event') if isinstance(payload, dict) else None
-        if not isinstance(frame, dict) or frame.get('type') != SNAPSHOT:
+        if not isinstance(frame, dict) or frame.get('type') not in (SNAPSHOT, WIRE_PROJECTION):
             continue
         index.append(position, {'payload': frame})
-        if DELTA_MARKER in frame:
+        trace = frame.get('contextLineage')
+        if DELTA_MARKER in frame or (isinstance(trace, dict) and 'sourceDeltaVersion' in trace):
             replace.append(position)
     for position in replace:
         rebuilt = index.payload(position)

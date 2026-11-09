@@ -102,7 +102,7 @@ def _extract_objective_from_db(conv_id: str, *, user_id: int) -> str:
         raw = _load_messages_from_db(conv_id, user_id=user_id)
     except Exception as e:
         logger.debug('[Autopilot] objective DB read failed conv=%s: %s',
-                     conv_id[:8], e)
+                     conv_id, e)
         return ''
     if not raw:
         return ''
@@ -158,7 +158,7 @@ def _get_or_persist_objective(
                 return False  # nothing worth pinning
             settings['autopilotObjective'] = objective
             logger.info('[Autopilot] conv=%s pinned objective (%d chars)',
-                        conv_id[:8], len(objective))
+                        conv_id, len(objective))
             return None  # proceed with the write
 
         # notify=False: autopilotObjective is internal run-bookkeeping, never
@@ -171,7 +171,7 @@ def _get_or_persist_objective(
         return out['objective']
     except Exception as e:
         logger.warning('[Autopilot] objective resolve failed conv=%s: %s — '
-                       'deriving from live messages', conv_id[:8], e)
+                       'deriving from live messages', conv_id, e)
         return _extract_objective(messages)
 
 
@@ -209,7 +209,7 @@ def _get_or_persist_run_id(conv_id: str, *, user_id: int) -> str:
                 out['id'] = existing
                 return False  # keep the id; skip the write
             settings['autopilotRunId'] = new_id
-            logger.info('[Autopilot] conv=%s minted runId=%s', conv_id[:8], new_id)
+            logger.info('[Autopilot] conv=%s minted runId=%s', conv_id, new_id)
             return None
 
         # notify=False: autopilotRunId is internal run-bookkeeping, not rendered.
@@ -220,7 +220,7 @@ def _get_or_persist_run_id(conv_id: str, *, user_id: int) -> str:
         return out['id']
     except Exception as e:
         logger.warning('[Autopilot] runId resolve failed conv=%s: %s — '
-                       'using ephemeral id', conv_id[:8], e)
+                       'using ephemeral id', conv_id, e)
         return new_id
 
 
@@ -322,13 +322,13 @@ def _record_vu_turn_and_check_budget(
         if out['stop']:
             logger.warning('[Autopilot] conv=%s run budget guard fired: '
                            'reason=%s turn=%d (max_turns=%s)',
-                           conv_id[:8], out['reason'], out['turn'], max_turns)
+                           conv_id, out['reason'], out['turn'], max_turns)
             audit_log('autopilot_budget_stop', conv_id=conv_id,
                       reason=out['reason'], turn=out['turn'], max_turns=max_turns)
         return out
     except Exception as e:
         logger.warning('[Autopilot] budget check failed conv=%s: %s — '
-                       'failing open (no stop)', conv_id[:8], e)
+                       'failing open (no stop)', conv_id, e)
         return {'stop': False, 'reason': '', 'turn': 0}
 
 

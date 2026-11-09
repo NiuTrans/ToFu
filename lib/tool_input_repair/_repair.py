@@ -20,6 +20,7 @@ from typing import Any
 from lib.log import audit_log, get_logger
 
 from lib.tools.contracts import NEVER_CLAMP_PARAMS, clamp_arguments_to_schema
+from lib.tools.project import retired_edit_operation_error
 from lib.tool_input_repair._schema import (
     RepairLog,
     _array_item_schema,
@@ -601,6 +602,29 @@ def edit_batch_path_gap(tool_name: str, fn_args: Any) -> str:
 
 
 
+def edit_batch_operation_refusal(tool_name: str, fn_args: Any) -> str:
+    """Explain a retired ``edit_file`` operation as the replace that expresses it.
+
+    The structural transform already dropped ``operation: "replace"`` and
+    turned the retired insert tools' ``position`` into the insert they meant;
+    any value left is refused before execution with exact instructions.
+    Returns ``''`` when no edit carries one (or this is not ``edit_file``).
+    """
+    if tool_name != 'edit_file' or not isinstance(fn_args, dict):
+        return ''
+    edits = fn_args.get('edits')
+    if not isinstance(edits, list):
+        return ''
+    refusals: dict[str, list[int]] = {}
+    for index, edit in enumerate(edits):
+        if isinstance(edit, dict):
+            refusal = retired_edit_operation_error(edit.get('operation'))
+            if refusal:
+                refusals.setdefault(refusal, []).append(index)
+    return ' '.join(f'edits[{_index_list(indices)}]: {refusal}'
+                    for refusal, indices in refusals.items())
+
+
 def _index_list(indices: list[int]) -> str:
     return ','.join(str(index) for index in indices)
 
@@ -627,8 +651,8 @@ def schema_hint(tool_name: str) -> str:
             parts.append(f'{key}{mark}({t})')
             continue
         # A bare `edits(array)` does not tell the recovery round which keys
-        # each item needs — the rejected `edits[0]` had anchor+operation but
-        # no content, and the hint named only the top-level array.
+        # each item needs — a rejected `edits[0]` had an anchor but no
+        # content, and the hint named only the top-level array.
         item_types, item_required = item
         need = ', '.join(
             f'{k}({v})' for k, v in item_types.items() if k in item_required)

@@ -20,7 +20,7 @@ from lib.project_mod.proxy_connect import (
     open_http_connect_tunnel,
 )
 from lib.project_mod.run_command import tool_run_command
-from lib.subscription_routes import ProbeResult, Route, RouteManager
+from lib.network_routes import ProbeResult, Route, RouteManager
 
 
 pytestmark = pytest.mark.unit

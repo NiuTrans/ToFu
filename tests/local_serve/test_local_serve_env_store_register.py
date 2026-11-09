@@ -193,7 +193,7 @@ class TestStreamingDownload:
         chunk = b'x' * (1 << 20)
         read_count = 0
         written = 0
-        def read(size):
+        def read(size, **_kwargs):
             nonlocal read_count
             assert size == len(chunk)
             read_count += 1
@@ -205,8 +205,8 @@ class TestStreamingDownload:
             if failure == 'write' and written == 2 * len(chunk):
                 raise OSError('No space left on device')
             written += len(data)
-        monkeypatch.setattr(env_mod.urllib.request, 'urlopen',
-                            lambda *a, **k: nullcontext(SimpleNamespace(read=read)))
+        monkeypatch.setattr(env_mod, 'http_get', lambda *a, **k: nullcontext(
+            SimpleNamespace(raw=SimpleNamespace(read=read), raise_for_status=lambda: None)))
         monkeypatch.setattr(env_mod, 'open',
                             lambda *a, **k: nullcontext(SimpleNamespace(write=write)),
                             raising=False)

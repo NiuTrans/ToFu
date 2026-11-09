@@ -83,8 +83,26 @@ HEAD_MESSAGES = 3
 MSG_TEXT_CAP = 600
 LOG_TAIL_BYTES = 4 * 1024 * 1024
 LOG_LINE_CAP = 50
-#: Many log call sites print ``conversation_id[:8]`` instead of the full ID.
-LOG_SHORT_ID_CHARS = 8
+#: Lines written before log text carried whole ids (docs/LOGGING.md) name a
+#: conversation by its first 8 characters and a task by its attempt id's first 8.
+LEGACY_SHORT_ID_CHARS = 8
+#: A durable task id is ``conversation-attempt:<attempt id>``; a swarm child
+#: appends ``#agent:<agent id>``.
+ATTEMPT_TASK_PREFIX = 'conversation-attempt:'
+OTHER_RUN_MARK = '⚑ other run | '
+_ATTEMPT_UUID = re.compile(
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+#: Where a line names the run that wrote it or that it concerns: the ``[rid:]``
+#: correlation prefix (a task seeds it with its attempt id), ``[Task ...]``,
+#: a bracketed attempt tag, ``task=``/``attempt=`` fields and durable task ids.
+_LOG_RUN_TOKEN = re.compile(
+    r'\[rid:([^\]\s]+)\]'
+    r'|\[Task ([^\]\s]+)\]'
+    r'|(?<![0-9A-Za-z_])(?:task|attempt|task_id|attempt_id)=([^\s,;)\]]+)'
+    r'|' + re.escape(ATTEMPT_TASK_PREFIX) + r'(' + _ATTEMPT_UUID.pattern + r')'
+    r'|\[(' + _ATTEMPT_UUID.pattern + r'|[0-9a-f]{8})\]')
+#: Transcript records that name the run which produced them.
+_RUN_ID_FIELDS = ('_attemptId', '_taskId', 'attemptId', 'taskId')
 ARCHIVE_TAIL = 20
 ARCHIVE_SUMMARY_CAP = 4_000
 #: tool_use ``result.status`` values that mean the call never ran to success.
@@ -812,7 +830,11 @@ def _render_request_evidence(api, document: dict) -> list[str]:
             if not isinstance(requests, list) or not requests:
                 lines.append(f'  task={task_id}: request catalog unavailable or expired')
                 continue
-            row = requests[-1]
+            row = next((row for row in reversed(requests)
+                        if (row.get('sourceTaskId') or task_id) == task_id), None)
+            if row is None:
+                lines.append(f'  task={task_id}: no task-owned request in retained catalog')
+                continue
             round_num = row.get('roundNum')
             if type(round_num) is not int or round_num < 0:
                 raise DiagnosticAPIError('Invalid request evidence round number')
@@ -1069,25 +1091,129 @@ def _rotated_logs(directory: Path, name: str,
     return selected
 
 
-def _conversation_log_pattern(conv_id: str) -> str:
-    """Regex for one conversation's log lines: its full ID or its short-ID token.
+def _run_ids(value) -> tuple[str, ...]:
+    """The runs a task or attempt id names: its attempt id and, for a swarm
+    child ``<parent>#agent:<child task id>``, the child's own task id."""
+    text = str(value or '').strip()
+    if text.startswith(ATTEMPT_TASK_PREFIX):
+        text = text[len(ATTEMPT_TASK_PREFIX):]
+    parent, _marker, child = text.partition('#agent:')
+    return tuple(run for run in (parent, child) if run)
 
-    The short prefix must stand alone; an alphanumeric run that continues it is
-    another conversation sharing the prefix unless it is this full ID.
+
+def _conversation_runs(document: dict, attempt_ids=()) -> frozenset[str]:
+    """The conversation's runs: those its read transcript names, plus
+    ``attempt_ids`` (the offline attempt rows)."""
+    runs = {run for value in attempt_ids for run in _run_ids(value)}
+
+    def note(record) -> None:
+        if isinstance(record, dict):
+            runs.update(run for field in _RUN_ID_FIELDS
+                        for run in _run_ids(record.get(field)))
+
+    for message in document.get('messages') or ():
+        if not isinstance(message, dict):
+            continue
+        note(message)
+        for name in ('toolRounds', 'segments'):
+            entries = message.get(name)
+            for entry in entries if isinstance(entries, list) else ():
+                note(entry)
+                if isinstance(entry, dict):
+                    note(entry.get('inspectorRef'))
+        timeline = message.get('activityTimeline')
+        entries = timeline.get('entries') if isinstance(timeline, dict) else None
+        for entry in entries if isinstance(entries, list) else ():
+            note(entry)
+    return frozenset(runs)
+
+
+def _load_attempt_ids(connection: sqlite3.Connection, conv_id: str) -> list[str]:
+    """Every attempt row of the conversation, settled or not (offline SQLite)."""
+    columns = _table_columns(connection, 'storage_generation_attempts')
+    selected = [name for name in ('attempt_id', 'task_id') if name in columns]
+    if 'conversation_id' not in columns or not selected:
+        return []
+    try:
+        rows = connection.execute(
+            f"SELECT {', '.join(selected)} FROM storage_generation_attempts "
+            'WHERE conversation_id = ?', (conv_id,)).fetchall()
+    except sqlite3.Error:
+        return []
+    return [value for row in rows for value in row if value]
+
+
+class _LogAttribution:
+    """Which log lines are one conversation's, judged by whole ids.
+
+    A line is the conversation's when it names the whole ID as a standalone
+    token. A line written before whole-id logging may name only the ID's first
+    ``LEGACY_SHORT_ID_CHARS`` characters, which other conversations share (every
+    Worker id starts with ``worker-``); it is kept only when one of its run
+    tokens is one of ``runs``, else omitted and counted. When ``runs`` is
+    complete, a kept line whose run tokens name another run's whole attempt id
+    and none of ``runs`` (another conversation's task acting on this one) is
+    marked ``OTHER_RUN_MARK``; an incomplete set cannot tell another
+    conversation's run from an unread turn's.
     """
-    token = (rf'(?<![0-9A-Za-z]){re.escape(conv_id[:LOG_SHORT_ID_CHARS])}'
-             r'(?![0-9A-Za-z])')
-    if len(conv_id) <= LOG_SHORT_ID_CHARS:
-        return token
-    return f'{re.escape(conv_id)}|{token}'
+
+    def __init__(self, conv_id: str, runs=(), *, runs_complete: bool = True):
+        self.runs = frozenset(run for value in runs for run in _run_ids(value))
+        self.runs_complete = runs_complete
+        self.legacy_tags = frozenset(
+            run[:LEGACY_SHORT_ID_CHARS] for run in self.runs)
+        self.prefix = conv_id[:LEGACY_SHORT_ID_CHARS]
+        self.needle = self.prefix.encode('utf-8')
+        self.whole = re.compile(
+            rf'(?<![0-9A-Za-z]){re.escape(conv_id)}(?![0-9A-Za-z])')
+        self.legacy = None
+        if len(conv_id) > LEGACY_SHORT_ID_CHARS:
+            self.legacy = re.compile(
+                rf'(?<![0-9A-Za-z]){re.escape(self.prefix)}(?![0-9A-Za-z])')
+
+    def _relations(self, line: str) -> set[str]:
+        relations = set()
+        for match in _LOG_RUN_TOKEN.finditer(line):
+            token = next(group for group in match.groups() if group is not None)
+            for run in _run_ids(token.rstrip(':.')):
+                if run in self.runs or (len(run) == LEGACY_SHORT_ID_CHARS
+                                        and run in self.legacy_tags):
+                    relations.add('own')
+                elif _ATTEMPT_UUID.fullmatch(run):
+                    relations.add('other')
+        return relations
+
+    def classify(self, line: str) -> tuple[str, str] | None:
+        """``('kept', shown line)``, ``('omitted', line)`` or ``None`` (not ours)."""
+        if self.whole.search(line):
+            if self.runs_complete and self._relations(line) == {'other'}:
+                return 'kept', OTHER_RUN_MARK + line
+            return 'kept', line
+        if self.legacy is not None and self.legacy.search(line):
+            if 'own' in self._relations(line):
+                return 'kept', line
+            return 'omitted', line
+        return None
+
+
+def _attribution_note(lines: list[str], omitted: int) -> str:
+    flagged = sum(line.startswith(OTHER_RUN_MARK) for line in lines)
+    note = f'; {flagged} {OTHER_RUN_MARK.rstrip(" |")}' if flagged else ''
+    if omitted:
+        note += f'; {omitted} legacy short-ID line(s) omitted'
+    return note
 
 
 def _scan_logs(conv_id: str, cap: int, log_dir: Path | None = None,
                window: tuple[float, float] | None = None,
-               log_match: re.Pattern | None = None,
+               log_match: re.Pattern | None = None, runs=(),
+               runs_complete: bool = True,
                ) -> list[tuple[str, list[str] | None]]:
-    """Per scanned log file, its report header and last ``cap`` matching lines.
+    """Per scanned log file, its report header and last ``cap`` attributed lines.
 
+    Attribution follows ``_LogAttribution`` over ``runs`` (the conversation's
+    attempt or task ids, ``runs_complete`` when no turn went unread); the
+    header counts marked and omitted lines.
     ``log_match`` filters the conversation's lines before the cap. An
     unreadable file yields its error as the header and ``None`` lines.
     """
@@ -1096,31 +1222,39 @@ def _scan_logs(conv_id: str, cap: int, log_dir: Path | None = None,
     from lib.logging_pkg.log_record_values import text_value
 
     directory = LOG_DIR if log_dir is None else log_dir
-    prefix = conv_id[:LOG_SHORT_ID_CHARS]
-    pattern = _conversation_log_pattern(conv_id)
-    text_pattern = re.compile(pattern)
-    byte_pattern = re.compile(pattern.encode('utf-8'))
-    needle = prefix.encode('utf-8')
+    attribution = _LogAttribution(conv_id, runs, runs_complete=runs_complete)
+
+    def scan(lines) -> tuple[list[str], int]:
+        kept, omitted = deque(maxlen=cap), 0
+        for line in lines:
+            verdict = attribution.classify(line)
+            if verdict is None or (log_match is not None
+                                   and not log_match.search(line)):
+                continue
+            if verdict[0] == 'omitted':
+                omitted += 1
+            else:
+                kept.append(verdict[1])
+        return [text_value(line, max_chars=16_384) for line in kept], omitted
+
+    def rotated_lines(handle):
+        for raw in handle:
+            if attribution.needle in raw:
+                yield raw.decode('utf-8', errors='replace').rstrip('\r\n')
+
     sections = []
     for name in ('app.log', 'access.log'):
         for rotated in _rotated_logs(directory, name, window):
-            kept = deque(maxlen=cap)
             try:
                 with rotated.open('rb') as handle:
-                    for raw in handle:
-                        if needle in raw and byte_pattern.search(raw) and (
-                                log_match is None or log_match.search(
-                                    raw.decode('utf-8', errors='replace').rstrip('\r\n'))):
-                            kept.append(raw)
+                    kept, omitted = scan(rotated_lines(handle))
             except OSError as exc:
                 sections.append((f'{rotated.name}: unreadable: {exc}', None))
                 continue
             sections.append((
                 f'--- {rotated.name}: {len(kept)} line(s) '
-                '(rotation overlapping the conversation lifetime)',
-                [text_value(raw.decode('utf-8', errors='replace').rstrip('\r\n'),
-                            max_chars=16_384)
-                 for raw in kept]))
+                '(rotation overlapping the conversation lifetime)'
+                + _attribution_note(kept, omitted), kept))
         path = directory / name
         if not path.is_file():
             continue
@@ -1133,15 +1267,11 @@ def _scan_logs(conv_id: str, cap: int, log_dir: Path | None = None,
         except OSError as exc:
             sections.append((f'{name}: unreadable: {exc}', None))
             continue
-        matches = [
-            text_value(line, max_chars=16_384)
-            for line in chunk.splitlines()
-            if prefix in line and text_pattern.search(line)
-            and (log_match is None or log_match.search(line))
-        ]
-        matches = matches[-cap:]
-        sections.append((f'--- {name}: {len(matches)} line(s) '
-                         f'(last {LOG_TAIL_BYTES // 1024 // 1024} MiB)', matches))
+        kept, omitted = scan(line for line in chunk.splitlines()
+                             if attribution.prefix in line)
+        sections.append((f'--- {name}: {len(kept)} line(s) '
+                         f'(last {LOG_TAIL_BYTES // 1024 // 1024} MiB)'
+                         + _attribution_note(kept, omitted), kept))
     return sections
 
 
@@ -2044,7 +2174,7 @@ def main(argv: list[str] | None = None) -> int:
                                if key != 'messages'}
         payload['messages'] = document.get('messages') or []
         payload.update((key, collected[key]) for key in (
-            'anomalies', 'compactionArchives', 'logs', 'contextInjections')
+            'anomalies', 'compactionArchives', 'logs', 'logFiles', 'contextInjections')
             if key in collected)
     json.dump(payload, sys.stdout, ensure_ascii=False, default=str)
     sys.stdout.write('\n')
@@ -2096,6 +2226,7 @@ def _inspect(parser: argparse.ArgumentParser, args: argparse.Namespace,
         parser.error('turn range flags require the application API diagnostic source')
     conv_id = args.conv_id
     anomalies: list[dict] = []
+    attempt_ids: list[str] = []
     if args.api_url:
         try:
             token = os.environ.get(args.api_token_env) if args.api_token_env else None
@@ -2172,6 +2303,7 @@ def _inspect(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 archives = _load_compaction_archives(
                     connection, conv_id, int(owner))
                 anomalies = _load_anomalies(connection, conv_id, document)
+                attempt_ids = _load_attempt_ids(connection, conv_id)
         except (OSError, sqlite3.Error, StorageError) as exc:
             print(f'error: cannot inspect database {db_path}: {exc}', file=sys.stderr)
             print('hint: verify --db, file permissions, and SQLite integrity; '
@@ -2295,10 +2427,21 @@ def _inspect(parser: argparse.ArgumentParser, args: argparse.Namespace,
         log_root = args.logs_dir if args.logs_dir is not None else base / 'logs'
         print('\n== Logs ==' + (f' (--log-match {args.log_match.pattern})'
                                 if args.log_match is not None else ''))
+        runs = _conversation_runs(document, attempt_ids)
+        unread = document.get('diagnostic_unread_count') or 0
+        runs_complete = not unread and not document.get('diagnostic_incomplete')
+        print(f'  attribution: whole conversation ID; {len(runs)} run(s) named by the '
+              + ('transcript' if not unread else f'read turns ({unread} unread)')
+              + (' and attempt rows' if attempt_ids else '')
+              + f'; a legacy {LEGACY_SHORT_ID_CHARS}-character-ID line needs one of them; '
+              + (f'"{OTHER_RUN_MARK.rstrip(" |")}" marks a line naming only other runs'
+                 if runs_complete else 'other runs are not marked until every turn is read'))
         collected['logs'] = []
+        collected['logFiles'] = []
         for header, matched in _scan_logs(conv_id, max(1, args.logs), log_root,
                                           window=_conversation_window(metadata),
-                                          log_match=args.log_match):
+                                          log_match=args.log_match, runs=runs,
+                                          runs_complete=runs_complete):
             print(header)
             if matched is None and args.json:
                 # The report is discarded; an unreadable log must not vanish.
@@ -2306,6 +2449,7 @@ def _inspect(parser: argparse.ArgumentParser, args: argparse.Namespace,
             for line in matched or ():
                 print(line)
             collected['logs'].extend(matched or ())
+            collected['logFiles'].append(header)
     incomplete = document.get('diagnostic_incomplete') or live is not None or best_effort
     return 3 if incomplete else 0
 

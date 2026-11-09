@@ -577,6 +577,15 @@ def tool_result_observation(
         observation["summary"] = content_text
         return observation
 
+    if isinstance(parsed.get("recovery"), dict):
+        # Every qualified sparse envelope shares the same recovery defaults,
+        # including errors whose diagnostics return below.
+        recovery = dict(parsed["recovery"])
+        recovery.setdefault("kind", "source")
+        recovery.setdefault("observation", "new")
+        recovery.setdefault("historicalRecovery", False)
+        observation["recovery"] = recovery
+
     if projection_kind == "error":
         if isinstance(parsed.get('items'), list):
             observation['items'] = parsed['items']
@@ -596,15 +605,6 @@ def tool_result_observation(
     observation["summary"] = str(parsed.get("summary") or "")
     if isinstance(parsed.get("items"), list):
         observation["items"] = parsed["items"]
-    if isinstance(parsed.get("recovery"), dict):
-        # The sparse projection omits constant plumbing keys; restore the
-        # class-level defaults so the server-side observation keeps the
-        # complete recovery record.
-        recovery = dict(parsed["recovery"])
-        recovery.setdefault("kind", "source")
-        recovery.setdefault("observation", "new")
-        recovery.setdefault("historicalRecovery", False)
-        observation["recovery"] = recovery
     observation["artifactRef"] = str(
         parsed.get("artifactRef") or observation["artifactRef"])
     observation["cursor"] = str(

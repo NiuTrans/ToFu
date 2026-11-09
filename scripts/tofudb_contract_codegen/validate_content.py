@@ -181,6 +181,8 @@ def validate_raw_archives(raw_archives) -> None:
         or raw_archives.get("conversationStatsNamespace")
         != "raw_archive_conversation_stats"
         or raw_archives.get("ownerAgeIndexNamespace") != "raw_archives_by_owner_created"
+        or raw_archives.get("ownerBodyAgeIndexNamespace")
+        != "raw_archive_bodies_by_owner_created"
         or raw_archives.get("ownerAgeBackfillNamespace")
         != "raw_archive_owner_age_backfill"
         or raw_archives.get("maximumStoredBytes") != 16 * 1024 * 1024

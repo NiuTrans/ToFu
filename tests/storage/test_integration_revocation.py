@@ -195,6 +195,44 @@ def test_reregistration_cannot_replace_revoked_origin(storage, outcome):
     assert _command(storage, 'claim_next', now=1000.0) is None
 
 
+@pytest.mark.parametrize('outcome', _DENIED_OUTCOMES)
+@pytest.mark.parametrize('legacy', (False, True))
+def test_next_executor_generation_reopens_a_denial_and_fences_the_stale_one(
+        storage, outcome, legacy):
+    """A denial binds the attempt that recorded it, never the work id's later attempts.
+
+    ``legacy`` is a receipt recorded before receipts named their generation.
+    """
+    identity = _ready(storage, origin={'source': 'task'})
+    first = {} if legacy else {'executorTaskId': 'attempt-1'}
+    _meta(storage, identity, {'delivery': {
+        'taskOutcome': outcome, 'state': 'preserved', **first}})
+    denied = _get(storage, identity)['origin']['delivery']
+
+    # Same generation: the denial stays final, exactly as before generations.
+    for delivery in ({**first, 'taskOutcome': 'completed', 'state': 'pending'},
+                     {**first, 'taskOutcome': '', 'state': 'working'}):
+        assert _meta(storage, identity, {'delivery': delivery})['origin']['delivery'] == denied
+    # Another generation may only open itself as a fresh working receipt.
+    for delivery in ({'executorTaskId': 'attempt-2', 'taskOutcome': 'completed', 'state': 'pending'},
+                     {'executorTaskId': 'attempt-2', 'taskOutcome': outcome, 'state': 'working'},
+                     {'executorTaskId': 'attempt-2', 'state': 'blocked'},
+                     {'executorTaskId': '', 'taskOutcome': '', 'state': 'working'}):
+        assert _meta(storage, identity, {'delivery': delivery})['origin']['delivery'] == denied
+    opened = {'executorTaskId': 'attempt-2', 'taskOutcome': '', 'state': 'working'}
+    assert _meta(storage, identity, {'delivery': opened})['origin']['delivery'] == opened
+    assert _get(storage, identity)['state'] == 'checkpointed'
+
+    # The previous generation's late writers no longer own the receipt.
+    for delivery in ({**denied, 'reason': 'late preservation'},
+                     {**first, 'taskOutcome': 'completed', 'state': 'pending'}):
+        assert _meta(storage, identity, {'delivery': delivery})['origin']['delivery'] == opened
+    settled = {**opened, 'taskOutcome': 'completed', 'state': 'pending'}
+    assert _meta(storage, identity, {'delivery': settled})['origin']['delivery'] == settled
+    _command(storage, 'submit', **identity, now=30.0)
+    assert _get(storage, identity)['state'] == 'ready'
+
+
 @pytest.mark.parametrize('origin', (None, {'source': 'manual'}, {'delivery': {}}))
 def test_manual_workspace_without_delivery_can_submit_retry_and_claim(storage, origin):
     identity = _ready(storage, origin=origin)

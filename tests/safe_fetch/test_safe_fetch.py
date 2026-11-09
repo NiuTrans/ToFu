@@ -91,9 +91,9 @@ def test_adapter_rechecks_each_concrete_redirect_hop(monkeypatch):
     monkeypatch.setattr('lib.safe_fetch.socket.getaddrinfo', lambda *a, **k: [
         (None, None, None, None, ('93.184.216.34', 443)),
     ])
-    sentinel = object()
+    sentinel = requests.Response()
     with patch('requests.adapters.HTTPAdapter.send', return_value=sentinel):
-        assert adapter.send(public) is sentinel
+        assert adapter.send(public, proxies={'no_proxy': '*'}) is sentinel
         with pytest.raises(SafeFetchError, match='blocked IP'):
             adapter.send(private)
 

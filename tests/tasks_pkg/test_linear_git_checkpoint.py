@@ -23,6 +23,8 @@ from lib import linear_git_checkpoint as checkpoint
 # serial: git serialization timing under parallel lanes — timing/resource-sensitive and cannot safely
 # overlap the parallel unit lane (TESTING_STRATEGY serial policy).
 pytestmark = [pytest.mark.unit, pytest.mark.serial]
+
+_AUDIT_SYNTHETIC_REPO_PATHS = {'tests/test_calc.py'}
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ['git', '-c', 'user.name=test', '-c', 'user.email=test@tofu.local',
@@ -298,8 +300,11 @@ def test_docs_task_cannot_publish_earlier_unverified_code(repository: Path):
     assert _stable(repository) == baseline
 
 
-def test_gate_rewrite_remains_dirty_and_never_moves_stable(
+def test_gate_rewrite_is_refused_and_never_reaches_the_checkout(
         repository: Path, monkeypatch: pytest.MonkeyPatch):
+    """The gate runs on a private checkout of the captured bytes: a command that
+    rewrites tracked files there invalidates its own verification, and the
+    shared checkout never sees the rewrite."""
     command = (
         f'{sys.executable} -c "from pathlib import Path; '
         "Path('README.md').write_text('gate rewrite\\n')\""
@@ -312,12 +317,10 @@ def test_gate_rewrite_remains_dirty_and_never_moves_stable(
 
     row = result['repositories'][0]
     assert row['verification'] == 'workspace_changed'
-    assert _stable(repository) == baseline
-    assert (repository / 'README.md').read_text(encoding='utf-8') == \
-        'gate rewrite\n'
-    assert 'README.md' in _git(
-        repository, 'status', '--porcelain').stdout
-    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'base\n'
+    assert 'rewrote tracked files' in row['verificationDetail']
+    assert _stable(repository) == baseline == _head(repository)
+    assert (repository / 'README.md').read_text(encoding='utf-8') == 'base\n'
+    assert _git(repository, 'status', '--porcelain').stdout == ' M app.py\n'
 
 
 def test_unrelated_head_commit_is_carried_forward_during_capture(
@@ -384,8 +387,14 @@ def test_conflicting_head_commit_refuses_capture_and_preserves_workspace(
     assert checkpoint._revision(repository, checkpoint.STABLE_REF) != _head(repository)
 
 
-def test_bytes_written_during_capture_survive_for_next_checkpoint(
+def test_bytes_written_during_capture_stay_dirty_for_the_next_checkpoint(
         repository: Path, monkeypatch: pytest.MonkeyPatch):
+    """A concurrent write never blocks publication: the captured bytes publish,
+    and bytes written after capture stay dirty until the next checkpoint."""
+    monkeypatch.setenv(
+        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
+        f'{sys.executable} -c pass',
+    )
     real_stage = checkpoint._stage_working_tree
     mutated = False
 
@@ -405,23 +414,123 @@ def test_bytes_written_during_capture_survive_for_next_checkpoint(
 
     row = first['repositories'][0]
     assert row['status'] == 'committed'
-    assert row['verification'] == 'workspace_changed'
-    captured = row['checkpointSha']
-    assert _git(repository, 'show', f'{captured}:app.py').stdout == 'VALUE = 5\n'
-    assert _git(repository, 'show', f'{captured}:README.md').stdout == 'base\n'
+    assert row['verification'] == 'passed' and row['stableUpdated'] is True
+    assert _head(repository) == _stable(repository) == row['checkpointSha']
+    assert _git(repository, 'show', 'HEAD:app.py').stdout == 'VALUE = 5\n'
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'base\n'
     assert (repository / 'README.md').read_text(encoding='utf-8') == \
         'written after capture\n'
-    assert 'README.md' in _git(repository, 'status', '--porcelain').stdout
+    assert _git(repository, 'status', '--porcelain').stdout == ' M README.md\n'
 
     monkeypatch.setattr(checkpoint, '_stage_working_tree', real_stage)
-    monkeypatch.setenv(
-        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
-        f'{sys.executable} -c pass',
-    )
     second = _settle(repository, _task('task-capture-residue'))
-    assert second['repositories'][0]['status'] == 'committed'
+    assert second['repositories'][0]['verification'] == 'passed'
     assert _git(repository, 'show', 'HEAD:README.md').stdout == \
         'written after capture\n'
+    assert _git(repository, 'status', '--porcelain').stdout == ''
+
+
+def test_writes_during_verification_never_block_publication(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    """Other writers keep editing the shared checkout while the gate runs."""
+    monkeypatch.setenv(
+        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD', f'{sys.executable} -c pass')
+    real_gate = checkpoint._run_verification_gate
+
+    def _gate_while_a_writer_edits(root, base, probe, paths, task):
+        (root / 'NOTES.md').write_text('a writer keeps working\n', encoding='utf-8')
+        (root / 'app.py').write_text('VALUE = 7\n', encoding='utf-8')
+        return real_gate(root, base, probe, paths, task)
+
+    monkeypatch.setattr(checkpoint, '_run_verification_gate', _gate_while_a_writer_edits)
+    (repository / 'app.py').write_text('VALUE = 6\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-busy-checkout'))['repositories'][0]
+
+    assert row['verification'] == 'passed' and row['stableUpdated'] is True
+    assert _git(repository, 'show', 'HEAD:app.py').stdout == 'VALUE = 6\n'
+    assert (repository / 'app.py').read_text(encoding='utf-8') == 'VALUE = 7\n'
+    assert _git(repository, 'status', '--porcelain').stdout == ' M app.py\n?? NOTES.md\n'
+
+
+def test_gate_covers_the_captured_delta_not_the_whole_stable_lag(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    """Commits landed since stable arrived with their own verification; the gate
+    sees only what this checkpoint adds, so a lagging stable never grows it."""
+    assert _settle(repository, _task('task-activate'))['status'] == 'no_changes'
+    (repository / 'legacy.py').write_text('LEGACY = True\n', encoding='utf-8')
+    _git(repository, 'add', 'legacy.py')
+    _git(repository, 'commit', '-qm', 'landed after stable')
+    probe = ("import subprocess, sys; changed = subprocess.run(['git', 'diff', "
+             "'--name-only', sys.argv[1], sys.argv[2]], capture_output=True, text=True, "
+             "check=True).stdout.split(); sys.exit(0 if changed == ['app.py'] else 1)")
+    monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
+                       f'{sys.executable} -c "{probe}" {{base}} {{target}}')
+    (repository / 'app.py').write_text('VALUE = 10\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-after-landing'))['repositories'][0]
+
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert row['stableUpdated'] is True
+    assert _stable(repository) == _head(repository) == row['checkpointSha']
+
+
+def test_branch_moved_over_other_files_during_verification_is_carried(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    real_gate = checkpoint._run_verification_gate
+
+    def _gate_while_a_landing_arrives(root, base, probe, paths, task):
+        verdict = real_gate(root, base, probe, paths, task)
+        (root / 'landed.txt').write_text('LANDED = True\n', encoding='utf-8')
+        _git(root, 'add', 'landed.txt')
+        _git(root, 'commit', '-qm', 'landing during verification')
+        return verdict
+
+    monkeypatch.setattr(checkpoint, '_run_verification_gate', _gate_while_a_landing_arrives)
+    (repository / 'README.md').write_text('checkpoint bytes\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-carried'))['repositories'][0]
+
+    assert row['verification'] == 'passed' and row['stableUpdated'] is True
+    assert row['publishedSha'] == _head(repository) == _stable(repository)
+    assert row['publishedSha'] != row['checkpointSha']
+    assert _git(repository, 'log', '-1', '--format=%s', 'HEAD^').stdout == \
+        'landing during verification\n'
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'checkpoint bytes\n'
+    assert _git(repository, 'status', '--porcelain').stdout == ''
+
+
+def test_branch_moved_over_the_same_file_defers_to_the_next_checkpoint(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    real_gate = checkpoint._run_verification_gate
+    landed = False
+
+    def _gate_while_a_landing_rewrites_the_file(root, base, probe, paths, task):
+        nonlocal landed
+        verdict = real_gate(root, base, probe, paths, task)
+        if not landed:
+            landed = True
+            (root / 'README.md').write_text('landed version\n', encoding='utf-8')
+            _git(root, 'add', 'README.md')
+            _git(root, 'commit', '-qm', 'landing over the same file')
+            (root / 'README.md').write_text('checkpoint bytes\n', encoding='utf-8')
+        return verdict
+
+    monkeypatch.setattr(checkpoint, '_run_verification_gate',
+                        _gate_while_a_landing_rewrites_the_file)
+    (repository / 'README.md').write_text('checkpoint bytes\n', encoding='utf-8')
+
+    first = _settle(repository, _task('task-overlap'))['repositories'][0]
+
+    assert first['verification'] == 'workspace_changed'
+    assert 'README.md' in first['verificationDetail']
+    assert first['stableUpdated'] is False
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'landed version\n'
+    assert (repository / 'README.md').read_text(encoding='utf-8') == 'checkpoint bytes\n'
+
+    second = _settle(repository, _task('task-after-overlap'))['repositories'][0]
+    assert second['verification'] == 'passed' and second['stableUpdated'] is True
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'checkpoint bytes\n'
     assert _git(repository, 'status', '--porcelain').stdout == ''
 
 
@@ -826,3 +935,210 @@ def test_linear_gate_policy_mutation_refuses_promotion(repository):
     assert row['verification'] == 'failed'
     assert 'policy changed' in row['verificationDetail']
     assert _stable(repository) == baseline
+
+
+def test_staged_entry_of_another_writer_never_blocks_other_paths(repository: Path):
+    (repository / 'README.md').write_text('staged bytes\n')
+    _git(repository, 'add', 'README.md')
+    (repository / 'README.md').write_text('working bytes\n')
+    (repository / 'NOTES.md').write_text('settled notes\n')
+
+    row = _settle(repository, _task('staged-and-settled'))['repositories'][0]
+
+    assert row['verification'] == 'passed' and row['stableUpdated'] is True
+    assert row['indexSynchronized'] is False
+    assert _git(repository, 'show', ':README.md').stdout == 'staged bytes\n'
+    assert _git(repository, 'show', ':NOTES.md').stdout == 'settled notes\n'
+    assert _git(repository, 'show', 'HEAD:NOTES.md').stdout == 'settled notes\n'
+    assert _git(repository, 'status', '--porcelain').stdout == 'MM README.md\n'
+
+
+# The selector landing verification loads from the verified tree
+# (lib/project_mod/landing_verification.py): it attributes a failing gate.
+SELECTOR = '''\
+import ast, os, sys
+
+def build_index(tests_dir, cache_path=None):
+    index = {}
+    for name in sorted(os.listdir(tests_dir)):
+        if name.startswith('test_') and name.endswith('.py'):
+            with open(os.path.join(tests_dir, name)) as handle:
+                tree = ast.parse(handle.read())
+            refs = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    refs.add(node.module.replace('.', '/') + '.py')
+            index['tests/' + name] = {'refs': sorted(refs)}
+    return index
+
+def select_tests(index, changed):
+    chosen = {test: 'direct' for test, record in index.items()
+              if test in changed or set(record['refs']) & set(changed)}
+    return set(chosen), chosen
+
+def build_pytest_command(existing, jobs):
+    return [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', *existing, '-q']
+'''
+
+
+def _commit_python_project(repo: Path, monkeypatch: pytest.MonkeyPatch, tests: str) -> None:
+    for relative, text in (('scripts/test_select.py', SELECTOR),
+                           ('pkg/calc.py', 'def scale(x):\n    return x * 2\n'),
+                           ('tests/test_calc.py', tests)):
+        (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repo / relative).write_text(text, encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-qm', 'python project')
+    monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
+                       f'{sys.executable} -m pytest -q -p no:cacheprovider tests')
+
+
+def test_gate_failures_already_on_the_base_do_not_block_publication(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    _commit_python_project(repository, monkeypatch,
+                           'from pkg.calc import scale\n\ndef test_scale():\n'
+                           '    assert scale(2) == 4\n\ndef test_known_broken():\n'
+                           '    assert scale(0) == 1\n')
+    (repository / 'pkg' / 'calc.py').write_text(
+        'def scale(x):\n    return x + x\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-preexisting-failure'))['repositories'][0]
+
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert 'tests/test_calc.py::test_known_broken' in row['verificationDetail']
+    assert row['stableUpdated'] is True
+    assert _git(repository, 'show', 'HEAD:pkg/calc.py').stdout == \
+        'def scale(x):\n    return x + x\n'
+
+
+def test_gate_failure_this_checkpoint_causes_blocks_publication(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    _commit_python_project(repository, monkeypatch,
+                           'from pkg.calc import scale\n\ndef test_scale():\n'
+                           '    assert scale(2) == 4\n')
+    base = _head(repository)
+    (repository / 'pkg' / 'calc.py').write_text(
+        'def scale(x):\n    return x * 3\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-regression'))['repositories'][0]
+
+    assert row['verification'] == 'failed'
+    assert 'tests/test_calc.py::test_scale' in row['verificationDetail']
+    assert _head(repository) == base
+    assert (repository / 'pkg' / 'calc.py').read_text(encoding='utf-8') == \
+        'def scale(x):\n    return x * 3\n'
+
+
+def test_unfinished_work_of_another_writer_never_blocks_this_tasks_commit(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    from lib.project_mod import integration_radar
+    monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD', f'{sys.executable} -c pass')
+    task = _task('task-own-work')
+    (repository / 'app.py').write_text('VALUE = 11\n', encoding='utf-8')
+    integration_radar.note_writes(task, str(repository), ['app.py'])
+    (repository / 'broken.py').write_text('def unfinished(:\n', encoding='utf-8')
+
+    row = _settle(repository, task)['repositories'][0]
+
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert row['wholeWorkspace']['verification'] == 'failed'
+    assert 'broken.py' in row['wholeWorkspace']['verificationDetail']
+    assert row['stableUpdated'] is True
+    assert _git(repository, 'show', 'HEAD:app.py').stdout == 'VALUE = 11\n'
+    assert _git(repository, 'status', '--porcelain').stdout == '?? broken.py\n'
+
+
+def test_declared_own_paths_narrow_a_failed_capture(repository: Path):
+    (repository / 'README.md').write_text('delivered docs\n', encoding='utf-8')
+    (repository / 'broken.py').write_text('def unfinished(:\n', encoding='utf-8')
+
+    result = checkpoint.settle_task_checkpoint(
+        _task('task-delivered'), user_id=7, project_path=str(repository),
+        own_paths=['README.md'])
+
+    row = result['repositories'][0]
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'delivered docs\n'
+    assert _git(repository, 'status', '--porcelain').stdout == '?? broken.py\n'
+
+
+def test_own_paths_retry_still_refuses_the_tasks_own_breakage(repository: Path):
+    from lib.project_mod import integration_radar
+    task = _task('task-own-breakage')
+    base = _head(repository)
+    (repository / 'app.py').write_text('def broken(:\n', encoding='utf-8')
+    integration_radar.note_writes(task, str(repository), ['app.py'])
+    (repository / 'NOTES.md').write_text('another writer\n', encoding='utf-8')
+
+    row = _settle(repository, task)['repositories'][0]
+
+    assert row['verification'] == 'failed'
+    assert row['wholeWorkspace']['verification'] == 'failed'
+    assert _head(repository) == base
+    assert (repository / 'app.py').read_text(encoding='utf-8') == 'def broken(:\n'
+
+
+def test_own_paths_retry_rebuilds_generated_outputs_from_its_own_sources(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    from lib.project_mod import generated_integration, integration_radar
+    sections = repository / 'frontend' / 'src' / 'runtime' / 'sections'
+    output = repository / 'frontend' / 'src' / 'runtime' / 'app-runtime.js'
+    sections.mkdir(parents=True)
+    (sections / 'panel.js').write_text('export const panel = 1;\n', encoding='utf-8')
+    output.write_text('// composed 1\n', encoding='utf-8')
+    _git(repository, 'add', '-A')
+    _git(repository, 'commit', '-qm', 'runtime')
+    monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD', f'{sys.executable} -c pass')
+    inputs = []
+
+    def build_from_own_sources(source_root, families, files, *, committed):
+        inputs.append((sorted(families), committed, files.get('frontend/src/runtime/sections/panel.js'),
+                       'frontend/src/runtime/sections/other.js' in files))
+        return {'frontend/src/runtime/app-runtime.js': b'// composed from own sources\n'}
+
+    monkeypatch.setattr(generated_integration, 'build_outputs', build_from_own_sources)
+    task = _task('task-runtime')
+    (sections / 'panel.js').write_text('export const panel = 2;\n', encoding='utf-8')
+    integration_radar.note_writes(task, str(repository), ['frontend/src/runtime/sections/panel.js'])
+    (sections / 'other.js').write_text('export const other = 1;\n', encoding='utf-8')
+    output.write_text('// composed from every writer\n', encoding='utf-8')
+    (repository / 'broken.py').write_text('def unfinished(:\n', encoding='utf-8')
+
+    row = _settle(repository, task)['repositories'][0]
+
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert inputs == [(['runtime'], True, b'export const panel = 2;\n', False)]
+    assert _git(repository, 'show', 'HEAD:frontend/src/runtime/app-runtime.js').stdout == \
+        '// composed from own sources\n'
+    assert _git(repository, 'show', 'HEAD:frontend/src/runtime/sections/panel.js').stdout == \
+        'export const panel = 2;\n'
+    assert output.read_text(encoding='utf-8') == '// composed from every writer\n'
+    assert sorted(_git(repository, 'status', '--porcelain').stdout.splitlines()) == [
+        ' M frontend/src/runtime/app-runtime.js', '?? broken.py',
+        '?? frontend/src/runtime/sections/other.js']
+
+
+def test_gate_rewrite_check_outlasts_a_wall_clock_deadline(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    """`git status` over a large checkout on a loaded volume is slow, not stuck.
+
+    On the 13,000-file shared checkout the gate's rewrite check exceeded a 30 s
+    deadline under load, so no checkpoint could publish (2026-11-07 dry run).
+    """
+    monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD', f'{sys.executable} -c pass')
+    original = subprocess.run
+
+    def status_deadline_expires(argv, *args, **kwargs):
+        if (kwargs.get('timeout') is not None and argv
+                and Path(str(argv[0])).name.startswith('git') and 'status' in argv):
+            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', status_deadline_expires)
+    (repository / 'app.py').write_text('VALUE = 13\n', encoding='utf-8')
+
+    row = _settle(repository, _task('task-slow-status'))['repositories'][0]
+
+    assert row['verification'] == 'passed', row['verificationDetail']
+    assert row['stableUpdated'] is True
+    assert _git(repository, 'show', 'HEAD:app.py').stdout == 'VALUE = 13\n'

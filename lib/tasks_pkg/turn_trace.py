@@ -36,9 +36,11 @@ Row shapes
        attrs, budgetMs?, overBudget?, truncated?}``
     Summary: ``{totalMs, llmMs, toolMs, waitMs, compactionMs,
        approvalWaitMs, flowStepMs, orchestrationMs, unattributedMs, ttftMs,
-       overBudget, admissionWaitMs, retryWaitMs, spawnWaitMs, startupMs,
-       roundPrepMs, roundSettleMs, finalizeMs}`` — the wait and orchestration
-       splits come from the same disjoint fold (never extra buckets).
+       failedAttemptMs, overBudget, admissionWaitMs, retryWaitMs,
+       spawnWaitMs, startupMs, roundPrepMs, roundSettleMs, finalizeMs}`` —
+       the wait and orchestration splits come from the same disjoint fold
+       (never extra buckets); ``ttftMs``/``failedAttemptMs`` are
+       informational first-token windows inside ``llmMs``.
 
 Terminal settlement (``finalize_trace_projection``) also logs ONE
 ``[TurnTraceSummary]`` line per task from that same fold, including the
@@ -57,7 +59,7 @@ import time
 
 from lib.agent_core.events import Phase
 from lib.conversation_sync.settled_rows import settle
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.orchestration.message_compat import is_flow_event_type
 from lib.tasks_pkg.turn_trace_spans import (
     TraceSpanFold,
@@ -795,7 +797,7 @@ def read_persisted_task_trace(task_id, *, user_id):
             })
     except Exception as exc:
         logger.warning('[TurnTrace] durable trace read failed task=%s: %s',
-                       str(task_id)[:8], exc)
+                       task_log_tag(task_id), exc)
         return None
     if not isinstance(result, Mapping):
         return None
@@ -865,7 +867,7 @@ def _log_trace_summary(task, task_id, document, ledger):
             'compactionMs=%d approvalWaitMs=%d unattributedMs=%d ttftMs=%d '
             'rounds=%d spawnWaitMs=%d flowStepMs=%d orchestrationMs=%d '
             'startupMs=%d roundPrepMs=%d roundSettleMs=%d finalizeMs=%d '
-            'coverage=%s',
+            'failedAttemptMs=%d coverage=%s',
             task_id or '-', task.get('convId') or '-',
             document.get('status') or '-', ms(summary.get('totalMs')),
             ms(summary.get('llmMs')), ms(summary.get('toolMs')),
@@ -876,7 +878,7 @@ def _log_trace_summary(task, task_id, document, ledger):
             ms(summary.get('spawnWaitMs')), ms(summary.get('flowStepMs')),
             ms(summary.get('orchestrationMs')), ms(summary.get('startupMs')),
             ms(summary.get('roundPrepMs')), ms(summary.get('roundSettleMs')),
-            ms(summary.get('finalizeMs')),
+            ms(summary.get('finalizeMs')), ms(summary.get('failedAttemptMs')),
             document.get('coverage') or '-')
     except Exception as e:
         # Diagnostic sinks cannot alter fold/settlement outcomes.
@@ -913,10 +915,28 @@ def fold_task_trace(
         try:
             emit = logger.info if elapsed_ms >= 1000 or outcome != 'done' else logger.debug
             emit('[TurnTraceTiming] task=%s status=%s elapsed_ms=%.1f',
-                 str(task_id)[:8], outcome, elapsed_ms)
+                 task_log_tag(task_id), outcome, elapsed_ms)
         except Exception as e:
             # Diagnostic sinks cannot alter fold/settlement outcomes.
             logger.debug('[TurnTraceTiming] emit dropped: %s', e)
+
+
+def _first_token_summary(spans):
+    """``(ttftMs, failedAttemptMs)``: informational unions inside llmMs.
+
+    A window counts as TTFT only when its attempt showed the first token (or
+    is still waiting live); a failed, retried or stopped attempt's
+    pre-first-token wait is failedAttemptMs. A window whose first token was
+    never observed counts in neither.
+    """
+    windows = [span for span in spans if span['kind'] == 'llm_ttft']
+    return (
+        _union_length([(span['tStart'], span['tEnd']) for span in windows
+                       if not span['attrs'].get('failedAttempt')
+                       and not span['attrs'].get('firstTokenUnobserved')]),
+        _union_length([(span['tStart'], span['tEnd']) for span in windows
+                       if span['attrs'].get('failedAttempt')]),
+    )
 
 
 def _trace_gaps(spans, t0, t1):
@@ -1134,9 +1154,7 @@ def _fold_task_trace(
     summary['totalMs'] = eff_end - t0
     if ledger_out is not None:
         ledger_out.update(kindMs=dict(attribution), rounds=len(round_order))
-    ttft_ivs = [(s['tStart'], s['tEnd']) for s in spans
-                if s['kind'] == 'llm_ttft']
-    summary['ttftMs'] = _union_length(ttft_ivs)  # informational ⊂ llmMs
+    summary['ttftMs'], summary['failedAttemptMs'] = _first_token_summary(spans)
     over = []
     for s in spans:
         if s.get('overBudget'):

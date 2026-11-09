@@ -1,11 +1,14 @@
 """lib/optimizer/actions/block_search_domain.py — Add/remove a domain in
-server_config.json::search.skip_domains.
+server_config.json::search.fetch_skip_domains.
 
 This is the ONE auto-apply action in v1.  It:
   * Loads data/config/server_config.json
-  * Adds (or removes) the target domain under ``search.skip_domains``
+  * Adds (or removes) the target domain under ``search.fetch_skip_domains``:
+    a fetch-quality skip (tofu-search spends no anonymous fetch on it), never
+    an operator ban — search listings, the browser tools and ``run_command``
+    still reach the domain (``lib.search.saved_domain_lists``)
   * Persists the file atomically
-  * Calls ``lib.reload_config()`` so ``lib.SKIP_DOMAINS`` updates live
+  * Calls ``lib.reload_config()`` so ``lib.FETCH_SKIP_DOMAINS`` updates live
   * Emits ``audit_log('optimizer_action', ...)``
 
 All mutations are reversible — ``revert()`` removes the domain again.
@@ -18,6 +21,11 @@ from lib.config_dir import config_path as _config_path
 from lib.identity import require_user_id
 from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
+from lib.search.saved_domain_lists import (
+    saved_fetch_skip_domains,
+    saved_skip_domains,
+    store_skip_domains,
+)
 from lib.search.search_settings import normalise_domain as _ss_normalise_domain
 
 logger = get_logger(__name__)
@@ -38,13 +46,13 @@ def _normalise_domain(domain: str) -> str:
 # ══════════════════════════════════════════════════════════
 
 def apply(args: dict, *, owner_user_id: int) -> dict:
-    """Add the target domain to ``search.skip_domains``.
+    """Add the target domain to ``search.fetch_skip_domains``.
 
     Args:
         args: ``{"domain": "<host>", "ttl_days": <int>}``
 
     Returns:
-        Dict with ``domain`` and ``skip_domains_size_after`` for the action log.
+        Dict with ``domain`` and ``fetch_skip_domains_size_after`` for the action log.
 
     Raises:
         ValueError on invalid args; OSError on file write failure.
@@ -66,24 +74,19 @@ def apply(args: dict, *, owner_user_id: int) -> dict:
         if not isinstance(search_cfg, dict):
             search_cfg = {}
             data['search'] = search_cfg
-        current = search_cfg.get('skip_domains')
-        if not isinstance(current, list):
-            # Seed with in-memory defaults so we never shrink the effective set.
-            current = sorted(_lib.SKIP_DOMAINS)
+        current = saved_fetch_skip_domains(search_cfg)
         if domain in current:
             logger.info(
                 '[Optimizer.block_search_domain] %s already present — no-op',
                 domain)
-        else:
-            current.append(domain)
-        search_cfg['skip_domains'] = sorted(set(current))
-        outcome['size'] = len(search_cfg['skip_domains'])
+        search_cfg['fetch_skip_domains'] = sorted(current | {domain})
+        outcome['size'] = len(search_cfg['fetch_skip_domains'])
         return data
 
     update_json_atomic(
         _CONFIG_FILE, _mutate, default={}, strict=True, indent=2)
 
-    # Hot-reload so lib.SKIP_DOMAINS updates without restart
+    # Hot-reload so lib.FETCH_SKIP_DOMAINS updates without restart
     try:
         _lib.reload_config()
     except Exception as e:
@@ -97,21 +100,21 @@ def apply(args: dict, *, owner_user_id: int) -> dict:
         action='block_search_domain',
         domain=domain,
         ttl_days=ttl_days,
-        skip_domains_size_after=outcome['size'],
+        fetch_skip_domains_size_after=outcome['size'],
     )
     logger.info('[Optimizer.block_search_domain] applied domain=%s ttl_days=%d '
-                'skip_domains=%d',
+                'fetch_skip_domains=%d',
                 domain, ttl_days, outcome['size'])
 
     return {
         'domain': domain,
         'ttl_days': ttl_days,
-        'skip_domains_size_after': outcome['size'],
+        'fetch_skip_domains_size_after': outcome['size'],
     }
 
 
 def revert(args: dict, *, owner_user_id: int) -> dict:
-    """Remove the target domain from ``search.skip_domains``."""
+    """Remove the target domain from ``search.fetch_skip_domains``."""
     owner_id = require_user_id(
         owner_user_id, context='optimizer action owner')
     domain = _normalise_domain(str(args.get('domain') or ''))
@@ -127,13 +130,18 @@ def revert(args: dict, *, owner_user_id: int) -> dict:
         search_cfg = data.get('search')
         if not isinstance(search_cfg, dict):
             return None
-        current = search_cfg.get('skip_domains')
-        if not isinstance(current, list) or domain not in current:
+        skips = saved_fetch_skip_domains(search_cfg)
+        # An action applied before the ban/fetch-skip split wrote the ban list;
+        # its expiry must still lift it there.
+        bans = saved_skip_domains(search_cfg)
+        if domain not in skips and domain not in bans:
             return None
-        search_cfg['skip_domains'] = sorted(
-            {item for item in current if item != domain})
+        if domain in skips:
+            search_cfg['fetch_skip_domains'] = sorted(skips - {domain})
+        if domain in bans:
+            store_skip_domains(search_cfg, bans - {domain})
         outcome['reverted'] = True
-        outcome['size'] = len(search_cfg['skip_domains'])
+        outcome['size'] = len(search_cfg.get('fetch_skip_domains') or ())
         return data
 
     update_json_atomic(
@@ -148,12 +156,12 @@ def revert(args: dict, *, owner_user_id: int) -> dict:
         audit_log('optimizer_revert',
                   user_id=owner_id,
                   action='block_search_domain', domain=domain,
-                  skip_domains_size_after=outcome['size'])
+                  fetch_skip_domains_size_after=outcome['size'])
         logger.info('[Optimizer.block_search_domain] reverted domain=%s '
-                    'skip_domains=%d',
+                    'fetch_skip_domains=%d',
                     domain, outcome['size'])
         return {'domain': domain, 'reverted': True,
-                'skip_domains_size_after': outcome['size']}
+                'fetch_skip_domains_size_after': outcome['size']}
 
     logger.info('[Optimizer.block_search_domain] revert no-op: %s not present',
                 domain)
@@ -166,8 +174,9 @@ def revert(args: dict, *, owner_user_id: int) -> dict:
 ACTION = {
     'name': 'block_search_domain',
     'auto_apply': True,
-    'description': ('Add a domain to server_config.search.skip_domains for '
-                    'ttl_days (default 7); auto-reverts on expiry.'),
+    'description': ('Stop fetching a domain\'s pages (server_config.search.'
+                    'fetch_skip_domains) for ttl_days (default 7); auto-reverts '
+                    'on expiry. Search listings and other tools still reach it.'),
     'apply': apply,
     'revert': revert,
     # server_config.json is a personal-computer authority. Distributed mode

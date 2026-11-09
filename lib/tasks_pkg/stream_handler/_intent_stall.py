@@ -142,6 +142,13 @@ def _ordered_rounds(task: dict[str, Any]) -> list:
     return [r for r in raw_rounds if isinstance(r, dict)]
 
 
+def strip_silent_turn_marker(content: str) -> str:
+    """Remove the silence token wherever the answer is delivered or stored."""
+    if not content or SILENT_TURN_MARKER not in content:
+        return content
+    return '' if is_silent_turn(content) else content
+
+
 def strip_end_turn_marker(content: str) -> str:
     """Remove the ``[END_TURN: …]`` control token from user-visible prose.
 

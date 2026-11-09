@@ -209,13 +209,8 @@ def start_deferred_background_services(
     except Exception as exc:
         log.warning('[Server] environment-capability probe failed: %s', exc)
 
-    if owns_request_services:
-        try:
-            from lib.netpath import start_prober
-
-            start_prober()
-        except Exception as exc:
-            log.warning('Failed to start netpath prober: %s', exc)
+    # Outbound route probes are demand-driven and shared by the HTTP layer.
+    # Do not start the retired direct-versus-environment polling worker.
 
     if owns_task_workers:
         try:
@@ -539,6 +534,11 @@ def start_post_ready_catalog_sync(app, *, process_role='all') -> bool:
     return False
 
 
+# The owner whose stop is in progress, so a caller whose own budget ends first
+# can name what was still stopping.
+STOPPING_OWNER_KEY = 'tofu_background_service_stopping'
+
+
 def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
     """Stop process/plugin-owned workers with bounded, idempotent joins."""
     import logging
@@ -564,6 +564,7 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
         try:
             # Plugins are started last and may depend on core owners, so their
             # teardown runs first.
+            extensions[STOPPING_OWNER_KEY] = 'plugin shutdown hooks'
             from lib.app.plugin_registry import run_shutdown_hooks
             stopped += int(run_shutdown_hooks(app) or 0)
         except Exception as exc:
@@ -593,6 +594,9 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
         ('GitHub channel sessions',
          'lib.channels.github.supervisor', 'stop_github_sessions',
          CAPABILITY_SCHEDULED_JOBS),
+        ('bot channel sessions',
+         'lib.channels.bots.supervisor', 'stop_bot_sessions',
+         CAPABILITY_SCHEDULED_JOBS),
         ('database panel maintenance',
          'lib.database_panel.maintenance', 'stop_maintenance',
          CAPABILITY_SCHEDULED_JOBS),
@@ -611,6 +615,7 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
         if not process_role_has(process_role, capability):
             continue
         try:
+            extensions[STOPPING_OWNER_KEY] = label
             module = importlib.import_module(module_name)
             stop = getattr(module, stop_name)
             if stop(timeout=timeout):
@@ -622,6 +627,7 @@ def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
             all_stopped = False
             log.warning('%s shutdown failed: %s', label, exc)
 
+    extensions.pop(STOPPING_OWNER_KEY, None)
     # A timed-out owner remains live. Preserve the latch so a reused app cannot
     # launch duplicate workers on top of it; a clean stop permits restart.
     extensions[marker] = not all_stopped

@@ -253,7 +253,7 @@ def translate_start_v1():
 
     logger.info('[Translate.v1] started %s: %d chars → %s, conv=%s turn=%s field=%s',
                 task['id'], len(text), target,
-                conv_id[:8] if conv_id else '-',
+                conv_id if conv_id else '-',
                 turn_id[:8] if turn_id else '-', field)
     return api_ok({'taskId': task['id']})
 

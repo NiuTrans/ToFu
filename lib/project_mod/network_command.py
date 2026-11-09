@@ -33,7 +33,7 @@ from lib.project_mod.proxy_connect import (
     open_http_connect_tunnel,
 )
 from lib.runtime.pinned_helper_source import PinnedHelperSource
-from lib.subscription_routes import ProbeResult, Route, RouteManager
+from lib.network_routes import ProbeResult, Route, RouteManager
 
 
 logger = get_logger(__name__)

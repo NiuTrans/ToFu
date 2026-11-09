@@ -15,6 +15,7 @@ from lib.llm._sse_stream import SSEByteStream
 from lib.llm.llm_errors import RetryableAPIError
 from lib.llm.responses_outbound import (
     ResponsesSSETranslator,
+    responses_reasoning_replay,
     responses_response_to_openai,
 )
 from lib.llm.stream_result import ProviderStreamState
@@ -357,7 +358,9 @@ def test_final_only_reasoning_has_sync_async_nonstream_parity(run, incomplete, s
     }[source] + [terminal]
     wire = _wire(events)
     result = run([], protocol='responses', raw_chunks=[wire[i:i + 1] for i in range(len(wire))])
-    nonstream = responses_response_to_openai(terminal['response'])
+    # Both adapters bind the replay decision of the request the run helper sent.
+    nonstream = responses_response_to_openai(
+        terminal['response'], reasoning_replay=responses_reasoning_replay({'model': 'gpt-4'}))
     assert result.state is ProviderStreamState.PROVIDER_FINISHED
     assert result.message == nonstream['choices'][0]['message']
     assert result.provider_finish_reason == ('length' if incomplete else 'stop')

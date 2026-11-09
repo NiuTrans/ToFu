@@ -114,11 +114,11 @@ def test_apply_diff_atomic(base):
 
 
 @pytest.mark.unit
-def test_insert_content_atomic(base):
-    from lib.project_mod.write_tools import _insert_one, tool_write_file
+def test_edit_file_atomic(base):
+    from lib.project_mod.write_tools import tool_edit_file, tool_write_file
     tool_write_file(base, 'g.py', 'a = 1\n')
-    r = _insert_one(base, 'g.py', 'a = 1\n', 'b = 2\n', position='after')
-    assert r['ok'], r
+    r = tool_edit_file(base, [{'path': 'g.py', 'anchor': 'a = 1\n', 'content': 'a = 1\nb = 2\n'}])
+    assert r.startswith('Applied 1/1 edits'), r
     with open(os.path.join(base, 'g.py'), encoding='utf-8') as f:
         assert f.read() == 'a = 1\nb = 2\n'
     assert _leftover_tmps(base) == []

@@ -15,11 +15,12 @@ from urllib.parse import urlparse
 
 import requests
 import urllib3
-from requests.adapters import HTTPAdapter
 
 from tofu_search.config import get_config
 from tofu_search.fetch.request_budget import FETCH_RETRY_LIMIT, FetchRetry
 from tofu_search.generated_url_blocklist import blocked_url
+from tofu_search.network_transport import NetworkAdapter as HTTPAdapter
+from tofu_search.network_transport import NetworkSession
 
 # Suppress InsecureRequestWarning for SSL-fallback retries
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -122,14 +123,14 @@ _retry_strategy = FetchRetry(
     raise_on_status=False,      # 不在 retry 层抛异常，让 requests 处理
 )
 
-_session = requests.Session()
+_session = NetworkSession()
 _session.headers.update(_HEADERS)
 _adapter = _SSRFGuardAdapter(pool_connections=100, pool_maxsize=100, max_retries=_retry_strategy)
 _session.mount('https://', _adapter)
 _session.mount('http://', _adapter)
 
 # 无 SSL 验证的 session（用于证书过期降级）
-_session_no_ssl = requests.Session()
+_session_no_ssl = NetworkSession()
 _session_no_ssl.headers.update(_HEADERS)
 _session_no_ssl.verify = False
 _adapter_no_ssl = _SSRFGuardAdapter(pool_connections=32, pool_maxsize=32, max_retries=_retry_strategy)
@@ -153,7 +154,7 @@ try:
             kw['ssl_context'] = _legacy_ctx
             return super().proxy_manager_for(proxy, **kw)
 
-    _session_legacy_ssl = requests.Session()
+    _session_legacy_ssl = NetworkSession()
     _session_legacy_ssl.headers.update(_HEADERS)
     _session_legacy_ssl.verify = False
     _session_legacy_ssl.mount('https://', _LegacySSLAdapter(
@@ -730,6 +731,26 @@ def looks_like_text_asset(url: str) -> bool:
     return ext in _TEXT_ASSET_EXTS
 
 
+# JS/social apps whose pages carry no extractable text for an anonymous fetch.
+# A built-in fetch-quality skip, never a source ban: search listings keep their
+# rows, the reader tier and connected auth sources still read them, and a
+# host's other tools may open them. Bans are SearchConfig.skip_domains.
+NO_TEXT_DOMAINS = frozenset({
+    'youtube.com', 'youtu.be', 'twitter.com', 'x.com',
+    'facebook.com', 'instagram.com', 'tiktok.com',
+    'linkedin.com', 'discord.com',
+})
+
+SKIP_DOMAIN_DETAIL = ('URL is on the search.skip_domains blocklist (entry %r). '
+                      'Remove that entry to fetch it.')
+
+
+def fetch_skip_entry(url, cfg):
+    """The built-in or configured fetch-quality skip entry matching ``url``, or None."""
+    entry = blocked_url(url, NO_TEXT_DOMAINS)
+    return entry if entry is not None else blocked_url(url, cfg.fetch_skip_domains)
+
+
 def _should_fetch(url, diag=None):
     """True when ``url`` may be fetched anonymously.
 
@@ -754,11 +775,15 @@ def _should_fetch(url, diag=None):
         if not p.netloc:
             logger.debug('[Fetch] Skipping URL with no netloc: %.80s', url)
             return _refuse('bad_url', 'URL has no host component.')
-        skipped = blocked_url(url, get_config().skip_domains)
-        if skipped:
-            return _refuse('skip_domain',
-                           'URL is on the search.skip_domains blocklist '
-                           '(entry %r). Remove that entry to fetch it.' % skipped)
+        cfg = get_config()
+        banned = blocked_url(url, cfg.skip_domains)
+        if banned:
+            return _refuse('skip_domain', SKIP_DOMAIN_DETAIL % banned)
+        low_yield = fetch_skip_entry(url, cfg)
+        if low_yield:
+            return _refuse('fetch_skip',
+                           'Entry %r is a fetch-quality skip: its pages yield no useful '
+                           'text to an anonymous fetch. It is not a source ban.' % low_yield)
         # ── SSRF guard: reject hosts that resolve to internal addresses ──
         if get_config().block_private_addresses and not _host_is_safe(p.hostname or ''):
             logger.warning('[Fetch] Skipped (SSRF guard, internal address): %s', url[:80])

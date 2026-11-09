@@ -36,6 +36,78 @@ def _p(head, rest):
 
 
 class TestRefsOfTestFile:
+    @pytest.mark.parametrize('body', [
+        'def owner():\n    {statement}',
+        'async def owner():\n    {statement}',
+        'class Owner:\n    {statement}',
+        'if ready:\n    pass\nelse:\n    {statement}',
+        'for value in values:\n    pass\nelse:\n    {statement}',
+        'while ready:\n    {statement}',
+        'with context():\n    {statement}',
+        'async def owner():\n    async for value in values:\n        {statement}',
+        'async def owner():\n    async with context():\n        {statement}',
+        'try:\n    {statement}\nexcept Exception:\n    pass',
+        'try:\n    pass\nexcept Exception:\n    {statement}',
+        'try:\n    pass\nexcept* Exception:\n    {statement}',
+        'try:\n    pass\nexcept Exception:\n    pass\nelse:\n    {statement}',
+        'try:\n    pass\nfinally:\n    {statement}',
+        'match value:\n    case 1 if ready:\n        {statement}',
+    ])
+    @pytest.mark.parametrize('owner', ['test', 'source'])
+    def test_imports_in_every_statement_container(self, body, owner):
+        source = body.format(statement='from lib.branch import value')
+        refs = (ts.refs_of_test_file(source) if owner == 'test'
+                else ts.source_references(source, _p('tests', 'owner.py')))
+        expected = {_p('lib', path) for path in (
+            'branch.py', 'branch/__init__.py', 'branch/value.py', 'branch/value/__init__.py')}
+        assert refs == expected | ({'lib/__init__.py'} if owner == 'source' else set())
+
+    def test_static_import_pass_does_not_traverse_expression_payloads(self, monkeypatch):
+        expressions = set()
+        original = ts.ast.iter_child_nodes
+
+        def children(node):
+            if isinstance(node, ts.ast.expr):
+                expressions.add(type(node).__name__)
+            return original(node)
+
+        source = (
+            'from lib.branch import value\n'
+            'payload = [item + 1 for item in range(100)]\n'
+            'path = "frontend/src/api/transport.ts"\n')
+        tree = ts.ast.parse(source)
+        with monkeypatch.context() as patch:
+            patch.setattr(ts.ast, 'iter_child_nodes', children)
+            imports = list(ts._import_statements(tree))
+        assert [(node.module, [alias.name for alias in node.names])
+                for node in imports] == [('lib.branch', ['value'])]
+        assert expressions == set()
+
+        refs = ts.source_references(source, _p('tests', 'owner.py'), tree=tree)
+        assert _p('lib', 'branch.py') in refs
+        assert 'frontend/src/api/transport.ts' not in refs
+
+    @pytest.mark.parametrize('source', [
+        'commands = {"build": ["make test"]}',
+        'run("gmake", "all")',
+        'path = "Ma" "kefile"',
+        r'path = "M\x61kefile"',
+        'command = f"make {target}"',
+    ])
+    def test_makefile_literals_in_expressions_remain_test_dependencies(self, source):
+        assert 'Makefile' in ts.refs_of_test_file(source)
+        assert ts.source_references(source, _p('tests', 'owner.py')) == set()
+
+    def test_declared_plugin_is_a_direct_input(self):
+        assert 'tests/support/postgres_cluster.py' in ts.refs_of_test_file(
+            'pytest_plugins = "tests.support.postgres_cluster"\n')
+
+    def test_unknown_plugin_is_not_silently_omitted(self):
+        consumer = _p('tests', 'test_plugin_user.py')
+        guards = {f'tests/contracts/{name}': set() for name in ts.GUARD_CORE_BASENAMES}
+        index = {**guards, consumer: ts.refs_of_test_file('pytest_plugins = choose_plugins()\n')}
+        assert consumer in ts.select_tests(index, [_p('lib', 'changed.py')])[0]
+
     def test_import_maps_to_repo_path(self):
         src = "import lib.foo.bar\nfrom routes.api_v1 import chat\n"
         refs = ts.refs_of_test_file(src)
@@ -122,6 +194,45 @@ class TestSelectTests:
         selected, _ = ts.select_tests(self.INDEX, [self.CONFTEST])
         assert selected >= set(self.INDEX), (
             'conftest touches every session — the blast radius is the whole suite')
+
+    def test_many_changes_read_each_reference_collection_once(self):
+        reads = []
+
+        class References(list):
+            def __iter__(self):
+                reads.append(self)
+                return super().__iter__()
+
+        index = dict(self.INDEX)
+        index[self.A] = {'refs': References([self.LIB_X, self.LIB_W])}
+        selected, _ = ts.select_tests(index, [self.LIB_X, self.LIB_W, 'README.md'])
+        assert selected == {self.A, self.D} | {
+            path for path in index if path.startswith('tests/contracts/')}
+        assert len(reads) == 1
+
+    def test_empty_change_set_reads_no_dependency_collections(self):
+        class NoReferences:
+            def __iter__(self):
+                raise AssertionError('no changes need no dependency lookup')
+
+        index = dict(self.INDEX)
+        index[self.A] = {'refs': NoReferences()}
+        selected, reasons = ts.select_tests(index, [])
+        assert selected == {path for path in index if path.startswith('tests/contracts/')}
+        assert set(reasons.values()) == {'guard-core'}
+
+    @pytest.mark.parametrize('changed, target, reason', [
+        (A, A, 'self'),
+        (CONFTEST, A, 'fixture:tests/conftest.py'),
+        (JSDOM_HELPER, C, 'blast:tests/_jsdom.py'),
+        (LIB_X, A, 'direct'),
+    ])
+    def test_structural_reasons_win_over_same_path_direct_references(self, changed, target, reason):
+        index = dict(self.INDEX)
+        index[target] = {'refs': [changed, changed]}
+        selected, reasons = ts.select_tests(index, [changed])
+        assert target in selected
+        assert reasons[target] == reason
 
 
 class TestPytestCommand:
@@ -228,10 +339,25 @@ def test_cache_forgets_removed_files_and_rebuilds_invalid_entries(selection_repo
     assert set(changed) == {keep.relative_to(root).as_posix()}
     assert _p('lib', 'after.py') in next(iter(changed.values()))['refs']
     assert ts.build_index(str(root / 'tests'), str(cache)) == changed
-    cache.write_text(json.dumps({'version': 2, 'index': []}))
+    cache.write_text(json.dumps({'version': 3, 'index': []}))
     assert ts.build_index(str(root / 'tests'), str(cache)) == changed
     cache.write_text('{')
     assert ts.build_index(str(root / 'tests'), str(cache)) == changed
+
+
+def test_old_reference_cache_cannot_hide_plugin_inputs(selection_repo):
+    import json
+    root = selection_repo
+    path = write_test(root, _p('tests', 'test_plugin_user.py'),
+                      'pytest_plugins = "tests.support.postgres_cluster"\n')
+    stat = path.stat()
+    relative = path.relative_to(root).as_posix()
+    cache = root / 'cache.json'
+    cache.write_text(json.dumps({'version': 2, 'index': {
+        relative: {'fingerprint': [stat.st_mtime_ns, stat.st_size], 'refs': []},
+    }}))
+    assert 'tests/support/postgres_cluster.py' in ts.build_index(
+        str(root / 'tests'), str(cache))[relative]['refs']
 
 
 def test_git_changes_preserve_rename_endpoints_and_unusual_names(selection_repo, monkeypatch):
@@ -277,6 +403,7 @@ def test_selector_cli_runs_api_and_unit_without_opt_in_tiers(selection_repo):
     scripts = root / 'scripts'
     scripts.mkdir()
     shutil.copyfile(_SCRIPT, scripts / 'test_select.py')
+    shutil.copyfile(os.path.join(os.path.dirname(_SCRIPT), 'test_execution.py'), scripts / 'test_execution.py')
     (root / 'pyproject.toml').write_text(
         '[tool.pytest.ini_options]\naddopts = "-p pytest_timeout"\n'
         'markers = ["unit", "api", "visual", "slow", "live_llm"]\n')

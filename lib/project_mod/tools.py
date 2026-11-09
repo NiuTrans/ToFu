@@ -100,13 +100,10 @@ from lib.project_mod.write_tools import (  # noqa: E402,F401
     _apply_one_diff,
     _fail_tag,
     _find_closest_match,
-    _insert_one,
     _resolve_write_path,
     tool_apply_diff,
     tool_apply_diffs,
     tool_edit_file,
-    tool_insert_content,
-    tool_insert_contents,
     tool_write_file,
 )
 
@@ -656,8 +653,13 @@ def _exec_write_file(fn_args, base_path, conv_id, task_id, kwargs):
         # Keep the 'Write failed' prefix — _read_gate._result_indicates_success
         # and tools/meta.py pattern-match it to tell failure from success.
         return f"Write failed: {_rve}"
+    content = fn_args.get('content')
+    if not isinstance(content, str):
+        # Writing '' for a missing body would silently empty the file.
+        return ('Write failed: content is required (the complete file text, '
+                'or the bytes to append; an empty string creates an empty file).')
     result = tool_write_file(bp, rp,
-                             fn_args.get('content', ''),
+                             content,
                              fn_args.get('description', ''),
                              conv_id=conv_id, task_id=task_id,
                              allow_outside=bool(fn_args.get('allow_outside_workspace')),
@@ -725,52 +727,13 @@ def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
     edits = fn_args.get('edits')
     if not edits or not isinstance(edits, list):
         return _edits_not_array_msg(
-            'edit_file', edits, '{path, operation, anchor, content}')
+            'edit_file', edits, '{path, anchor, content}')
     batch_path = fn_args.get('path')
     return tool_edit_file(
         base_path, edits, conv_id=conv_id, task_id=task_id,
         allow_outside=bool(fn_args.get('allow_outside_workspace')),
         atomic=fn_args.get('atomic', True),
         batch_path=batch_path if isinstance(batch_path, str) else None)
-
-
-def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
-    def _rb(bp_arg, rp_arg):
-        return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
-
-    try:
-        bp, rp = _rb(base_path, fn_args.get('path', ''))
-    except ValueError as _rve:
-        logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
-        # 'Insert failed' prefix — read-gate contract; tag categorizes the failure.
-        return f"Insert failed [path-invalid]: {_rve}"
-    result = tool_insert_content(bp, rp,
-                                 fn_args.get('anchor', ''),
-                                 fn_args.get('content', ''),
-                                 fn_args.get('position', 'after'),
-                                 fn_args.get('description', ''),
-                                 conv_id=conv_id, task_id=task_id,
-                                 allow_outside=bool(fn_args.get('allow_outside_workspace')))
-    if result['ok']:
-        msg = (f"Inserted {result['linesInserted']} lines "
-               f"{result['position']} anchor at L{result['anchorLine']} "
-               f"in {result['path']} "
-               f"({result['oldLines']}L → {result['newLines']}L)")
-        for _note in result.get('echoRepairs') or []:
-            msg += f' [{_note}]'
-        if result.get('syntaxWarning'):
-            msg += ' ' + result['syntaxWarning']
-        return msg
-    else:
-        return f"Insert failed{_fail_tag(result)}: {result['error']}"
-
-
-def _exec_insert_contents(fn_args, base_path, conv_id, task_id, kwargs):
-    edits = fn_args.get('edits')
-    if not edits or not isinstance(edits, list):
-        return _edits_not_array_msg('insert_contents', edits, '{path, anchor, content}')
-    return tool_insert_contents(base_path, edits, conv_id=conv_id, task_id=task_id,
-                                allow_outside=bool(fn_args.get('allow_outside_workspace')))
 
 
 def _sticky_cwd_enabled():
@@ -1314,8 +1277,6 @@ _EXEC_HANDLERS = {
     'edit_file': _exec_edit_file,
     'apply_diff': _exec_apply_diff,
     'apply_diffs': _exec_apply_diffs,
-    'insert_content': _exec_insert_content,
-    'insert_contents': _exec_insert_contents,
     'run_command': _exec_run_command,
 }
 
@@ -1416,7 +1377,7 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
     from lib.project_mod.file_edit_mutex import file_edit_mutex
     from lib.project_mod.post_commit import defer_publication
     from lib.project_mod.write_tools._ops import (
-        _compute_diff, _compute_insert, _fail_tag, _AppliedWriteFailure)
+        _compute_diff, _fail_tag, _AppliedWriteFailure)
     if fn_name == 'read_files':
         import hashlib
         import json
@@ -1512,18 +1473,13 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
                 current = original.decode('utf-8')
                 successes = []
                 for i, edit in ops:
-                    operation = edit['operation']
-                    if operation == 'replace':
-                        comp = _compute_diff(current, path, edit['anchor'], edit['content'],
-                                             replace_all=edit.get('replace_all', False))
-                    else:
-                        comp = _compute_insert(current, path, edit['anchor'], edit['content'],
-                            position='after' if operation == 'insert_after' else 'before', syntax_guard=False)
+                    comp = _compute_diff(current, path, edit['anchor'], edit['content'],
+                                         replace_all=edit.get('replace_all', False))
                     if comp['ok']:
                         current = comp['new_content']
                         successes.append(i)
                     else:
-                        strings[i] = f"[{i}] FAIL {path} [{operation}]{_fail_tag(comp)}: {comp['error']}"
+                        strings[i] = f"[{i}] FAIL {path} [replace]{_fail_tag(comp)}: {comp['error']}"
                 if successes:
                     plans.append((path, original, fingerprint, current.encode('utf-8'), successes))
             except (OSError, ValueError) as error:
@@ -1677,8 +1633,8 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
 #: Tool names ``project_tool_display`` has a dedicated branch for. Kept adjacent
 #: to that if/elif chain so a new branch added there is added here in the same
 #: edit — ``format_tool_args_brief`` relies on this membership set.
-#: ``create_project`` is display-only legacy: the tool was retired, but old
-#: tool rounds still need a readable label instead of a generic fallback.
+#: ``create_project`` and ``insert_content(s)`` are display-only legacy: the
+#: tools were retired, but old tool rounds still need a readable label.
 _PROJECT_DISPLAY_TOOLS = frozenset({
     'list_dir', 'read_files', 'search_files', 'grep_search', 'find_files',
     'create_project',

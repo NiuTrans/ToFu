@@ -10,7 +10,7 @@ the runtime cache mode and disk policy under their own native-builds leaf.
 
 Entry points: :func:`describe_volume`, :func:`measure_lookup_latency`,
 :func:`candidate_roots`, :func:`choose_local_root`, :func:`has_free_space`,
-:func:`index_cache_placement`,
+:func:`index_cache_placement`, :func:`local_workspace_roots`,
 and ``python -m serverctl_pkg.local_placement [SOURCE]``, which prints the
 decisions for diagnostics.
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -47,15 +48,18 @@ MODE_KNOBS = {
     PURPOSE_INDEXES: 'TOFU_INDEX_FASTPATH',
     PURPOSE_NATIVE_AUTHORITY: 'TOFU_DB_FASTPATH',
 }
-# Runtime replicas are reconstructible caches and place themselves. Task
-# checkouts hold uncommitted work, so moving them off the data volume is an
-# operator decision. Agent lanes keep their durable state in Git (branch
-# commits plus a work-in-progress commit saved after every task that wrote in
-# them), so their checkouts are reconstructible and default to ``on``; the
-# shared knob still lets an operator turn both off. The native authority front
-# holds acknowledged commits behind an asynchronous shadow: ``auto`` relocates
-# it only onto proven persistent local volumes, and the native admission still
-# decides.
+# Runtime replicas are reconstructible caches and place themselves. Agent
+# lanes and task checkouts keep their work in Git: commits plus a
+# work-in-progress commit saved at every settlement (and, for a task checkout,
+# at every restart pause; binding restores a missing one), so lanes default to
+# ``on``. Task checkouts default to ``off`` because each also holds its
+# FileHistory undo store (``<checkout>/.tofu/file-history``): durable user
+# state Git cannot rebuild, which also keeps the checkout from being reclaimed.
+# Placing them on a volume that may vanish, and that their retained checkouts
+# fill, is an operator decision (``on`` or ``auto``); the shared knob turns
+# both off. The native authority front holds acknowledged commits behind an
+# asynchronous shadow: ``auto`` relocates it only onto proven persistent local
+# volumes, and the native admission still decides.
 DEFAULT_MODES = {
     PURPOSE_RUNTIME: 'auto',
     PURPOSE_NATIVE_BUILD: 'auto',
@@ -74,6 +78,12 @@ _ROOT_LEAVES = {
 }
 # Purposes whose placed tree holds durable or in-progress state, not a cache.
 _DURABLE_PURPOSES = frozenset({PURPOSE_WORKSPACES, PURPOSE_LANES, PURPOSE_NATIVE_AUTHORITY})
+# Durable state with no copy elsewhere. Lanes and task checkouts are rebuilt
+# from Git, so a volume of unknown persistence risks their edits since the
+# last save (and an opted-in task checkout's undo history) in every mode; their
+# shared knob therefore means the same for both, and ``auto`` no longer sends
+# lanes back to the data volume.
+_UNRECONSTRUCTIBLE_PURPOSES = frozenset({PURPOSE_NATIVE_AUTHORITY})
 
 MIN_SPEEDUP = 3.0
 # Local disks answer an uncached lookup in single-digit microseconds; network
@@ -369,6 +379,23 @@ def candidate_roots(purpose: str, environ: Mapping[str, str] | None = None) -> l
     return list(dict.fromkeys(base / 'tofu' / leaf for base in bases if base is not None))
 
 
+def workspace_namespace(data_root: str | os.PathLike[str]) -> str:
+    """The directory that separates one data root's task checkouts in a placed root.
+
+    Deployments sharing a user state directory never see each other's
+    checkouts: ``lib.integration_control`` creates them beneath it and
+    ``scripts/git_hygiene.py`` inventories them.
+    """
+    return hashlib.sha256(str(Path(data_root).resolve()).encode('utf-8')).hexdigest()[:12]
+
+
+def local_workspace_roots(data_root: str | os.PathLike[str],
+                          environ: Mapping[str, str] | None = None) -> list[Path]:
+    """Every local directory task checkouts of DATA_ROOT may have been placed in."""
+    namespace = workspace_namespace(data_root)
+    return [root / namespace for root in candidate_roots(PURPOSE_WORKSPACES, environ)]
+
+
 def _nearest_existing(path: Path) -> Path:
     candidate = path
     while not candidate.exists() and candidate.parent != candidate:
@@ -447,10 +474,9 @@ def _persistence_admitted(purpose: str, mode: str, persistence: str) -> bool:
         # Per-file cleanup would silently remove modules from a replica and
         # work from a checkout.
         return False
-    if persistence == 'unknown' and purpose in _DURABLE_PURPOSES:
-        # A container overlay can vanish with its container, taking any
-        # uncheckpointed task work (or an unshipped authority tail) along.
-        # Only an operator can accept that.
+    if persistence == 'unknown' and purpose in _UNRECONSTRUCTIBLE_PURPOSES:
+        # A container overlay can vanish with its container, taking an
+        # unshipped authority tail along. Only an operator can accept that.
         return mode == 'on'
     return True
 
@@ -481,8 +507,9 @@ def choose_local_root(
     ``auto`` selects only a source that is remote (mount table) or measured
     slow (unclassified platforms), and only a target at least
     :data:`MIN_SPEEDUP` times faster. ``on`` skips the speed comparison and,
-    for task workspaces, also accepts local volumes whose persistence the
-    mount table cannot prove (container overlays). Every mode refuses
+    for the native authority, also accepts local volumes whose persistence the
+    mount table cannot prove (container overlays), which lanes and task
+    checkouts accept in every mode because Git rebuilds them. Every mode refuses
     network, memory and temporary-directory targets, the source's own
     volume, non-private directories, and targets that would fall below a
     free-space reserve.

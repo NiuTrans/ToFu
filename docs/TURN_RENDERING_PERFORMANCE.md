@@ -1,5 +1,63 @@
 # Turn rendering performance
 
+## Projection patch array copies
+
+Problem: each operation in one projection patch copied every array on its
+path again. Updating several fields in one tool round repeatedly copied the
+entire tool history; a batch completing many rounds amplified that cost before
+the reducer could publish its one immutable result.
+
+Decision: `core/projection-patch.ts` owns array copies only for the duration of
+one patch. A newly copied array can be edited again by subsequent operations;
+source arrays and arrays borrowed from patch values are never owned. The latest
+copy has a direct identity check, with an exact weak set for earlier copies.
+Single-operation patches need no ownership registry. Objects retain their
+existing immutable updates. Ordered remove/append/truncate behavior, shared
+source aliases, full-root replacement and failure-to-resync semantics remain
+unchanged; no intermediate draft escapes. The registry is discarded at return,
+so it introduces no cross-event cache, retention policy or tuning parameter.
+
+The executable work guard applies 16 sibling-field operations to a 128-round
+history: array copies fall from 16 to 1. Frozen inputs and payloads verify
+rollback after a later invalid operation and independent edits through aliased
+source arrays. `tests/turn_lifecycle/test_projection_patch_browser_parity.py`
+also generates patches with the real Python producer and requires the compiled
+browser consumer to equal the Python result without modifying either input.
+
+A frozen local comparison on 2026-11-07 used baseline `64676724b`, actual Vite
+bundles of `core/turn-state.ts`, and producer-generated patches. Eight alternating
+before/after pairs called the full `reduceTurnState` with identical snapshots
+and verified output digests and unchanged inputs. Batch medians were:
+
+| Input and fixed invocation count | Before | After |
+|---|---:|---:|
+| 4,096 rounds, one round / three operations, 5,000 reductions | 149.83 ms | 77.95 ms |
+| 4,096 rounds, 32 rounds / 96 operations, 1,000 reductions | 378.81 ms | 35.94 ms |
+
+The respective before/after ranges were 136.97–153.64 / 74.98–83.22 ms and
+348.69–455.10 / 32.43–43.02 ms. Single-text and eight-round reducer cohorts had
+overlapping ranges, so they establish no small-input speed claim. These clocks
+cover synchronous reducer work, not transport, rendering, paint or whole-page
+latency. Real Chromium stream-to-DOM, reader/focus preservation and terminal
+behavior remain covered by `test_visual_turn_pipeline_performance.py`.
+The same frozen bundles and producer fixtures in Chromium 148.0.7778.96 gave
+181.55 / 26.55 ms for 1,000 wide-batch reductions, with ranges 172.50–237.80 /
+24.90–52.60 ms across eight alternating pairs. Smaller browser cohorts had
+overlapping ranges. The browser journey passed at 64, 512 and 4,096 loaded
+Turns. Its Playwright installation expected an absent Chromium build; the
+existing `TOFU_E2E_EXECUTABLE_PATH` port selected the installed build explicitly.
+
+Alternatives rejected: a WeakSet draft for every object and array reduced
+long-history copies but approximately doubled the tiny direct-helper timings;
+array-only identity tracking avoids that broad ownership cost. Tracking all
+arrays immediately also allocated a WeakSet for the common one-history batch;
+the exact latest-copy path removes that allocation. The retained variant's
+eight-round direct-helper diagnostic still added about 0.05 microseconds per
+call; the full reducer cohorts above include that work. Copying the whole
+projection upfront loses structural sharing; mutating caller-owned arrays
+breaks replay and atomic failure. Verify the co-local `projection-patch.test.ts`
+and the TurnState/replay suites before changing this ownership boundary.
+
 ## Activity occurrence lookup
 
 Problem: chronological activity windows resolved every timeline entry twice

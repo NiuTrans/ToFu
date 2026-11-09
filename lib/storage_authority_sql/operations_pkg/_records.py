@@ -13,7 +13,7 @@ import orjson
 
 from lib.log import get_logger
 from lib.storage.errors import StorageError
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     project_event_usage_for_storage,
     project_task_result_metadata_for_storage,
 )

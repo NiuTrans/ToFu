@@ -298,6 +298,31 @@ def test_extension_pagination_simulation_only_uses_semantic_safe_controls():
     assert probe['sameOrigin']['href'] == 'https://example.com/list?page=2'
 
 
+def test_site_observations_never_wait_on_a_live_authority(monkeypatch):
+    """Advisory observations decline the storage client's in-call wait."""
+    from lib.browser import site_observations
+    from lib.storage.errors import StorageError
+    from lib.storage.retry import observe_storage_wait
+
+    calls = []
+
+    class StarvedClient:
+        def query(self, operation, payload, deadline=None):
+            calls.append(operation)
+            observe_storage_wait(StorageError('database_timeout', 'deadline_elapsed'))
+            return {'observation': {}}
+
+        def command(self, operation, payload, command_id=None, deadline=None):
+            calls.append(operation)
+            observe_storage_wait(StorageError('database_timeout', 'deadline_elapsed'))
+            return {'recorded': True}
+
+    monkeypatch.setattr('lib.storage.get_storage_client', lambda **_kwargs: StarvedClient())
+    assert site_observations.load_site_observation('41', FRIDAY_URL) is None
+    assert site_observations.record_site_observation('41', FRIDAY_URL) is None
+    assert calls == ['browser.site_observation.get', 'browser.site_observation.record']
+
+
 def test_research_tool_is_in_schema_dispatch_and_read_policy():
     from lib.browser.access import browser_tool_domain
     from lib.browser.dispatch import BROWSER_HANDLERS

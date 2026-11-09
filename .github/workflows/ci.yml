@@ -3,12 +3,80 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
   schedule:
-    # Nightly full visual sweep + perf ratio gate (UTC 03:17 — off the hour).
+    # Nightly full qualification (UTC 03:17 — off the hour).
     - cron: "17 3 * * *"
 
 jobs:
+  verification-scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      profile: ${{ steps.scope.outputs.profile }}
+      base: ${{ steps.scope.outputs.base }}
+      head: ${{ steps.scope.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve qualification scope and comparison history
+        id: scope
+        run: python3 .github/scripts/verification_scope.py
+
+  test-affected:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [verification-scope, frontend]
+    if: ${{ always() && !cancelled() && needs.verification-scope.outputs.profile == 'incremental' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+      - name: Consume the verified frontend graph when available
+        if: ${{ needs.frontend.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-frontend-dist
+          path: static/vite
+      - name: Verify the downloaded graph without Node
+        if: ${{ needs.frontend.result == 'success' }}
+        run: python3 scripts/verify_frontend_dist.py
+      - name: Verify lock and sync test environment
+        run: uv lock --check && uv sync --frozen --extra test
+      - name: Verify the committed merge candidate
+        env:
+          BASE_REVISION: ${{ needs.verification-scope.outputs.base }}
+          EXPECTED_REVISION: ${{ needs.verification-scope.outputs.head }}
+        run: >-
+          uv run --frozen --extra test python -m lib.project_mod.landing_verification check
+          --base "$BASE_REVISION" --expected-revision "$EXPECTED_REVISION"
+          --json > "$RUNNER_TEMP/verification.json"
+      - name: Publish revision-bound verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.sha }}
+          path: ${{ runner.temp }}/verification.json
+          if-no-files-found: error
+          retention-days: 1
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -84,11 +152,10 @@ jobs:
   # runtime and therefore the only CI interpreter.
   test-unit:
     runs-on: ubuntu-latest
-    # Always run (unit is an independent gate); when the frontend lane
-    # succeeded, also consume its verified graph so the graph-dependent unit
-    # tests (serverctl boot, health buildId) execute instead of skipping.
-    needs: frontend
-    if: ${{ always() }}
+    # Full qualification retains the independent unit gate and consumes the
+    # verified graph when frontend succeeded, so graph contracts execute.
+    needs: [verification-scope, frontend]
+    if: ${{ always() && !cancelled() && needs.verification-scope.outputs.profile == 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -135,6 +202,8 @@ jobs:
   # Python version — an integration-layer bug won't be version-specific.
   test-api:
     runs-on: ubuntu-latest
+    needs: verification-scope
+    if: ${{ needs.verification-scope.outputs.profile == 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -163,7 +232,8 @@ jobs:
   # this lane only combines and compares against the one-way floor.
   coverage:
     runs-on: ubuntu-latest
-    needs: [test-unit, test-api]
+    needs: [verification-scope, test-unit, test-api]
+    if: ${{ needs.verification-scope.outputs.profile == 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -191,6 +261,8 @@ jobs:
   # baseline is not green unless this lane completes successfully.
   test-slow:
     runs-on: ubuntu-latest
+    needs: verification-scope
+    if: ${{ needs.verification-scope.outputs.profile == 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -518,11 +590,11 @@ jobs:
           tests/frontend/test_settings_save_feedback_browser.py
           -m visual -ra
 
-  # ── Nightly full visual sweep (schedule only) ──
+  # ── Full visual qualification (nightly, release tag or manual) ──
   visual-nightly:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    needs: frontend
+    if: ${{ needs.verification-scope.outputs.profile == 'full' }}
+    needs: [verification-scope, frontend]
     env:
       TOFU_E2E_BROWSER: chromium
     steps:
@@ -548,10 +620,11 @@ jobs:
       - name: Run the full visual tier (chromium)
         run: uv run --frozen --extra test make test-visual
 
-  # ── Nightly performance ratio gate (schedule only) ──
+  # ── Full performance qualification ──
   perf-nightly:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    needs: verification-scope
+    if: ${{ needs.verification-scope.outputs.profile == 'full' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -572,6 +645,8 @@ jobs:
     name: CI required
     if: ${{ always() }}
     needs:
+      - verification-scope
+      - test-affected
       - lint
       - tofu-search
       - tofu-trading
@@ -597,9 +672,17 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           EVENT_NAME: ${{ github.event_name }}
+          VERIFICATION_PROFILE: ${{ needs.verification-scope.outputs.profile }}
         run: |
-          if [ "$EVENT_NAME" = schedule ]; then
-            python3 .github/scripts/check_ci_results.py <<< "$NEEDS"
-          else
-            python3 .github/scripts/check_ci_results.py --allow-skipped visual-nightly perf-nightly <<< "$NEEDS"
-          fi
+          case "$VERIFICATION_PROFILE" in
+            full)
+              python3 .github/scripts/check_ci_results.py --allow-skipped test-affected <<< "$NEEDS"
+              ;;
+            incremental)
+              python3 .github/scripts/check_ci_results.py --allow-skipped test-unit test-api coverage test-slow visual-nightly perf-nightly <<< "$NEEDS"
+              ;;
+            *)
+              echo 'Missing or invalid verification profile' >&2
+              exit 1
+              ;;
+          esac

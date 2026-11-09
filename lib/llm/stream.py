@@ -55,7 +55,6 @@ from lib.llm.llm_errors import (
     RequestTransportError,
     ResponseReadTimeoutError,
     RetryableAPIError,
-    SubscriptionConnectionError,
     _RETRYABLE,
 )
 from lib.llm.request_repair import RequestRepairState, repair_rejected_request
@@ -63,8 +62,6 @@ from lib.log import get_logger
 
 from lib.llm.diagnostic_timing import timed_call, timed_call_with_fields, timing_stage
 from lib.proxy import (
-    describe_route,
-    proxies_for,
     report_outcome as _proxy_report_outcome,
 )
 from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
@@ -589,6 +586,8 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 # must not exhaust the upstream idle clock or emit its HUD.
                 _progress.mark_transport_activity()
                 _start_watchdog_before_send()
+                # Header latency counts from the send, not route admission.
+                _conn_t0 = time.monotonic()
                 if _egress_route != 'direct':
                     _set_network_route({
                         'routeId': 'desktop:egress',
@@ -606,91 +605,34 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                     except _eg.EgressUnavailable as e:
                         raise EndpointUnreachableError(str(e), base_url=plan.url) from e
                 else:
-                    from lib.proxy import (
-                        report_subscription_route,
-                        subscription_route_candidates,
-                    )
-                    _server_routes = timed_call('network_route', subscription_route_candidates, plan.url)
-                    if _server_routes:
-                        _attempted_routes = set()
-                        for _server_route in _server_routes:
-                            _attempted_routes.add(_server_route.route_id)
-                            _route_t0 = time.monotonic()
-                            _set_network_route({
-                                'routeId': str(_server_route.route_id)[:160],
-                                'routeMode': str(_server_route.mode)[:24],
-                                'decisionReason': 'subscription_route_race',
-                                **({'poolId': str(_server_route.pool_id)[:160]}
-                                   if _server_route.pool_id else {}),
-                            }, subscription_route=_server_route)
-                            try:
-                                resp = timed_call_with_fields('stream_headers_wait',
-                                    {'trace_id': plan.trace_id, 'transport': 'requests'},
-                                    _tp.post_headers_abortable, lambda: dispatch_model_request(plan, get_sync_session().post,
-                                        plan.url, headers=plan.hdrs,
-                                        **transport_body_arguments(plan.body, transport='requests'), stream=True,
-                                        timeout=(CONNECT_TIMEOUT, None),
-                                        proxies=_server_route.requests_proxies(),
-                                        allow_redirects=False),
-                                    is_aborted=lambda: _watchdog.aborted,
-                                    first_byte_deadline=_first_byte_deadline,
-                                    timeout_seconds=first_byte_timeout)
-                            except requests.exceptions.ConnectionError as e:
-                                from lib.subscription_routes import (
-                                    is_safe_connect_failure,
-                                )
-                                if not is_safe_connect_failure(e):
-                                    report_subscription_route(
-                                        plan.url, _server_route, False,
-                                        failure_kind='midstream_io')
-                                    _network_reported = True
-                                    raise RequestTransportError(
-                                        failure_stage='connection',
-                                        reason='delivery_ambiguous',
-                                        cause_type=type(e).__name__,
-                                        base_url=plan.url) from None
-                                report_subscription_route(
-                                    plan.url, _server_route, False)
-                                logger.info(
-                                    '%s connection failed via %s (%s) — trying '
-                                    'next subscription route',
-                                    log_prefix, _server_route.label, type(e).__name__)
-                                _known_routes = {
-                                    item.route_id for item in _server_routes}
-                                for _candidate in subscription_route_candidates(
-                                        plan.url):
-                                    if (_candidate.route_id
-                                            not in _attempted_routes
-                                            and _candidate.route_id
-                                            not in _known_routes):
-                                        _server_routes.append(_candidate)
-                                        _known_routes.add(_candidate.route_id)
-                                continue
-                            _network_latency_ms = (
-                                time.monotonic() - _route_t0) * 1000.0
-                            break
-                        else:
-                            # Each route was already reported once. Let the
-                            # existing bounded retry loop re-enter shared
-                            # recovery without a second model cooldown.
-                            _network_reported = True
-                            raise SubscriptionConnectionError(base_url=plan.url) from None
-                    else:
-                        _generic_proxies = timed_call('network_route', proxies_for, plan.url)
-                        _set_network_route(
-                            describe_route(
-                                plan.url, proxies=_generic_proxies))
-                        resp = timed_call_with_fields('stream_headers_wait',
-                            {'trace_id': plan.trace_id, 'transport': 'requests'},
-                            _tp.post_headers_abortable, lambda: dispatch_model_request(plan, get_sync_session().post,
-                                plan.url, headers=plan.hdrs, **transport_body_arguments(plan.body, transport='requests'),
-                                stream=True, timeout=(CONNECT_TIMEOUT, None),
-                                proxies=_generic_proxies,
-                                allow_redirects=False),
-                            is_aborted=lambda: _watchdog.aborted,
-                            first_byte_deadline=_first_byte_deadline,
-                            timeout_seconds=(
-                                min(_header_bounds) if _header_bounds else None))
+                    # The response-header wait is transport silence too: a
+                    # gateway that buffers headers until its upstream speaks
+                    # must not escape the silent-stream liveness contract.
+                    _header_seconds = _tp.silent_stream_deadline_seconds()
+                    _header_deadline = time.monotonic() + _header_seconds
+                    _header_cause = _tp.SILENT_STREAM_DEADLINE_CAUSE
+                    if (_first_byte_deadline is not None
+                            and _first_byte_deadline <= _header_deadline):
+                        _header_deadline = _first_byte_deadline
+                        _header_seconds = min(_header_bounds)
+                        _header_cause = 'response_headers'
+                    resp = timed_call_with_fields('stream_headers_wait',
+                        {'trace_id': plan.trace_id, 'transport': 'requests'},
+                        _tp.post_headers_abortable, lambda: dispatch_model_request(
+                            plan, get_sync_session().post, plan.url,
+                            headers=plan.hdrs,
+                            **transport_body_arguments(plan.body, transport='requests'),
+                            stream=True, timeout=(CONNECT_TIMEOUT, None),
+                            network_scope=getattr(plan, 'network_scope', None),
+                            allow_redirects=False),
+                        is_aborted=lambda: _watchdog.aborted,
+                        first_byte_deadline=_header_deadline,
+                        timeout_seconds=_header_seconds,
+                        deadline_cause=_header_cause)
+                    _set_network_route(
+                        getattr(resp, 'tofu_network_route', None),
+                        subscription_route=getattr(resp, 'tofu_route', None),
+                        latency_ms=getattr(resp, 'tofu_network_latency_ms', None))
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
                     # Stop landed in the narrow window between header receipt
@@ -710,8 +652,14 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 e, base_url=plan.url, write_timeout=_tp.WRITE_TIMEOUT)
             stage = getattr(error, 'failure_stage', 'connect')
             _report_network_outcome(False, stage)
-            logger.warning('%s Transport failed during %s: %s',
-                           log_prefix, stage, error)
+            if getattr(error, 'cause_type', '') == _tp.SILENT_STREAM_DEADLINE_CAUSE:
+                logger.warning(
+                    '%s Provider sent no response headers for %.0fs trace=%s; '
+                    'abandoned the attempt', log_prefix,
+                    _tp.silent_stream_deadline_seconds(), plan.trace_id)
+            else:
+                logger.warning('%s Transport failed during %s: %s',
+                               log_prefix, stage, error)
             if error is e:
                 raise _annotate_network_error(error, stage)
             raise _annotate_network_error(error, stage) from e
@@ -896,6 +844,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
             _adapter_service.note_adapter_quota_observed(
                 adapter.get('agent_id'), user_id=_owner_scope)
         usage['_network_route'] = dict(_network_route)
+        if _network_latency_ms is not None:
+            # Request send -> response headers on the route that answered.
+            usage['_response_headers_ms'] = round(_network_latency_ms)
         stream_state = stream_result.state
         if stream_state is ProviderStreamState.NO_ACTIONABLE_OUTPUT:
             usage['_failure_stage'] = 'no_actionable_output'

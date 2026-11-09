@@ -230,6 +230,7 @@ class AdmittedRequest(Mapping):
     # sealed bytes; fields are ((name, start, end), ...) relative to the item,
     # or None for an item that is not a string-keyed object.
     _items: Mapping = field(default=MappingProxyType({}), repr=False, compare=False)
+    _context_lineage: bytes = field(default=b'', repr=False, compare=False)
 
     def sealed_items(self, key):
         """Offsets of each sealed ``key`` item and its top-level fields."""
@@ -258,6 +259,21 @@ class AdmittedRequest(Mapping):
         return {'semantic_request_id': self.semantic_id,
                 'provider_prefix_id': self.provider_prefix_id,
                 'admitted_input_tokens': self.input_tokens}
+
+    def context_diagnostics(self):
+        """Detached provenance bound to this exact immutable request, off-wire."""
+        if not self._context_lineage:
+            return None
+        return {**json.loads(self._context_lineage),
+                'requestIdentity': self.diagnostics()}
+
+    def usage_evidence(self, trace_id):
+        """The same sealed request identity and lineage for every transport."""
+        evidence = {'_request_identity': self.diagnostics()}
+        lineage = self.context_diagnostics()
+        if lineage:
+            evidence['_wire_context_lineage'] = {**lineage, 'traceId': trace_id}
+        return evidence
 
 
 def strip_internal_request_fields(body):
@@ -377,7 +393,22 @@ def seal_request(body, *, model, provider_id='', protocol='openai',
                            input_tokens, semantic_id, prefix_id,
                            MappingProxyType(offsets), logical_model or model,
                            content_encoding=content_encoding,
-                           _items=MappingProxyType(items))
+                           _items=MappingProxyType(items),
+                           _context_lineage=_seal_context_lineage(body, wire, payload))
+
+
+def _seal_context_lineage(body, wire, payload):
+    if not body.get('_context_lineage'):
+        return b''
+    from copy import deepcopy
+    from lib.llm_sanitize.lineage import verify_lineage
+    trace = deepcopy(body['_context_lineage'])
+    verify_lineage(trace, wire, 'request_sealing')
+    # Archives normalize JSON key order. Keep an exact transport digest AND
+    # an order-independent artifact digest; never call the latter wire bytes.
+    return _encode({**trace,
+                    'wireBodyHash': hashlib.sha256(payload).hexdigest(),
+                    'requestContentHash': _digest(wire, sorted_keys=True)})
 
 
 def _append_items(chunks, values, start):

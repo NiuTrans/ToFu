@@ -27,6 +27,14 @@ def http_post(*args, **kwargs):
     return send(*args, **kwargs)
 
 
+def _post_admitted_request(url, headers, body, timeout, oauth):
+    """Send the sealed body through the shared subscription-aware transport."""
+    from lib.llm.request import transport_body_arguments
+    return http_post(url, headers=headers,
+                     **transport_body_arguments(body, transport='requests'),
+                     timeout=timeout, network_scope='subscription' if oauth else None)
+
+
 def _attempt_headers(*, api_protocol, api_key, extra_headers, oauth, base_url,
                      inference_profile, cache_affinity_key, trace_id, body):
     """Headers for one physical attempt: protocol credentials, caller extras,
@@ -266,7 +274,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
 
         from lib.llm.body._admission import enforce_body_input_limit
         from lib.llm.request import (
-            detach_input, semantic_request_id, seal_request, transport_body_arguments)
+            detach_input, semantic_request_id, seal_request)
         detach_input(body)
         # Its encode also proves the detached input is valid JSON before counting.
         _semantic_id = semantic_request_id(body)
@@ -275,12 +283,12 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
 
         _reasoning_resolution = dict(body.get('_reasoning_resolution') or {})
         _cloak_reverse = None
-        _resp_reverse = None
+        _resp_reverse, _resp_replay = None, False
         if _responses:
-            from lib.llm.responses_outbound import openai_body_to_responses
-            body, _resp_reverse = openai_body_to_responses(
-                body, profile='codex' if oauth == 'codex' else 'default',
-                stream=False)
+            from lib.llm.responses_outbound import openai_body_to_responses, responses_reasoning_replay
+            _resp_profile = 'codex' if oauth == 'codex' else 'default'
+            _resp_replay = responses_reasoning_replay(body, profile=_resp_profile)
+            body, _resp_reverse = openai_body_to_responses(body, profile=_resp_profile, stream=False)
         elif _anthropic:
             from lib.llm.anthropic_outbound import openai_body_to_anthropic
             from lib.llm.catpaw_gateway import apply_catpaw_shape, is_catpaw_base_url
@@ -383,8 +391,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                         raise EndpointUnreachableError(
                             str(e), base_url=url) from e
                 else:
-                    resp = _budget_send(http_post, url, headers=hdrs, **transport_body_arguments(body, transport='requests'),
-                                     timeout=(CONNECT_TIMEOUT, timeout))
+                    resp = _budget_send(_post_admitted_request, url, hdrs, body,
+                                        (CONNECT_TIMEOUT, timeout), oauth)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                     RequestTransportError) as ce:
                 from lib.llm._transport import classify_request_transport_error
@@ -516,7 +524,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     if _responses:
         from lib.llm.responses_outbound import responses_response_to_openai
         data = timed_call('response_normalize', responses_response_to_openai,
-            data, tool_name_reverse=_resp_reverse)
+            data, tool_name_reverse=_resp_reverse, reasoning_replay=_resp_replay)
     elif _anthropic:
         from lib.llm.anthropic_outbound import anthropic_response_to_openai
         data = timed_call('response_normalize', anthropic_response_to_openai, data)
@@ -578,7 +586,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         usage = {}
     # Stamp canonical cache keys from vendor spellings (see _sse_core note).
     canonicalize_usage_cache_keys(usage)
-    usage['_request_identity'] = body.diagnostics()
+    usage.update(body.usage_evidence(trace_id))
     from lib.llm.request_receipt import request_parameter_receipt
     usage['_request_parameters'] = request_parameter_receipt(body)
 

@@ -51,6 +51,7 @@ from lib.log import get_logger
 from lib.observability import record_stream_admission
 from lib.request_parser import decode_proxy_json_value, parse_body
 from lib.storage.errors import StorageError, http_status_for_storage_error
+from lib.storage.retry import decline_storage_wait, storage_wait_owner
 from lib.tasks_pkg.manager.runtime import push_withheld_for_conv
 from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
 from lib.turn_lifecycle import cancel_queued_turn_pair
@@ -526,7 +527,7 @@ async def conversation_sync_snapshot(conversation_id: str):
         except Exception as exc:
             logger.debug(
                 "[AutoTranslate] recovery admission failed conv=%s: %s",
-                conversation_id[:8], exc,
+                conversation_id, exc,
             )
         return response, status
     except ConversationSyncNotFound as exc:
@@ -784,6 +785,16 @@ def _diagnostic_options() -> dict[str, str]:
     return {"diagnostic_payload": "none"} if diagnostic_values == ["none"] else {}
 
 
+def _stream_changes_page(*args, **kwargs):
+    """One steady-state change page for a stream that rides pressure itself.
+
+    Degraded heartbeats can report a wedge only while this read returns, so
+    it declines the storage client's in-call wait for a live authority.
+    """
+    with storage_wait_owner(decline_storage_wait):
+        return _service.changes(*args, **kwargs)
+
+
 async def _conversation_change_frames(
     conversation_id: str,
     user_id,
@@ -818,7 +829,7 @@ async def _conversation_change_frames(
         try:
             if needs_read:
                 page = await asyncio.to_thread(
-                    _service.changes,
+                    _stream_changes_page,
                     conversation_id,
                     user_id,
                     after_sequence=sequence,

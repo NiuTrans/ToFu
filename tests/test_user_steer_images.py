@@ -1,21 +1,23 @@
-"""tests/test_user_steer_images.py — a mid-turn human steer's image attachments
-survive into BOTH injection records (never silently dropped).
+"""tests/test_user_steer_images.py — an image attached to a mid-turn human
+steer is stored by its upload link and reaches the model as an image.
 
-THE gap this pins (owner report + verified diagnosis)
-----------------------------------------------------
-The composer carries a steer's images on the inbox item's ``_user_msg``, and
-the model DOES receive them — but the injection chip / sidecar kept only the
-text, so the operator's images silently vanished from the rendered
-"你中途插入了 N 条消息" card. Two producers each dropped them:
+THE gap this pins (owner report 2026-11-08 + verified diagnosis)
+---------------------------------------------------------------
+The owner pasted a screenshot into a message sent while a Coordinator was
+running. The message became a steer, and the Coordinator never saw the image.
+Three seams each lost it:
 
-  * PENDING record (``_turns_write._turn_steer_commit``) — persisted the moment
-    the steer commits; rendered immediately as deliveryState:'pending'.
-  * DELIVERED flush (``_deferred_inbox_flush``) — emitted after the LLM call
-    confirms consumption; this is the card the user actually reads.
+  * PROJECTION (``steer_preview_images``) kept the composer's inline ``data:``
+    preview and dropped the stored ``/api/images/<f>`` link.
+  * NATIVE RECORD: TofuDB ``turn.steer.commit`` ignored ``images``. Only the
+    SQL authority stored them, and only SQLite was tested.
+  * MODEL DELIVERY was text-only: the round-boundary inbox carrier and a
+    committed steer requeued as the next Turn both carried only the text.
 
-Both now project ``_user_msg.images`` through the shared
-``steer_preview_images`` helper into bounded ``{preview, caption, sizeKB}``
-dicts. These tests pin the projection at all three seams.
+The steer runs through the real command seam on both authorities
+(``semantic_authority``: SQLite, and native TofuDB when ``TOFUDB_BIN`` names a
+source-matched engine), for an executor in this process and in the other
+server process.
 
 Run with::
 
@@ -24,57 +26,72 @@ Run with::
 
 from __future__ import annotations
 
+import base64
+import time
 import unittest
 import uuid
 
 import pytest
 
+from tests.support.semantic_authorities import semantic_authority as semantic_authority
+
 pytestmark = pytest.mark.unit
-pytest_plugins = ('tests._chat_sidecar',)
+pytest_plugins = ('tests.support.postgres_cluster',)
 
-TEST_OWNER_USER_ID = 1
+_LINK = '/api/images/1794133298800_6573ac8f.png'
+# A real 1x1 PNG, so the inline fallback is a payload a model body accepts.
+_PNG = ('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAF'
+        'AAH/iZk9HQAAAABJRU5ErkJggg==')
+_DATA_URL = f'data:image/png;base64,{_PNG}'
+_STEER_TEXT = '有时候前端网页会突然这样。'
 
 
-def _new_conversation_id(prefix='steer-img'):
-    return f'{prefix}-{uuid.uuid4().hex[:10]}'
+def _composer_image(**fields):
+    """An image as the composer sends it after its upload (upload.js
+    ``processImageFile``): inline payload, ``data:`` preview, stored link."""
+    image = {'base64': _PNG, 'mediaType': 'image/png', 'preview': _DATA_URL,
+             'sizeKB': 1, 'url': _LINK}
+    image.update(fields)
+    return image
 
 
-def _open_steer_window(conversation_id):
-    """Create a live turn + first attempt and bind a running task so the
-    turn.steer.commit window (live attempt, task-bound, current) is open."""
-    from lib.turn_lifecycle import bind_task, create_turn_pair
-    created = create_turn_pair(
-        conversation_id,
-        command_id=f'create-{conversation_id}',
-        input_projection={'content': 'hello'},
-        config={'model': 'gpt-4o'},
-        user_id=TEST_OWNER_USER_ID,
-        conversation_defaults={
-            'allowCreate': True,
-            'title': 'Steer images',
-            'settings': {'model': 'gpt-4o'},
-        },
-    )
-    attempt_id = created['attempt']['attemptId']
-    turn_id = created['turn']['turnId']
-    bind_task(attempt_id, f'task-{conversation_id}', user_id=TEST_OWNER_USER_ID)
-    return attempt_id, turn_id
+def _failed_upload_image():
+    """The same image when its upload failed: no stored link exists."""
+    image = _composer_image()
+    del image['url']
+    return image
+
+
+def _image_urls(content):
+    return [block['image_url']['url'] for block in content
+            if isinstance(block, dict) and block.get('type') == 'image_url']
 
 
 # ═══════════════════ 1. The shared projection helper ═══════════════════
 
 class SteerPreviewImagesTest(unittest.TestCase):
 
+    def test_an_uploaded_image_is_stored_by_its_link_never_its_data_url(self):
+        """The record keeps the durable upload reference. A reverse-proxy
+        prefix on the client-stored URL is canonicalized away."""
+        from lib.agent_inbox._steer_preview import steer_preview_images
+        for image in (_composer_image(), _composer_image(url='/proxy/15000' + _LINK)):
+            self.assertEqual(
+                steer_preview_images({'_user_msg': {'images': [image]}}),
+                [{'preview': _LINK, 'url': _LINK, 'sizeKB': 1}])
+
     def test_projects_bounded_display_dicts(self):
         from lib.agent_inbox._steer_preview import steer_preview_images
         item = {'_user_msg': {'role': 'user', 'content': 'see', 'images': [
             {'preview': '/api/images/a.png', 'caption': 'shot', 'sizeKB': 128},
-            {'preview': 'data:image/png;base64,iVBORw0KGgo=', 'sizeKB': 4},
+            # Upload failed: the inline preview is the only copy of the image.
+            {'preview': _DATA_URL, 'sizeKB': 4},
         ]}}
         out = steer_preview_images(item)
         self.assertEqual(out, [
-            {'preview': '/api/images/a.png', 'caption': 'shot', 'sizeKB': 128},
-            {'preview': 'data:image/png;base64,iVBORw0KGgo=', 'sizeKB': 4},
+            {'preview': '/api/images/a.png', 'url': '/api/images/a.png',
+             'caption': 'shot', 'sizeKB': 128},
+            {'preview': _DATA_URL, 'sizeKB': 4},
         ])
 
     def test_drops_entries_without_a_resolvable_preview(self):
@@ -88,7 +105,8 @@ class SteerPreviewImagesTest(unittest.TestCase):
             {'preview': '/api/images/ok.png'},
         ]}}
         self.assertEqual(
-            steer_preview_images(item), [{'preview': '/api/images/ok.png'}])
+            steer_preview_images(item),
+            [{'preview': '/api/images/ok.png', 'url': '/api/images/ok.png'}])
 
     def test_no_images_returns_empty(self):
         from lib.agent_inbox._steer_preview import steer_preview_images
@@ -112,7 +130,7 @@ class SteerFlushImagesTest(unittest.TestCase):
 
     def _task(self, conv):
         return {'id': f'task-{conv}', 'convId': conv, 'status': 'running',
-                '_userId': TEST_OWNER_USER_ID, 'aborted': False,
+                '_userId': 1, 'aborted': False,
                 'config': {'model': 'm'}, 'toolRounds': []}
 
     def test_delivered_preview_carries_projected_images(self):
@@ -121,18 +139,16 @@ class SteerFlushImagesTest(unittest.TestCase):
         USER_STEER_INJECT chip."""
         from lib.agent_core.events import EventType
         import lib.tasks_pkg.orchestrator._deferred_inbox_flush as flush_mod
-        conv = _new_conversation_id('steer-flush')
+        conv = f'steer-flush-{uuid.uuid4().hex[:10]}'
         task = self._task(conv)
         task['_steer_inject_pending'] = [{
             'value': 'look at this screenshot',
             'blockId': 'injection:user-steer:cmd1',
             'injectionId': 'cmd1',
             '_user_msg': {'role': 'user', 'content': 'look at this screenshot',
-                          'images': [
-                              {'preview': '/api/images/shot.png',
-                               'caption': 'UI', 'sizeKB': 96},
-                          ]},
+                          'images': [_composer_image(caption='UI')]},
         }]
+        projected = [{'preview': _LINK, 'url': _LINK, 'caption': 'UI', 'sizeKB': 1}]
         emitted = []
         orig_append = flush_mod.append_event
         flush_mod.append_event = lambda t, ev: emitted.append(ev)
@@ -146,22 +162,18 @@ class SteerFlushImagesTest(unittest.TestCase):
         self.assertTrue(lane, 'delivered steer record accumulated')
         previews = lane[0]['previews']
         self.assertEqual(previews[0]['text'], 'look at this screenshot')
-        self.assertEqual(previews[0]['images'],
-                         [{'preview': '/api/images/shot.png',
-                           'caption': 'UI', 'sizeKB': 96}])
+        self.assertEqual(previews[0]['images'], projected)
         # And the emitted USER_STEER_INJECT chip carries them too.
         steer_events = [e for e in emitted
                         if isinstance(e, dict)
                         and e.get('type') == EventType.USER_STEER_INJECT]
         self.assertTrue(steer_events, 'chip emitted')
-        self.assertEqual(steer_events[0]['previews'][0]['images'],
-                         [{'preview': '/api/images/shot.png',
-                           'caption': 'UI', 'sizeKB': 96}])
+        self.assertEqual(steer_events[0]['previews'][0]['images'], projected)
 
     def test_text_only_steer_has_no_images_key(self):
         """A plain-text steer stays text-only — no spurious empty images key."""
         import lib.tasks_pkg.orchestrator._deferred_inbox_flush as flush_mod
-        conv = _new_conversation_id('steer-flush-text')
+        conv = f'steer-flush-text-{uuid.uuid4().hex[:10]}'
         task = self._task(conv)
         task['_steer_inject_pending'] = [{
             'value': 'just words', 'blockId': 'injection:user-steer:cmd2',
@@ -173,44 +185,199 @@ class SteerFlushImagesTest(unittest.TestCase):
         self.assertNotIn('images', previews[0])
 
 
-# ═══════════════════ 3. Pending durable record carries images ═══════════════════
+# ═══════════════════ 3. Record and model, on both authorities ═══════════════════
 
-@pytest.mark.usefixtures('chat_sidecar')
-class SteerCommitImagesTest(unittest.TestCase):
+def _service():
+    from lib.conversation_sync.command_service import ConversationTurnCommandService
 
-    def test_pending_record_persists_images(self):
-        """The moment-of-commit pending record (rendered immediately as
-        deliveryState:'pending') also persists the images, so the chip shows
-        thumbnails even before the model consumes the steer."""
-        from lib.turn_lifecycle import commit_user_steer, get_turn
-        conv = _new_conversation_id()
-        attempt_id, turn_id = _open_steer_window(conv)
-        images = [{'preview': '/api/images/p.png', 'caption': 'p',
-                   'sizeKB': 12}]
-        commit_user_steer(
-            conv, attempt_id, command_id='cmd-img-1', text='pending words',
-            user_id=TEST_OWNER_USER_ID, images=images,
-        )
-        projection = get_turn(conv, turn_id, user_id=TEST_OWNER_USER_ID)[
-            'projection']
-        records = projection.get('_userSteerInjects') or []
-        pending = [r for r in records if r.get('deliveryState') == 'pending']
-        self.assertTrue(pending, 'a pending steer record was persisted')
-        self.assertEqual(pending[0]['previews'][0]['images'], images)
+    def never(*args, **kwargs):
+        raise AssertionError('input for a busy lane starts no executor')
+    return ConversationTurnCommandService(
+        build_user_message=never, was_aborted_after=lambda *a, **k: False,
+        start_task=never)
 
-    def test_pending_record_without_images_omits_key(self):
-        from lib.turn_lifecycle import commit_user_steer, get_turn
-        conv = _new_conversation_id()
-        attempt_id, turn_id = _open_steer_window(conv)
-        commit_user_steer(
-            conv, attempt_id, command_id='cmd-img-2', text='plain',
-            user_id=TEST_OWNER_USER_ID,
-        )
-        projection = get_turn(conv, turn_id, user_id=TEST_OWNER_USER_ID)[
-            'projection']
-        records = projection.get('_userSteerInjects') or []
-        self.assertTrue(records)
-        self.assertNotIn('images', records[-1]['previews'][0])
+
+@pytest.fixture(params=['this process', 'other process'])
+def live_reply(request, semantic_authority, monkeypatch):
+    """A running reply whose executor lives in this or the other server process.
+
+    Yields the owner, the conversation and the executor's task view.
+    """
+    from lib import agent_inbox
+    from lib.turn_lifecycle import bind_task, create_turn_pair
+    from tests.support.chat_tasks import chat_task_registry, register_local_executor
+    client, owner, _engine = semantic_authority
+    monkeypatch.setattr('lib.storage.get_storage_client', client)
+    conversation = f'steer-images-{uuid.uuid4().hex[:10]}'
+    pair = create_turn_pair(conversation, command_id='human-request',
+                            input_projection={'content': 'Check the frontend'},
+                            config={}, user_id=owner,
+                            conversation_defaults={'allowCreate': True})
+    task_id = f'task-{conversation}'
+    attempt_id, turn_id = pair['attempt']['attemptId'], pair['turn']['turnId']
+    bind_task(attempt_id, task_id, user_id=owner)
+    if request.param == 'this process':
+        register_local_executor(task_id, conv_id=conversation, attempt_id=attempt_id,
+                                turn_id=turn_id, user_id=owner)
+    executor = {'id': task_id, 'convId': conversation, '_userId': owner,
+                '_turnId': turn_id, '_attemptId': attempt_id, 'status': 'running',
+                'aborted': False, 'config': {'model': 'gpt-4o'}, 'toolRounds': []}
+    try:
+        yield owner, conversation, executor
+    finally:
+        chat_task_registry.pop(task_id, None)
+        agent_inbox.reset_for_test(conversation)
+
+
+def _steer(owner, conversation, command_id, input_turn):
+    result = _service().create_turn(conversation, owner, {
+        'commandId': command_id, 'inputTurn': input_turn, 'config': {},
+        'injectMode': 'steer'}, request_started_at=time.time()).value
+    assert result.get('steered') is True and not result.get('steerFallback'), result
+    return result
+
+
+def _record(owner, conversation, executor, command_id):
+    from lib.turn_lifecycle import get_turn
+    projection = get_turn(conversation, executor['_turnId'], user_id=owner)['projection']
+    [record] = [record for record in projection.get('_userSteerInjects') or []
+                if record.get('commandId') == command_id]
+    return record
+
+
+def _round_boundary(executor):
+    """The executor's next round boundary; returns the one coalesced carrier."""
+    from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
+    messages = [{'role': 'user', 'content': 'Check the frontend'}]
+    drain_and_inject_inbox(task=executor, messages=messages, round_num=1,
+                           tid='steer-images')
+    assert len(messages) == 2, messages
+    return messages[-1]
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_a_steered_screenshot_is_stored_by_link_and_reaches_the_model(
+        live_reply, tmp_path, monkeypatch):
+    import lib.runtime.runtime_paths as runtime_paths
+    from lib.llm.body import build_body
+    owner, conversation, executor = live_reply
+    _steer(owner, conversation, 'steer-shot',
+           {'content': _STEER_TEXT, 'images': [_composer_image()]})
+
+    record = _record(owner, conversation, executor, 'steer-shot')
+    assert record['deliveryState'] == 'pending'
+    assert record['previews'] == [{
+        'text': _STEER_TEXT,
+        'images': [{'preview': _LINK, 'url': _LINK, 'sizeKB': 1}],
+    }]
+
+    carrier = _round_boundary(executor)
+    assert carrier['_containsHumanSteer'] is True
+    content = carrier['content']
+    assert isinstance(content, list), content
+    # The model receives the image itself (resolved from the stored upload at
+    # dispatch) plus the reference it can pass to inspect_image.
+    assert _image_urls(content) == [_LINK]
+    texts = [block['text'] for block in content if block.get('type') == 'text']
+    assert any(f'[image ref: {_LINK}' in text for text in texts), texts
+    assert texts[-1] == _STEER_TEXT
+    assert _STEER_TEXT not in texts[:-1]
+
+    # The provider request carries the uploaded bytes themselves.
+    uploads = tmp_path / 'uploads'
+    (uploads / 'images').mkdir(parents=True)
+    (uploads / 'images' / _LINK.rsplit('/', 1)[1]).write_bytes(base64.b64decode(_PNG))
+    monkeypatch.setattr(runtime_paths, 'uploads_root', lambda: str(uploads))
+    body = build_body('gpt-4o', [carrier], image_user_id=owner)
+    assert _image_urls(body['messages'][-1]['content']) == [_DATA_URL]
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_a_text_only_steer_is_unchanged(live_reply):
+    owner, conversation, executor = live_reply
+    _steer(owner, conversation, 'steer-text', {'content': 'just words'})
+    assert _record(owner, conversation, executor, 'steer-text')['previews'] == [
+        {'text': 'just words'}]
+    carrier = _round_boundary(executor)
+    assert carrier['content'] == 'just words'
+    assert carrier['_containsHumanSteer'] is True
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_an_image_sent_without_words_waits_as_the_next_turn(live_reply):
+    """Both authorities keep a steer by its text. A screenshot sent alone into
+    a running reply degrades to the durable queue, images intact, instead of
+    failing the send."""
+    from lib.turn_lifecycle import get_turn
+    owner, conversation, executor = live_reply
+    result = _service().create_turn(conversation, owner, {
+        'commandId': 'steer-image-only',
+        'inputTurn': {'content': '', 'images': [_composer_image()]},
+        'config': {}, 'injectMode': 'steer'}, request_started_at=time.time()).value
+    assert result.get('queued') is True and result.get('steerFallback') is True, result
+    queued = get_turn(conversation, result['submittedTurn']['turnId'], user_id=owner)
+    assert [image['url'] for image in queued['projection']['images']] == [_LINK]
+    assert not _record_ids(owner, conversation, executor)
+
+
+def _record_ids(owner, conversation, executor):
+    from lib.turn_lifecycle import get_turn
+    projection = get_turn(conversation, executor['_turnId'], user_id=owner)['projection']
+    return [record.get('commandId') for record in projection.get('_userSteerInjects') or []]
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+@pytest.mark.parametrize('live_reply', ['other process'], indirect=True)
+def test_a_committed_steer_requeued_as_the_next_turn_keeps_its_images(live_reply, monkeypatch):
+    """A steer that missed its executor's last boundary becomes the next Turn;
+    that Turn's message carries the images in the shape the message builder
+    renders (a stored link, or the inline payload of a failed upload)."""
+    from lib.scheduler import conversation_dispatch
+    from lib.tasks_pkg.committed_steers import committed_steers, requeue_committed_steer
+    owner, conversation, executor = live_reply
+    _steer(owner, conversation, 'steer-late',
+           {'content': _STEER_TEXT, 'images': [_composer_image(), _failed_upload_image()]})
+    dispatched = []
+
+    class Accepted:
+        accepted, disposition, queue_id = True, 'queued', 'queue-late'
+
+    def dispatch(conversation_id, message, config, **kwargs):
+        dispatched.append(message)
+        return Accepted()
+
+    monkeypatch.setattr(conversation_dispatch, 'dispatch_scheduled_turn', dispatch)
+    [item] = committed_steers(executor)
+    assert requeue_committed_steer(executor, item)['deliveryState'] == 'queued'
+    [message] = dispatched
+    assert message['content'] == _STEER_TEXT
+    assert message['images'] == [
+        {'preview': _LINK, 'url': _LINK, 'sizeKB': 1},
+        {'preview': _DATA_URL, 'sizeKB': 1, 'base64': _PNG, 'mediaType': 'image/png'},
+    ]
+
+
+def test_an_image_whose_upload_failed_reaches_the_model_inline():
+    """Without a stored link the inline payload is the only copy; the model
+    still receives it rather than the text alone."""
+    from lib import agent_inbox
+    from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
+    conversation = f'steer-inline-{uuid.uuid4().hex[:10]}'
+    agent_inbox.enqueue(conversation, _STEER_TEXT, priority='next', mode='user-steer', extra={
+        'injectionId': 'cmd-inline', 'blockId': 'injection:user-steer:cmd-inline',
+        '_user_msg': {'role': 'user', 'content': _STEER_TEXT,
+                      'images': [_failed_upload_image()]}})
+    task = {'id': 'steer-inline', 'convId': conversation, '_userId': 1,
+            'config': {}, 'aborted': False, 'toolRounds': []}
+    messages = [{'role': 'user', 'content': 'first'}]
+    try:
+        drain_and_inject_inbox(task=task, messages=messages, round_num=1, tid='inline')
+    finally:
+        agent_inbox.reset_for_test(conversation)
+    content = messages[-1]['content']
+    assert isinstance(content, list), content
+    assert _image_urls(content) == [_DATA_URL]
+    assert content[-1] == {'type': 'text', 'text': _STEER_TEXT}
 
 
 if __name__ == '__main__':

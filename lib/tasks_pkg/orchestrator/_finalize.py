@@ -34,6 +34,7 @@ from lib.turn_verdict import (
     DISPATCH_AUTHORITY_ABORT_REASONS,
     INTERNAL_FENCE_ABORT_REASONS,
     MODEL_REFUSAL_CAUSE,
+    RESTART_ABORT_REASONS,
     dispatch_authority_stop_detail,
 )
 from lib.tasks_pkg.llm_fallback._refusal import (
@@ -47,7 +48,7 @@ from lib.llm.stream_result import (
     ProviderStreamState,
     ensure_provider_stream_result,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -126,7 +127,7 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
     Returns an empty list if the completion looks normal.  Also emits
     appropriate warning logs for each detected suspicion.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     _content_len = len(task.get('content') or '')
     _thinking_len = len(task.get('thinking') or '')
     _elapsed = time.time() - task.get('created_at', time.time())
@@ -200,7 +201,7 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 
 # ── Suspicious-completion INTERCEPTION (act, not just warn) ───────────────
 #
-# WHY this exists (2026-07-28 09:51–10:45 incident): the sankuai gateway
+# WHY this exists (2026-07-28 09:51–10:45 incident): the example-corp gateway
 # intermittently returned a 29-char canned greeting ("Hi! How can I help you
 # today?") with ``finish_reason=stop`` for every Opus 5 request — 68 times,
 # each carrying a real M-TraceId. Tasks that had just spent N rounds doing real
@@ -248,7 +249,7 @@ def _maybe_preserve_accumulated_on_suspicion(task, last_finish_reason,
     ``False`` when the turn was left untouched. See the module note above for
     the incident this closes and the gate boundaries.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     if last_finish_reason != 'stop':
         return False
     if not tool_call_happened:
@@ -391,7 +392,7 @@ def _finalize_dangling_tool_rounds(task: dict[str, Any]) -> int:
         # at claim time with a receipt — sweeping it to 'aborted' would lie.
         'unknown',
     }
-    tid = (task.get('id', '?') or '?')[:8]
+    tid = (task.get('id', '?') or '?')
     finalized = 0
     for index, entry in enumerate(rounds):
         if not isinstance(entry, dict):
@@ -476,7 +477,7 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
             and task.get('error')):
         logger.warning(
             '[%s] whole-turn auto-retry suppressed: a partial stream reply is '
-            'being preserved across a later terminal error', task['id'][:8])
+            'being preserved across a later terminal error', task_log_tag(task['id']))
         return False
 
     from lib.tasks_pkg.turn_retry import (
@@ -492,7 +493,7 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
             for row in task.get('toolRounds') or [] if isinstance(row, dict)):
         return False
 
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     err = task.get('error')
     attempt = int(task.get('_auto_turn_retry_count') or 0)
     retry, backoff_s = should_auto_retry_turn(err, attempt, cfg)
@@ -706,7 +707,7 @@ def _maybe_append_sources_footer(task: dict[str, Any]) -> None:
     task['content'] = (content + "\n\n---\n**来源 / Sources**（本轮检索所用，供核对）：\n"
                        + "\n".join(f"- {url}" for url in footer_urls))
     logger.info('[%s] appended Sources footer (%d urls) — answer cited none of the '
-                'pages it opened this turn', task['id'][:8], len(footer_urls))
+                'pages it opened this turn', task_log_tag(task['id']), len(footer_urls))
 
 
 def _salvage_undelivered_steer(task: dict[str, Any]) -> int:
@@ -802,11 +803,11 @@ def _salvage_undelivered_steer(task: dict[str, Any]) -> int:
                             injection_id, user_id=owner_user_id)
                 except Exception as _sqe:
                     logger.error('[Orchestrator] steer salvage enqueue failed '
-                                 'conv=%s: %s', conv_id[:8], _sqe, exc_info=True)
+                                 'conv=%s: %s', conv_id, _sqe, exc_info=True)
             if salvaged:
                 logger.info('[Orchestrator] salvaged %d undelivered steer msg(s) '
                             'to message_queue on task end (conv=%s)',
-                            salvaged, conv_id[:8])
+                            salvaged, conv_id)
     except Exception as _e:
         logger.warning('[Orchestrator] steer salvage on task end failed: %s',
                        _e, exc_info=True)
@@ -833,7 +834,7 @@ def _run_post_loop_fallback(
     api_rounds: list,
 ) -> tuple[Any, Any, ProviderStreamResult | None]:
     """Synthesize a terminal answer when tools returned data but prose did not."""
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     prior_error = task.get('error')
     from lib.llm import AbortedError
     from lib.tasks_pkg.context_composer import append_injection
@@ -1030,6 +1031,14 @@ def _settle_post_loop_finish_reason(
                 'user_abort. Loop exit was "%s" model=%s.',
                 tid, _abort_reason, loop_exit_reason, model,
             )
+        elif _abort_reason in RESTART_ABORT_REASONS:
+            # A restart pause: the verdict reads it as resumable interrupted
+            # work. Nobody pressed Stop, so the log must not say so either.
+            last_finish_reason = 'aborted'
+            logger.info(
+                '[%s] Server restart paused the turn (_abort_reason=%s); loop exit '
+                'was "%s", original finish_reason "%s", model=%s.',
+                tid, _abort_reason, loop_exit_reason, pre_abort_finish, model)
         else:
             last_finish_reason = 'aborted'
             if abort_detected_phase:
@@ -1106,7 +1115,7 @@ def _log_terminal_runtime_stats(
                 '[CacheSession] %s conv=%s END — %d calls, '
                 'total_read=%d total_write=%d overall_hit=%d%% '
                 'breaks=%d duration=%.1fs model=%s',
-                tid, conv_id[:8], session_stats['calls'],
+                tid, conv_id, session_stats['calls'],
                 session_stats['total_cache_read'],
                 session_stats['total_cache_write'],
                 session_stats['overall_hit_pct'],
@@ -1133,7 +1142,7 @@ def _log_terminal_runtime_stats(
         if isinstance(cache, dict) and (cache or evictions > 0):
             logger.info(
                 '[%s] %s conv=%s task END — %d entries, %d evicted',
-                label, tid, conv_id[:8] if conv_id else '???', len(cache),
+                label, tid, conv_id if conv_id else '???', len(cache),
                 evictions,
             )
 
@@ -1143,7 +1152,7 @@ def _log_terminal_runtime_stats(
     logger.debug(
         '[Orchestrator] Task %s conv=%s COMPLETED — content=%dchars '
         'thinking=%dchars error=%s elapsed=%.1fs finishReason=%s toolCalls=%s',
-        task['id'][:8], conv_id, content_len, thinking_len,
+        task_log_tag(task['id']), conv_id, content_len, thinking_len,
         task.get('error') or 'none', elapsed, last_finish_reason,
         'yes' if tool_call_happened else 'no')
     if (content_len == 0 and thinking_len == 0 and not task.get('error')
@@ -1151,7 +1160,7 @@ def _log_terminal_runtime_stats(
         logger.warning(
             '[Orchestrator] Task %s conv=%s ⚠️ COMPLETED WITH EMPTY CONTENT '
             'and no error! This will appear as a blank message to the user.',
-            task['id'][:8], conv_id)
+            task_log_tag(task['id']), conv_id)
     logger.debug(
         '[Orchestrator] Task %s LIFECYCLE SUMMARY:\n'
         '  loop_exit_reason   = %s\n'
@@ -1224,7 +1233,7 @@ def _strip_end_turn_control_token(task: dict[str, Any], tid: str) -> None:
     # value, so a per-renderer strip would inevitably miss one.
     try:
         from lib.tasks_pkg.stream_handler._intent_stall import (
-            strip_end_turn_marker,
+            strip_end_turn_marker, strip_silent_turn_marker,
         )
         from lib.tasks_pkg.stream_handler._router_silence import silent_turn_declared
         if silent_turn_declared(task):
@@ -1232,7 +1241,7 @@ def _strip_end_turn_control_token(task: dict[str, Any], tid: str) -> None:
             return
         _pre_strip = task.get('content') or ''
         if _pre_strip:
-            _stripped = strip_end_turn_marker(_pre_strip)
+            _stripped = strip_silent_turn_marker(strip_end_turn_marker(_pre_strip))
             if _stripped != _pre_strip:
                 task['content'] = _stripped
                 logger.info('[%s] stripped [END_TURN:…] control token from the '
@@ -1255,7 +1264,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     determines the final finish reason, generates tool summaries, and emits
     the 'done' event with full diagnostic information.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
 
     # ── Turn-level auto-retry over TRANSIENT terminal errors ──
     # Before finalizing a failed turn, check whether the settled error is a
@@ -1475,7 +1484,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             if summary:
                 task['toolSummary'] = summary
         except Exception as e:
-            logger.warning('[Task %s] Tool summary generation failed model=%s (non-fatal): %s', task['id'][:8], model, e, exc_info=True)
+            logger.warning('[Task %s] Tool summary generation failed model=%s (non-fatal): %s', task_log_tag(task['id']), model, e, exc_info=True)
 
     if not detached_presentation and not task.get('_flow_managed'):
         # Finalize-window latch: stamp BEFORE the terminal flip. From here

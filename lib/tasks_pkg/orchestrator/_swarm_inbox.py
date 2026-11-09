@@ -133,7 +133,7 @@ def drain_and_inject_inbox(
             # Notices other writers and landings left for this conversation join
             # the same task-local advice (integration radar).
             try:
-                from lib.conversations.project_brain import queue_radar_notices
+                from lib.project_mod.integration_radar import queue_radar_notices
                 queue_radar_notices(task)
             except Exception as _radar_exc:
                 logger.debug('[SwarmInbox] radar notices skipped: %s', _radar_exc)
@@ -170,6 +170,16 @@ def drain_and_inject_inbox(
                                         + list(_steer_items) + list(_bgcmd_items))
                              if it.get('value')]
                 _project_payloads = [it['value'] for it in _project_items if it.get('value')]
+                # A human steer's images ride the same carrier, rendered like
+                # the images of a new turn, so the model sees the screenshot
+                # and not only the words sent with it.
+                _steer_media = []
+                if _steer_items:
+                    from lib.agent_inbox._steer_preview import steer_model_images
+                    from lib.tasks_pkg.conv_message_builder.api import image_content_blocks
+                    for it in _steer_items:
+                        if it.get('value'):
+                            _steer_media.extend(image_content_blocks(steer_model_images(it)))
                 if _payloads or _project_payloads:
                     if _payloads:
                         before_append = len(messages)
@@ -178,7 +188,7 @@ def drain_and_inject_inbox(
                                 messages, 'inbox_delivery', '\n\n'.join(_payloads),
                                 task=task, round_num=round_num,
                                 contains_human_steer=bool(_steer_items),
-                                display_owner='inbox-lanes')
+                                display_owner='inbox-lanes', media=_steer_media)
                         except Exception:
                             if len(messages) == before_append:
                                 # Nothing entered model context. Restore the
@@ -199,7 +209,7 @@ def drain_and_inject_inbox(
                         # Presentation is not consumption: until the verified
                         # provider-return flush, this carrier must not enter a
                         # published continuation checkpoint.
-                        from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+                        from lib.tasks_pkg.inbox_delivery import UNVERIFIED_INBOX_DELIVERY
                         task[UNVERIFIED_INBOX_DELIVERY] = True
                         if _swarm_items:
                             # Only a carrier actually appended can later be

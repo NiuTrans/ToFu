@@ -1,5 +1,6 @@
 """Headless execution reuses application boot and proves joined shutdown."""
 import asyncio
+import logging
 from types import SimpleNamespace
 import threading
 
@@ -38,7 +39,7 @@ def test_execution_host_awaits_common_boot_and_physical_shutdown(boot_fails):
         calls = []
         ready, stopped, draining, joined = (asyncio.Event() for _ in range(4))
         shutdown = threading.Event()
-        runner = SimpleNamespace(status='starting', task=None)
+        runner = SimpleNamespace(status='starting', task=None, snapshot=lambda: {})
 
         async def bootstrap():
             runner.status = 'failed' if boot_fails else 'ready'
@@ -70,6 +71,48 @@ def test_execution_host_awaits_common_boot_and_physical_shutdown(boot_fails):
         else:
             await host
         assert calls == ['startup', 'drain', 'joined']
+
+    asyncio.run(exercise())
+
+
+def test_failed_execution_boot_preserves_the_common_phase_error():
+    from quart import Quart
+    from lib.production_lifecycle import BootPhase, BootRunner
+    from serverctl_pkg.execution_lifespan import run_execution_lifespan
+
+    async def exercise():
+        app = Quart(__name__)
+        shutdown = threading.Event()
+        closed = []
+
+        async def refuse_storage():
+            raise RuntimeError('storage cutover refused: lib/business.py')
+
+        runner = BootRunner(app, phase_total=1, inline_phases=(),
+            background_phases=(BootPhase(1, 'storage_boundary',
+                'Exclusive storage boundary', refuse_storage),),
+            stop_event=shutdown, logger=logging.getLogger(__name__),
+            boot=lambda *args: None)
+
+        async def startup():
+            await runner.run_inline()
+            runner.start_background()
+
+        async def close():
+            assert shutdown.is_set()
+            await runner.stop()
+            closed.append(True)
+
+        app.extensions.update(tofu_boot_runner=runner, tofu_shutdown_requested=shutdown)
+        host = SimpleNamespace(startup=startup, shutdown=close, extensions=app.extensions)
+        with pytest.raises(RuntimeError) as failure:
+            await run_execution_lifespan(host, asyncio.Event(),
+                lambda: pytest.fail('failed bootstrap published readiness'))
+
+        assert runner.status == 'failed'
+        assert runner.snapshot()['error'] in str(failure.value)
+        assert 'storage cutover refused: lib/business.py' in str(failure.value)
+        assert closed == [True]
 
     asyncio.run(exercise())
 
@@ -134,5 +177,46 @@ def test_stop_during_construction_closes_the_constructed_application():
             extensions={'tofu_shutdown_requested': shutdown})
         await run_execution_lifespan(app, stopped, lambda: pytest.fail('ready'))
         assert closed == [True]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('before_boot', [True, False])
+def test_source_recovery_witness_cannot_be_created_after_application_start(
+        tmp_path, monkeypatch, before_boot):
+    import os
+    from serverctl_pkg import execution_host
+    from serverctl_pkg.execution_plan import ExecutionSourceChanged
+
+    async def exercise():
+        reader, writer = os.pipe()
+        shutdown = threading.Event()
+        closed = []
+        record = {'plan': {}, 'serviceId': 'owned-execution'}
+        args = SimpleNamespace(manager_fd=reader, manager_pid=os.getpid(),
+            manager_start=1, state_file=str(tmp_path / 'execution.json'))
+        monkeypatch.setattr(execution_host, 'process_matches', lambda *args: True)
+
+        async def startup():
+            raise ExecutionSourceChanged('source changed after startup entered')
+
+        async def close():
+            closed.append(True)
+
+        def construct(stop, plan):
+            if before_boot:
+                raise ExecutionSourceChanged('source changed before startup')
+            return SimpleNamespace(startup=startup, shutdown=close,
+                extensions={'tofu_shutdown_requested': shutdown})
+
+        try:
+            with pytest.raises(ExecutionSourceChanged):
+                await execution_host._run_application(
+                    args, record, asyncio.Event(), shutdown, construct)
+            assert record.get('failureKind') == ('source_changed_before_boot' if before_boot else None)
+            assert closed == ([] if before_boot else [True])
+        finally:
+            os.close(reader)
+            os.close(writer)
 
     asyncio.run(exercise())

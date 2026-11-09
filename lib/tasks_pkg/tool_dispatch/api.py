@@ -50,7 +50,7 @@ def repair_prepared_call_ids(task, parsed_calls, round_num, project_path):
     for index, item in enumerate(parsed_calls):
         original = item[2]
         item = _repair_current_tool_call_identity(
-            task, [], parsed_calls, index, item, round_num=round_num, tid=task['id'][:8],
+            task, [], parsed_calls, index, item, round_num=round_num, tid=task_log_tag(task['id']),
             receipts=receipts, historical_used_ids=historical, used_ids=used,
             claimed_ids=claimed, settled_results={}, pending_envelopes={})
         if item[2] != original:
@@ -74,6 +74,7 @@ from lib.tasks_pkg.tool_dispatch._pipeline import execute_tool_pipeline
 from lib.tasks_pkg.tool_dispatch._ordering import (
     release_gateway_siblings, restore_command_sticky_cwd,
 )
+from lib.log import task_log_tag
 
 
 def authorize_prepared_tool_call(task, parsed_call, *, configuration, project_path, round_num, model):
@@ -108,7 +109,7 @@ def authorize_prepared_tool_call(task, parsed_call, *, configuration, project_pa
         attended=bool(task.get('_attended')), auto_apply=True if auto is None else auto,
         cfg=configuration, project_path=project_path, round_num=round_num,
         model=model, tool_results={}, idempotent_tools=idempotent,
-        cache=_ensure_tool_result_cache(task), tid=task['id'][:8],
+        cache=_ensure_tool_result_cache(task), tid=task_log_tag(task['id']),
         receipt_required=True,
     )
     if task.get('aborted') or task['abort_event'].is_set():

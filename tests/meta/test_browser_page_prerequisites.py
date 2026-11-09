@@ -13,6 +13,7 @@ bundler or ``require`` error, or hand-skipped silently even where
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import re
 import subprocess
@@ -91,6 +92,26 @@ def test_direct_graph_reader_skips_with_the_remedy(monkeypatch):
     monkeypatch.setenv('TOFU_REQUIRE_FRONTEND', '1')
     with pytest.raises(pytest.fail.Exception, match='TOFU_REQUIRE_FRONTEND=1'):
         reader._manifest()
+
+
+@pytest.mark.parametrize('consumer', ['plugin-page', 'application-shell', 'shell-cache'])
+@pytest.mark.parametrize('required', [False, True], ids=['ordinary', 'frontend-required'])
+def test_http_graph_consumers_name_the_missing_build(monkeypatch, consumer, required):
+    from tests.application_shell_fragments import test_application_shell_fragments as shell
+    from tests.frontend import test_plugin_frontend_delivery as plugin
+
+    monkeypatch.setattr(_jsdom, 'shipped_graph_available', lambda: False)
+    monkeypatch.setenv('TOFU_REQUIRE_FRONTEND', '1' if required else '0')
+    consume = {
+        'plugin-page': lambda: inspect.unwrap(plugin.plugin_page_app)(monkeypatch),
+        'application-shell': shell._served_index_html,
+        'shell-cache': lambda: shell.test_index_cache_owns_fragment_signature_and_injection(
+            monkeypatch),
+    }[consumer]
+    exception = pytest.fail.Exception if required else pytest.skip.Exception
+    reason = 'TOFU_REQUIRE_FRONTEND=1' if required else 'npm run build:frontend'
+    with pytest.raises(exception, match=reason):
+        consume()
 
 
 ROOT = Path(__file__).resolve().parents[2]

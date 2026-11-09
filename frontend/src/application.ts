@@ -55,7 +55,7 @@ const imageEntries = new Set([
 const projectBrainEntries = new Set([
   'openProjectBrain', 'toggleProjectBrain',
 ]);
-const mydayEntries = new Set(['openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate']);
+const mydayEntries = new Set(['openDailyReport', 'closeDailyReport']);
 const utilityPanelEntries = new Set([
   'openUpdateDialog', 'closeUpdateModal', '_renderSettingsUpdatePill',
   'toggleTimerPanel', 'toggleOptimizerPanel',

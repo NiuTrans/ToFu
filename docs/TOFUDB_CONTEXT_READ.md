@@ -253,12 +253,86 @@ python3 benchmarks/tofudb_context_read.py --engine tofudb \
   --payload-bytes 512 --pattern escaped --count 20 --output /scratch/native.json
 ```
 
+## Paged Turns in context reads
+
+Stage 2 of [paged Turn storage](STORAGE.md#paged-turn-storage) (Decision 6).
+
+Problem: every selected Turn crossed the storage boundary as one value.
+Measured 2026-11-08 on SQLite and native before this change: a Turn above one
+`storage.v2` frame payload (8,384,512 bytes) rode a context page whole; a Turn
+above the page budget (`maximumContextPageBytes` less the continuation) closed
+the page before it and was returned alone on its own page, beyond the budget;
+and when that lone Turn plus the page's continuation exceeded the response
+bound the whole read was refused (native `database_resource_exhausted` "turn
+response exceeds its bounded streamed payload", SQL `database_protocol_error`
+"Storage frame exceeds the size limit"), so the conversation could not build
+model context at all. A 60,002,965-byte Turn read alone; with a 7.2 MB
+continuation on its page, both authorities refused. Nothing was truncated.
+
+Decision:
+
+- Both authorities plan each Turn placed on a response page with the
+  `turn.projection.page` planner (`turn_projection_page(turn, 0)`,
+  `projection_page::paged_head`). A Turn with more than one page is returned
+  as `{"pagedTurn": head}`: page 0's `turn`, the `turn.get` record without its
+  paged members, from the same snapshot. It costs the page only the head's
+  bytes and still names the cursor and the media fence. Selection is by page
+  count, never by failure or by another size.
+- Proofs, coverage, the anchor's terminal witness and frontier certification
+  are unchanged: they read compact headers and whole Turns inside the
+  authority.
+- `ModelContinuationStore.read_context` replaces each head, as its context
+  page arrives, with `read_paged_turn` pinned to the head's
+  `projectionRevision`, and requires the reassembled Turn to carry exactly that
+  head: a public Turn can change without a projection revision (native
+  execution-epoch presentation). `TurnProjectionRevisionMoved`, an absent Turn
+  or another head raise the existing paging invalidation, which restarts the
+  whole read under a fresh proof within the existing three-assembly bound;
+  persistent churn stays `database_conflict` "model context changed during
+  paging". An assembly never mixes revisions.
+- The reader returns paged members after the head's own projection keys, so a
+  reassembled Turn's key order differs from `turn.get`. No context digest
+  depends on it: `settled_witness` and `model_replay._digest` encode sorted
+  keys, the proof and frontier hash compact headers, and the message builder
+  reads projection members by name. The specification compares the built
+  messages byte for byte, every witness, the history fingerprint and the proof
+  with the whole-Turn read, so no owner needed to canonicalize.
+- An older client given a `pagedTurn` row fails closed (`build_api_messages`
+  raises on the missing `turnId`; witness and rebind paths report unavailable)
+  and never treats a head as a whole Turn.
+
+Alternatives rejected: selecting the paged path only for a Turn that exceeds
+the page budget or the response bound leaves it unexercised until stage 7 and
+keeps the refusal; a size cutoff or the Turn's own encoded size is a second
+rule beside the planner's page count; embedding page 0 with its member slices
+puts up to one frame per paged Turn into every context page; head rows that
+look like Turns beside a list of paged ids let a consumer that misses the list
+use a truncated Turn silently; streaming reassembled Turns from the authority
+keeps the whole-Turn response this rollout removes; re-pinning a moved Turn to
+its new revision mixes it with a proof taken from the older snapshot.
+
+Costs: each Turn placed on a response page is planned once more, one counting
+pass over its members (no whole-Turn buffer natively). On this host the SQL
+authority's planner takes 17 µs for a small Turn beside the existing 11 µs size
+encoding, and 160 ms for a 66 MB Turn whose own encoding (382 ms) a paged Turn
+now pays only for its head. Native latency was not measured for this change.
+The client reads a paged Turn with one `turn.projection.page` request per page;
+until physical pages land (stages 3 and 4) each request materializes the Turn.
+No worker, cache, setting, retry or persisted state is added.
+
 ## Verification and reproduction
 
 - `response_json::tests` compares byte lengths, floats, Unicode, reserved
   markers and depth acceptance with the original serde_json round trip.
 - `tests/model_routing/test_model_context_read.py` checks native/SQL parity,
-  complete multi-page histories, owner denial and changed-proof restart.
+  complete multi-page histories, owner denial and changed-proof restart; with
+  a Turn above one projection page on SQLite, native and PostgreSQL it checks
+  the `pagedTurn` head, byte-identical messages, witnesses and proofs against
+  the whole-Turn read, a checkpoint minted from the paged Turn, a revision that
+  moves mid-read and a Turn deleted mid-read.
+- `tests/storage/test_model_context_paging.py` scripts head replacement and
+  every restart cause; `turn::model_context::tests` checks the native head row,
+  its cursor and media fence.
 - `tests/tofudb/test_context_semantic_revision.py` covers display/model edits,
   terminal witnesses, continuation invalidation and reopen on real authorities.
 - `tests/tofudb/test_context_read_measure.py` rejects wrong content, incomplete

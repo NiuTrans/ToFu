@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.storage.storage_event_policy import resolve_storage_event_budget
+from lib.agent_core.storage_event_policy import resolve_storage_event_budget
 
 
 pytestmark = pytest.mark.unit

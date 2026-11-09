@@ -485,9 +485,10 @@ The stages `catalog_location_hit`, `catalog_location_absent`,
 `catalog_locations step=published` with its source, publication, located blocks,
 unindexed segments, resident bytes and elapsed time.
 
-*Cost:* 8 bytes per catalogued block, retained for the process (about 1.84 GB
-for the live 230M blocks, at most 2 GiB for a full catalog of full segments);
-a derivation briefly holds the old and the new table. It replaces the table the
+*Cost:* 8 bytes per catalogued block in each of two retained allocations, the
+published table and the spare it replaced (about 1.84 GB each for the live 230M
+blocks, at most 2 GiB each for a full catalog of full segments; see "Derivations
+write into the replaced table" below). It replaces the table the
 online GC rebuilt for every mark (1.2-1.5 GB and 12-25 s of index streaming per
 epoch on the live volume), which now happens once per process. Nothing is
 sized by a knob: the catalog bounds the table, a derivation runs once per
@@ -573,13 +574,63 @@ next restart), where the old engine's foreground uncached reads averaged
 20.2 ms. None of the 38 remaining long holds (median 2.7 s, up to 23 s, while
 the host ran at load average 50-93) was a catalog walk: the four longest spent
 17-23 s in IR execution, command execution, one block read and one engine
-commit, and their cause is not diagnosed. History-payload blocks resolve
+commit. The holds dominated by `command_execute` coincide with the memory
+cgroup at its limit ("Derivations write into the replaced table" below). History-payload blocks resolve
 through `get_from_history` before any catalog lookup and are outside the table;
 the online GC still performed 1.45M uncached block reads per hour at 1.3 ms on
 average. `location_table_derivation_measurement` (ignored; a synthetic
 229M-entry table of 4,096 full segments, one dropped) times one derivation at
 1.9-2.8 s on warm memory, matching the live
 `catalog_locations step=published source=derive` lines (median 2.6 s).
+
+### Derivations write into the replaced table (2026-11-08)
+
+*Problem:* every derivation allocated its table afresh: 1.86 GB for the live
+232M entries, which the kernel maps and zero-fills page by page as the
+derivation writes it, then unmaps when the next derivation replaces it. In the
+first 5.5 hours after the 2026-11-07 restart that was 154 derivations, about
+286 GB of fresh memory. The container's memory cgroup (v1, no swap, about
+150 GB of it page cache from the FUSE mount) ran at 99.2-99.9% of its 220 GiB
+limit, where every fresh page is charged through synchronous reclaim. All 13
+authority holds of that period dominated by `command_execute` (2-44 s, every
+one on the exclusive lane) fell in windows at 99.8-100% (35 of the 81 other
+holds did; Fisher p about 6e-5); 6 of them fell inside a derivation
+(time-shifted null p about 0.008), and twice its 1.5 GiB step brought the cgroup
+to the limit just before the stall. Sampled daemon threads then sat in
+uninterruptible sleep outside any syscall, that is, faulting. Kernel stacks
+were not readable, so the stall mechanism is inferred, not observed.
+
+*Decision:* `BlockStore` keeps the table the published one replaced
+(`retired_catalog_locations`), and `advance_catalog_locations` hands it to
+`derive_location_table` as the spare whose allocations the new table takes,
+once no reader holds it (`Arc::try_unwrap`). The published table and the spare
+then alternate between two allocations, so the derivation writes pages that
+are already resident. A spare a reader still holds (a whole-store pass keeps
+its table for a whole mark) is left to that reader, and that derivation
+allocates as before. A spare too small for the new table is released before
+its replacement is allocated, at `Vec`'s doubling capped at the format's
+2^28 entries, so a growing catalog reallocates only when its table doubles.
+Publication no longer frees the replaced table under the publication lock that
+cold reads take. The cost is the second resident table between derivations;
+the peak, two tables during a derivation, is unchanged.
+
+*Alternatives rejected:* deriving in place, because readers keep using the
+published table while the derivation reads it; one shared table updated per
+segment, which needs reader exclusion; an allocator purge delay or `madvise`
+hint, a knob that changes every allocation without guaranteeing this one;
+exactly sized fresh tables, the previous behavior.
+
+*Measurement:* `location_table_derivation_measurement` (thin-LTO release test
+binary, the synthetic 229M-entry table, one segment dropped) on the loaded host:
+deriving into fresh memory took 1.95-3.07 s and 508K-1,344K minor faults over
+five runs; deriving into the previous round's table took 1.17-1.91 s and
+11K-805K (medians 2.03 s fresh, 1.26 s reused). The table's own first touch
+is 448K pages; the faults reused rounds
+still take vary with host load (`kernel.numa_balancing` is on) and are not
+the table's. `derivations_write_into_the_retired_table_once_no_reader_holds_it`
+shows the third derivation writing into the first one's allocation after the
+catalog shrinks, and a table a reader holds staying intact while the next
+derivation allocates.
 
 ## Shared segment read handles (2026-11-07)
 

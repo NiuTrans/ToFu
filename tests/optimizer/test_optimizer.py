@@ -322,9 +322,10 @@ class TestApplyProposalGate:
 
 @pytest.mark.unit
 class TestBlockSearchDomainAction:
-    def test_normalise_domain_strips_scheme_www_path_port(self):
+    def test_normalise_domain_strips_scheme_www_port_and_keeps_path(self):
         from lib.optimizer.actions import block_search_domain as b
-        assert b._normalise_domain("https://www.Spammy.Example:8080/path") == "spammy.example"
+        # Paths are URL-prefix rules (lib.search.search_settings.normalise_domain).
+        assert b._normalise_domain("https://www.Spammy.Example:8080/path") == "spammy.example/path"
         assert b._normalise_domain("  HTTP://Foo.com  ") == "foo.com"
         assert b._normalise_domain("") == ""
 
@@ -339,24 +340,46 @@ class TestBlockSearchDomainAction:
                 owner_user_id=_OWNER_USER_ID)  # no dot → invalid
 
     def test_apply_then_revert_roundtrip(self, tmp_path, monkeypatch):
+        """The action writes a fetch-quality skip, never an operator ban."""
         from lib.optimizer.actions import block_search_domain as b
-        cfg = str(tmp_path / "server_config.json")
-        monkeypatch.setattr(b, "_CONFIG_FILE", cfg)
+        cfg = tmp_path / "server_config.json"
+        cfg.write_text(json.dumps({"search": {
+            "skip_domains": ["spam.example"], "skip_domains_schema": 2}}))
+        monkeypatch.setattr(b, "_CONFIG_FILE", str(cfg))
         monkeypatch.setattr(b._lib, "reload_config", lambda: None)
-        monkeypatch.setattr(b._lib, "SKIP_DOMAINS", set(), raising=False)
 
         out = b.apply(
             {"domain": "junk.example", "ttl_days": 3},
             owner_user_id=_OWNER_USER_ID)
         assert out["domain"] == "junk.example"
-        data = json.loads(open(cfg).read())
-        assert "junk.example" in data["search"]["skip_domains"]
+        assert out["fetch_skip_domains_size_after"] == 1
+        search = json.loads(cfg.read_text())["search"]
+        assert search["fetch_skip_domains"] == ["junk.example"]
+        assert search["skip_domains"] == ["spam.example"]
 
         rev = b.revert(
             {"domain": "junk.example"}, owner_user_id=_OWNER_USER_ID)
         assert rev["reverted"] is True
-        data2 = json.loads(open(cfg).read())
-        assert "junk.example" not in data2["search"]["skip_domains"]
+        search = json.loads(cfg.read_text())["search"]
+        assert search["fetch_skip_domains"] == []
+        assert search["skip_domains"] == ["spam.example"]
+
+    def test_revert_lifts_a_ban_applied_before_the_split(self, tmp_path, monkeypatch):
+        """An action applied before the split wrote the ban list; its expiry
+        still lifts it there without restoring the seeded defaults."""
+        from lib.optimizer.actions import block_search_domain as b
+        cfg = tmp_path / "server_config.json"
+        cfg.write_text(json.dumps({"search": {"skip_domains": [
+            "tiktok.com", "youtube.com", "junk.example", "spam.example"]}}))
+        monkeypatch.setattr(b, "_CONFIG_FILE", str(cfg))
+        monkeypatch.setattr(b._lib, "reload_config", lambda: None)
+
+        rev = b.revert(
+            {"domain": "junk.example"}, owner_user_id=_OWNER_USER_ID)
+        assert rev["reverted"] is True
+        search = json.loads(cfg.read_text())["search"]
+        assert search["skip_domains"] == ["spam.example"]
+        assert search["skip_domains_schema"] == 2
 
     def test_revert_missing_domain_is_noop(self, tmp_path, monkeypatch):
         from lib.optimizer.actions import block_search_domain as b

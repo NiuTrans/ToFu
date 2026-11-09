@@ -2,7 +2,9 @@
 
 Strategy: past days come from the durable daily-cost cache; current day is
 always live-computed; the calendar endpoint wraps the whole thing in a
-30-second in-process TTL cache to absorb burst-polling.
+30-second in-process TTL cache with one in-flight computation per owner month
+(``calendar_overview``). Scans read the storage authority's per-Turn usage
+projection (``conversation.turn_usage``), never transcripts.
 """
 
 import datetime as _dt
@@ -19,9 +21,8 @@ logger = get_logger(__name__)
 
 
 # ── Calendar endpoint TTL cache (avoids 5s+ repeated full-table scans) ──
-# Shared with storage._save_report / invalidate_day_cost_cache /
-# routes.daily_report.get_calendar_month — they all pop / clear the
-# entry for a month when a report is saved or cost data invalidated.
+# Owned by calendar_overview: it publishes month overviews here, and report
+# saves and cost invalidation clear them through calendar_overview.invalidate.
 from lib.ttl_cache import TTLCache
 
 # (owner_user_id, year, month) → {'days': dict, 'conv_days': set, 'cost_days': dict, ...}
@@ -106,44 +107,35 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id='', at=None):
 
 
 
-def _usage_rows_from_snapshots(snapshots):
-    """Build billing projections from authority-aware repository snapshots."""
-    projected = []
-    for snapshot in snapshots:
-        raw_settings = snapshot.get('settings') or {}
-        settings = (safe_json(raw_settings, default={}, label='cost-settings')
-                    if isinstance(raw_settings, str) else raw_settings)
-        settings = settings if isinstance(settings, dict) else {}
-        messages = snapshot.messages if isinstance(snapshot.messages, list) else []
-        first = messages[0] if messages and isinstance(messages[0], dict) else {}
-        first_content = first.get('content', '')
-        first_content = first_content[:30] if isinstance(first_content, str) else ''
-        # A windowed snapshot holds only the suffix after the scan bound;
-        # place untimestamped messages by their absolute position in the
-        # whole transcript, which full hydration would use.
-        message_start = getattr(snapshot, 'message_start', 0)
-        for index, message in enumerate(messages):
-            if not isinstance(message, dict) or not isinstance(
-                    message.get('usage'), dict):
-                continue
-            projected.append({
-                'id': snapshot['id'],
-                'title': snapshot.get('title') or '',
-                'created_at': snapshot.get('created_at') or 0,
-                'updated_at': snapshot.get('updated_at') or 0,
-                'conv_model': (settings.get('model') or settings.get('preset')
-                               or settings.get('effort') or ''),
-                'first_content': first_content,
-                'msg_index': message_start + index,
-                'total_msgs': message_start + len(messages),
-                'usage': message['usage'],
-                'msg_timestamp': message.get('timestamp', 0),
-                'msg_model': (message.get('model') or message.get('preset')
-                              or message.get('effort') or ''),
-                'msg_provider': (message.get('provider_id')
-                                 or message.get('providerId') or ''),
-            })
-    return projected
+# An untitled conversation is named by its first message in the per-day cost
+# breakdown.
+_TITLE_FALLBACK_CHARACTERS = 30
+
+
+def _usage_rows_from_projections(projections):
+    """Yield billing rows from per-Turn usage projections, one at a time."""
+    for projection in projections:
+        metadata = projection.metadata
+        settings = metadata.get('settings') or {}
+        conv_model = (settings.get('model') or settings.get('preset')
+                      or settings.get('effort') or '')
+        for turn in projection.turns:
+            yield {
+                'id': metadata['id'],
+                'title': metadata.get('title') or '',
+                'created_at': metadata.get('created_at') or 0,
+                'updated_at': metadata.get('updated_at') or 0,
+                'conv_model': conv_model,
+                'first_content': projection.title_fallback,
+                'msg_index': turn['index'],
+                'total_msgs': projection.message_count,
+                'usage': turn['usage'],
+                'msg_timestamp': turn.get('timestamp', 0),
+                'msg_model': (turn.get('model') or turn.get('preset')
+                              or turn.get('effort') or ''),
+                'msg_provider': (turn.get('provider_id')
+                                 or turn.get('providerId') or ''),
+            }
 
 
 
@@ -167,19 +159,20 @@ def _scan_costs_in_range(
     """
     owner_id = require_user_id(
         owner_user_id, context='daily report cost scan')
-    from lib.conversations.repository import scan_conversations_bounded
-    _candidate_count, snapshots = scan_conversations_bounded(
+    from lib.conversations.repository import scan_conversation_turn_usage
+    # Only per-Turn usage rows cross the storage boundary, so memory does not
+    # grow with transcripts. A read failure fails the scan: never persist a
+    # silently incomplete month as zeros.
+    _candidate_count, projections = scan_conversation_turn_usage(
         user_id=owner_id,
         updated_at_gte=ms_start,
         created_at_lt=ms_end,
+        timestamp_gte=ms_start,
+        timestamp_lt=ms_end,
         limit=10_000,
-        settings_keys=['model', 'preset', 'effort'],
-        # A transcript too large for one storage response is read back to
-        # this bound in message windows; one it still cannot read fails the
-        # scan: never persist a silently incomplete month as zeros.
-        oversized_messages_since_ms=ms_start,
+        title_fallback_characters=_TITLE_FALLBACK_CHARACTERS,
     )
-    rows = _usage_rows_from_snapshots(snapshots)
+    rows = _usage_rows_from_projections(projections)
 
     days = {}   # day_num → {cost, conversations}
 
@@ -329,11 +322,10 @@ def invalidate_day_cost_cache(date_str=None, *, owner_user_id):
             logger.debug('[DailyReport] Invalidated day-cost cache for %s', date_str)
         else:
             logger.info('[DailyReport] Invalidated ALL day-cost cache entries')
-        # Also drop the in-process calendar TTL cache so the next request
-        # picks up the change.
-        for key in list(_calendar_cache._data):
-            if key[0] == owner_id:
-                _calendar_cache.invalidate(key)
+        # Also drop the in-process calendar overview (cached or in flight)
+        # so the next request picks up the change.
+        from .calendar_overview import invalidate as invalidate_calendar
+        invalidate_calendar(owner_id)
     except Exception as e:
         logger.warning('[DailyReport] invalidate_day_cost_cache(%s) failed: %s',
                        date_str, e)

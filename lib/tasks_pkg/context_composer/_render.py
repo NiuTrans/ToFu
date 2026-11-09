@@ -9,8 +9,8 @@ from typing import Any
 
 from lib.log import get_logger
 from lib.tasks_pkg.context_composer._sections import (
-    _canonical_section,
-    _strip_to_body,
+    block_content_hash,
+    context_sections,
 )
 from lib.tasks_pkg.context_composer._models import (
     ComposeRequest,
@@ -279,12 +279,6 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
     )
 
 
-def block_content_hash(block_id: str, text: str) -> str:
-    """The content-addressed identity render_context assigns to one block body."""
-    return hashlib.sha256(
-        _canonical_section(block_id, text).encode('utf-8')).hexdigest()[:16]
-
-
 def _managed_block_hashes(
     messages: list[dict[str, Any]],
 ) -> dict[str, str]:
@@ -295,32 +289,14 @@ def _managed_block_hashes(
     messages are inspected.
     """
     latest: dict[str, str] = {}
-    marker_pattern = re.compile(
-        r'<!-- tofu-context:([^:\n]+):start -->.*?'
-        r'<!-- tofu-context:\1:end -->',
-        re.DOTALL,
-    )
     for message in messages:
         if not isinstance(message, dict) or not message.get('_contextComposer'):
             continue
-        content = message.get('content')
-        parts = content if isinstance(content, list) else [content]
-        for part in parts:
-            text = (part.get('text') if isinstance(part, dict) else part)
-            if not isinstance(text, str):
+        for section in context_sections(message.get('content')):
+            # A tail quote cannot witness a native policy prefix.
+            if section.id in _SYSTEM_PLACEMENT_IDS and message.get('role') != 'system':
                 continue
-            for match in marker_pattern.finditer(text):
-                block_id = match.group(1).strip()
-                # A tail quote/unverified legacy span cannot witness that a
-                # required native policy prefix is already installed.
-                if (block_id in _SYSTEM_PLACEMENT_IDS
-                        and message.get('role') != 'system'):
-                    continue
-                # Hash the wrapper-independent body section so a block hashes
-                # identically whether it rode a standalone reminder envelope
-                # or an amalgamated same-authority wrapper on-wire.
-                latest[block_id] = block_content_hash(
-                    block_id, _strip_to_body(match.group(0)))
+            latest[section.id] = section.content_hash
     return latest
 
 
@@ -447,7 +423,7 @@ def _emit_context_summary(request: ComposeRequest, names: str,
         from lib.tasks_pkg.context_composer import _round_num
         round_num = _round_num(request.task or {})
         logger.info('[Context] conv=%s round=%d blocks=[%s] total=%d',
-                    (request.conv_id or '?')[:8], round_num, names, total)
+                    (request.conv_id or '?'), round_num, names, total)
     except Exception:
         # This handler guards the logging backend itself. Logging here could
         # recurse into the same failure and must never break prompt assembly.
@@ -494,21 +470,8 @@ def _append_tail(messages: list[dict[str, Any]], rows: list[dict[str, Any]]) -> 
     return texts
 
 
-def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
-                   request: ComposeRequest, *,
-                   replace_managed: bool = True) -> ComposeResult:
-    """Compose trusted static policy and content-addressed runtime context.
-
-    Runtime blocks append only missing/changed versions; ``replace_managed``
-    remains a compatibility argument, not deletion authority. Registry-declared
-    system policy alone has a verified legacy migration and dedicated-prefix
-    replacement boundary; user-authored policy and quoted data are unchanged.
-    """
-    del replace_managed
-    from ._policy_prefix import (migrate_policy_prefix, is_static_policy,
-                                 policy_carrier)
-    migrate_policy_prefix(messages)
-    existing_hashes = _managed_block_hashes(messages)
+def _prepare_candidates(blocks: list[ContextBlock], request: ComposeRequest) -> list[dict]:
+    """Select and render candidates without reading or mutating history."""
     from dataclasses import replace
     from .registry import block_spec
     from lib.tasks_pkg.execution_profile import THIRD_PARTY_CONTEXT_BLOCKS, is_third_party_text
@@ -534,73 +497,56 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
         ),
     )
     for block in ordered:
-        key = block.dedupe_key or block.id
-        if key in winners:
-            manifest.append({
-                'id': block.id, 'source': block.source,
-                'authority': block.authority, 'placement': block.placement,
-                'stability': block.stability, 'lifecycle': block.lifecycle,
-                'injected': False, 'chars': 0, 'tokens': 0,
-                'reason': f'duplicate_of:{winners[key].id}',
-                'provenance': dict(block.provenance),
-                '_block': block, '_raw_text': _unwrap_reminder(block.content),
-            })
-            continue
-        winners[key] = block
-        missing_permissions = (
-            block.required_permissions - request.granted_permissions)
-        if missing_permissions:
-            manifest.append({
-                'id': block.id, 'source': block.source,
-                'authority': block.authority, 'placement': block.placement,
-                'stability': block.stability, 'lifecycle': block.lifecycle,
-                'injected': False, 'chars': 0, 'tokens': 0,
-                'reason': 'permission_denied:' + ','.join(
-                    sorted(missing_permissions)),
-                'provenance': dict(block.provenance),
-                '_block': block, '_raw_text': _unwrap_reminder(block.content),
-            })
-            continue
-        if block.suppressed_reason or not block.content.strip():
-            manifest.append({
-                'id': block.id, 'source': block.source,
-                'authority': block.authority, 'placement': block.placement,
-                'stability': block.stability, 'lifecycle': block.lifecycle,
-                'injected': False, 'chars': 0, 'tokens': 0,
-                'reason': block.suppressed_reason or 'empty',
-                'provenance': dict(block.provenance),
-                '_block': block, '_raw_text': _unwrap_reminder(block.content),
-            })
-            continue
-        text, truncated = _truncate(_unwrap_reminder(block.content), block.max_tokens,
-                                    request.model)
-
-        if truncated and block.id == 'project_context':
-            # A narrative cursor covers the whole page, never a clipped prefix.
-            # Omit it instead of letting a reused truncated hash become eligible
-            # for ACK on the next attempt after its reason becomes already_present.
-            manifest.append({
-                'id': block.id, 'source': block.source,
-                'authority': block.authority, 'placement': block.placement,
-                'stability': block.stability, 'lifecycle': block.lifecycle,
-                'injected': False, 'appended': False, 'chars': 0, 'tokens': 0,
-                'reason': 'over_block_budget', 'provenance': dict(block.provenance),
-                '_block': block, '_raw_text': '',
-            })
-            continue
-        rendered = _envelope(block, text)
-        block_tokens = _count_tokens(rendered, request.model)
-        manifest.append({
+        row = {
             'id': block.id, 'source': block.source,
             'authority': block.authority, 'placement': block.placement,
             'stability': block.stability, 'lifecycle': block.lifecycle,
-            'injected': True, 'chars': len(rendered), 'tokens': block_tokens,
-            'hash': block_content_hash(block.id, text),
-            'reason': 'truncated' if truncated else '',
+            'injected': False, 'chars': 0, 'tokens': 0, 'reason': '',
             'provenance': dict(block.provenance),
-            '_block': block, '_raw_text': text,
-        })
-        manifest[-1]['_rendered'] = rendered
+            '_block': block, '_raw_text': _unwrap_reminder(block.content),
+        }
+        manifest.append(row)
+        key = block.dedupe_key or block.id
+        if key in winners:
+            row['reason'] = f'duplicate_of:{winners[key].id}'
+            continue
+        winners[key] = block
+        missing_permissions = block.required_permissions - request.granted_permissions
+        if missing_permissions:
+            row['reason'] = 'permission_denied:' + ','.join(sorted(missing_permissions))
+            continue
+        if block.suppressed_reason or not block.content.strip():
+            row['reason'] = block.suppressed_reason or 'empty'
+            continue
+        _render_candidate(row, request.model)
+
+    return manifest
+
+
+def _render_candidate(row: dict, model: str) -> None:
+    """Apply the block ceiling and render one admitted source."""
+    block = row['_block']
+    text, truncated = _truncate(row['_raw_text'], block.max_tokens, model)
+    if truncated and block.id == 'project_context':
+        # A narrative cursor covers the whole page, never a clipped prefix.
+        row.update(appended=False, reason='over_block_budget', _raw_text='')
+        return
+    rendered = _envelope(block, text)
+    row.update(injected=True, chars=len(rendered), tokens=_count_tokens(rendered, model),
+               hash=block_content_hash(block.id, text),
+               reason='truncated' if truncated else '',
+               _raw_text=text, _rendered=rendered)
+
+
+def _reconcile_snapshots(messages: list[dict], manifest: list[dict],
+                         existing_hashes: dict[str, str], request: ComposeRequest) -> None:
+    """Resolve absence, reuse and supersession against actual visible bytes.
+
+    Only authoritative policy withdrawal edits history here; tail snapshots
+    become append candidates. Transient failures retain their previous bytes.
+    """
+    from ._policy_prefix import is_static_policy
+    from .registry import block_spec
 
     # Only a successful authoritative absence or explicit state transition
     # withdraws earlier context. Transient/ambiguous absence retains the last
@@ -694,8 +640,10 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
             if row['id'] != 'project_context':
                 row['_required_override'] = True
 
-    plan = (_apply_global_budget(manifest, request)
-            if request.global_budget_tokens is not None else None)
+
+def _partition_carriers(manifest: list[dict], existing_hashes: dict[str, str]) -> tuple[list, list]:
+    """Translate admitted candidates into policy-prefix or chronological-tail writes."""
+    from ._policy_prefix import is_static_policy
 
     # Carrier kind is a stable structural identity for every block the
     # composer owns — fresh appends and content-addressed retentions alike —
@@ -730,70 +678,67 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
                 row['reason'] = f'supersedes:{previous_hash}' + (
                     f';{transition_reason}' if transition_reason else '')
             tail_rows.append(row)
-    from .injections import can_append_injection
-    if tail_rows and not can_append_injection(messages):
-        # Snapshot acquisition has no destructive drain: leave it eligible for
-        # the next closed boundary and record the reason instead of splitting
-        # a protocol batch or pretending this context reached the model.
-        for row in tail_rows:
-            row.update(injected=False, appended=False, chars=0, tokens=0,
-                       reason='deferred:open_tool_batch')
-            row['_rendered'] = ''
-        tail_rows = []
-        plan = (_apply_global_budget(manifest, request)
-                if request.global_budget_tokens is not None else None)
-    if policy_rows:
-        # Rebuild the dedicated system-prefix lane as one sorted unit: lift
-        # every RETAINED engine-owned system carrier (fresh versions are
-        # re-rendered below), then re-seat the current set in authority order
-        # after operator/user policy. Retained carriers are re-inserted
-        # byte-identical, so only a genuine membership/content change ever
-        # moves prefix bytes, and user-authored system text (no composer
-        # marker) is never touched.
-        policy_ids = {row['id'] for row in policy_rows}
-        retained_carriers: list[dict] = []
-        kept: list[dict] = []
-        for message in messages:
-            carrier_ids = ({row.get('id') for row in message.get('_contextBlocks') or []}
-                           if isinstance(message, dict) else set())
-            if (message.get('role') == 'system'
-                    and message.get('_contextComposer')
-                    and carrier_ids
-                    and carrier_ids <= _SYSTEM_PLACEMENT_IDS):
-                if carrier_ids.isdisjoint(policy_ids):
-                    retained_carriers.append(message)
-                # else: superseded by this pass's fresh carrier — dropped.
-            else:
-                kept.append(message)
-        messages[:] = kept
+    return policy_rows, tail_rows
 
-        def _policy_sort_key(authority: str, priority: int, row_id: str):
-            return (-_AUTHORITY_ORDER[authority], priority, row_id)
 
-        seated: list[tuple[tuple, dict]] = [
-            (_policy_sort_key(row['authority'], row['_block'].priority, row['id']),
-             policy_carrier([row]))
-            for row in policy_rows
-        ]
-        for carrier in retained_carriers:
-            keys = []
-            for row_id in {row.get('id') for row in carrier.get('_contextBlocks') or []}:
-                spec = block_spec(row_id)
-                if spec is not None:
-                    keys.append(_policy_sort_key(spec.authority, spec.priority,
-                                                 spec.id))
-            seated.append((min(keys) if keys else (0, 10, ''), carrier))
-        seated.sort(key=lambda item: item[0])
-        anchor = next((i for i, m in enumerate(messages)
-                       if m.get('role') not in ('system', 'developer')),
-                      len(messages))
-        for offset, (_key, carrier) in enumerate(seated):
-            messages.insert(anchor + offset, carrier)
-    tail_texts = _append_tail(messages, tail_rows)
-    # A just-created mid-turn handoff follows restoration, but never crosses
-    # newer human steering or execution. Ordinary append-only reuse is unchanged.
-    from lib.tasks_pkg.compaction._handoff import finalize_handoff_order
-    finalize_handoff_order(messages)
+def _commit_policy_prefix(messages: list[dict], policy_rows: list[dict]) -> None:
+    """Seat registered policy in authority order; preserve all other history."""
+    from ._policy_prefix import policy_carrier
+    from .registry import block_spec
+
+    if not policy_rows:
+        return
+    # Rebuild the dedicated system-prefix lane as one sorted unit: lift
+    # every RETAINED engine-owned system carrier (fresh versions are
+    # re-rendered below), then re-seat the current set in authority order
+    # after operator/user policy. Retained carriers are re-inserted
+    # byte-identical, so only a genuine membership/content change ever
+    # moves prefix bytes, and user-authored system text (no composer
+    # marker) is never touched.
+    policy_ids = {row['id'] for row in policy_rows}
+    retained_carriers: list[dict] = []
+    kept: list[dict] = []
+    for message in messages:
+        carrier_ids = ({row.get('id') for row in message.get('_contextBlocks') or []}
+                       if isinstance(message, dict) else set())
+        if (message.get('role') == 'system'
+                and message.get('_contextComposer')
+                and carrier_ids
+                and carrier_ids <= _SYSTEM_PLACEMENT_IDS):
+            if carrier_ids.isdisjoint(policy_ids):
+                retained_carriers.append(message)
+            # else: superseded by this pass's fresh carrier — dropped.
+        else:
+            kept.append(message)
+    messages[:] = kept
+
+    def _policy_sort_key(authority: str, priority: int, row_id: str):
+        return (-_AUTHORITY_ORDER[authority], priority, row_id)
+
+    seated: list[tuple[tuple, dict]] = [
+        (_policy_sort_key(row['authority'], row['_block'].priority, row['id']),
+         policy_carrier([row]))
+        for row in policy_rows
+    ]
+    for carrier in retained_carriers:
+        keys = []
+        for row_id in {row.get('id') for row in carrier.get('_contextBlocks') or []}:
+            spec = block_spec(row_id)
+            if spec is not None:
+                keys.append(_policy_sort_key(spec.authority, spec.priority,
+                                             spec.id))
+        seated.append((min(keys) if keys else (0, 10, ''), carrier))
+    seated.sort(key=lambda item: item[0])
+    anchor = next((i for i, m in enumerate(messages)
+                   if m.get('role') not in ('system', 'developer')),
+                  len(messages))
+    for offset, (_key, carrier) in enumerate(seated):
+        messages.insert(anchor + offset, carrier)
+
+
+def _finish_manifest(manifest: list[dict]) -> None:
+    """Publish decisions and exact append costs; discard render-local working fields."""
+    from .registry import block_spec
 
     for row in manifest:
         spec = block_spec(row['id'])
@@ -814,11 +759,45 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
         row.pop('_raw_text', None)
         row.pop('_global_truncated', None)
         row.pop('_required_override', None)
-    # ``total`` is the REAL assembled byte growth of this pass: policy
-    # carriers are single-block (``chars`` == wire bytes), while tail blocks
-    # may fold into amalgamated same-authority reminders, so the actual
-    # emitted tail texts are measured instead of the pre-fold standalone
-    # envelopes. Reused (already-present) rows append nothing and count 0.
+
+def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
+                   request: ComposeRequest, *,
+                   replace_managed: bool = True) -> ComposeResult:
+    """Prepare → reconcile → budget → place → report, in that order.
+
+    Runtime snapshots append missing/changed versions. Registry-declared policy
+    alone may replace its dedicated system prefix. ``replace_managed`` remains
+    a compatibility argument, never deletion authority. Event/inbox chronology
+    is owned by ``injections.append_injection``; providers only acquire blocks.
+    """
+    del replace_managed
+    from ._policy_prefix import migrate_policy_prefix
+    from .injections import can_append_injection
+    from lib.tasks_pkg.compaction._handoff import finalize_handoff_order
+
+    migrate_policy_prefix(messages)
+    existing_hashes = _managed_block_hashes(messages)
+    manifest = _prepare_candidates(blocks, request)
+    _reconcile_snapshots(messages, manifest, existing_hashes, request)
+    plan = (_apply_global_budget(manifest, request)
+            if request.global_budget_tokens is not None else None)
+
+    policy_rows, tail_rows = _partition_carriers(manifest, existing_hashes)
+    if tail_rows and not can_append_injection(messages):
+        # Acquisition did not drain a queue: defer to the next closed batch.
+        for row in tail_rows:
+            row.update(injected=False, appended=False, chars=0, tokens=0,
+                       reason='deferred:open_tool_batch')
+            row['_rendered'] = ''
+        tail_rows = []
+        plan = (_apply_global_budget(manifest, request)
+                if request.global_budget_tokens is not None else None)
+    _commit_policy_prefix(messages, policy_rows)
+    tail_texts = _append_tail(messages, tail_rows)
+    finalize_handoff_order(messages)
+    _finish_manifest(manifest)
+
+    # Measure actual emitted texts after same-authority tail amalgamation.
     total = (sum(row['chars'] for row in policy_rows)
              + sum(len(text) for text in tail_texts))
     names = ','.join(f"{row['id']}:{row['chars']}" for row in manifest

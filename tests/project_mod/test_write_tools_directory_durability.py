@@ -24,7 +24,7 @@ def test_replacement_flushes_final_mode_and_parent(tmp_path, monkeypatch):
     assert target.read_bytes() == b'new'
 
 
-@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'insert', 'diffs', 'inserts', 'edit'])
+@pytest.mark.parametrize('action', ['write', 'upload', 'diff', 'diffs', 'edit'])
 def test_directory_flush_failure_is_applied_not_retryable(tmp_path, monkeypatch, action):
     target = tmp_path / 'file.txt'
     target.write_text('old\n')
@@ -42,10 +42,8 @@ def test_directory_flush_failure_is_applied_not_retryable(tmp_path, monkeypatch,
     if action == 'write': result = _ops.tool_write_file(base, 'file.txt', 'new\n')
     elif action == 'upload': result = _ops.save_uploaded_file(base, 'file.txt', b'new\n', on_conflict='overwrite')
     elif action == 'diff': result = _ops.tool_apply_diff(base, 'file.txt', 'old', 'new')
-    elif action == 'insert': result = _ops.tool_insert_content(base, 'file.txt', 'old', 'new\n')
     elif action == 'diffs': result = _ops.tool_apply_diffs(base, [{'path':'file.txt', 'search':'old', 'replace':'new'}])
-    elif action == 'edit': result = _ops.tool_edit_file(base, [{'path':'file.txt', 'operation':'replace', 'anchor':'old', 'content':'new'}])
-    else: result = _ops.tool_insert_contents(base, [{'path':'file.txt', 'anchor':'old', 'content':'new\n'}])
+    else: result = _ops.tool_edit_file(base, [{'path':'file.txt', 'anchor':'old', 'content':'new'}])
     assert target.read_text() != 'old\n'
     assert len(directory_fds) == 1
     with pytest.raises(OSError): os.fstat(directory_fds[0])

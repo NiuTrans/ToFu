@@ -10,6 +10,7 @@ from typing import Optional
 
 from lib.log import get_logger
 from lib.storage import StorageError, get_storage_client
+from lib.storage.retry import decline_storage_wait, storage_wait_owner
 
 from ._context import AuthContext
 from ._crud import _hash_token
@@ -76,18 +77,21 @@ def _touch_audit_metadata(row: dict, now: float, monotonic_now: float) -> None:
         return
     credential_id = str(row['id'])
     try:
-        get_storage_client(write=True).command(
-            'credential.touch', {
-                'credential_id': credential_id,
-                'owner_user_id': int(row['owner_user_id']),
-                'tenant_id': str(row['tenant_id'] or ''),
-                'used_at': now,
-                'touch_if_before': max(0.0, now - _TOUCH_INTERVAL_S),
-            },
-            None,
-            priority='maintenance',
-            deadline=_TOUCH_DEADLINE_S,
-        )
+        # The touch defers itself on failure, so it never holds the request
+        # while a live authority is waited out inside the storage client.
+        with storage_wait_owner(decline_storage_wait):
+            get_storage_client(write=True).command(
+                'credential.touch', {
+                    'credential_id': credential_id,
+                    'owner_user_id': int(row['owner_user_id']),
+                    'tenant_id': str(row['tenant_id'] or ''),
+                    'used_at': now,
+                    'touch_if_before': max(0.0, now - _TOUCH_INTERVAL_S),
+                },
+                None,
+                priority='maintenance',
+                deadline=_TOUCH_DEADLINE_S,
+            )
     except (StorageError, RuntimeError):
         # ``last_used_at`` is audit metadata, never an authority grant.  A
         # congested writer must not reject a principal that the read authority

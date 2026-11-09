@@ -58,7 +58,7 @@ def _fetch_latest_version(*, user_id: str = '') -> str:
 
     route = _eg.route_request(_NPM_LATEST_URL, user_id=user_id)
     if route == 'direct':
-        from lib.http_transport.client import http_get
+        from lib.oauth.http import http_get
         response = http_get(_NPM_LATEST_URL, timeout=_FETCH_TIMEOUT_S)
     else:
         response = _eg.egress_http(

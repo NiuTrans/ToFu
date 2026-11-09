@@ -3,7 +3,7 @@
 Generate: `python3 scripts/gen_tool_inventory.py`; guard: `tests/tools/test_tool_inventory_generated.py --check`.
 
 Rows derive from the live registry and per-facet tables; host-specific third-party diagnostics are available with `--json`.
-Registered built-in tools: **147**; compatibility-only: **12**. Current means a supported declaration, not that every request enables it.
+Registered built-in tools: **145**; compatibility-only: **10**. Current means a supported declaration, not that every request enables it.
 Exposure is the declared default: eager stays direct, deferred is found through Tool Search, pinned stays direct whenever assembled, toggle is deferred until its composer toggle pins it, direct is a protocol-required direct call, and gateway is injected by the discovery backend.
 
 ## Gaps
@@ -144,8 +144,6 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | edit_file | project | project | current | eager | SET | ✓ |  | ✓ | ✓ | specialized |  | ✓ | ✓ |  |  | ✓ |
 | find_files | project | project | current | eager | SET |  | ✓ | ✓ |  |  |  |  |  | ✓ | ✓ | ✓ |
 | grep_search | project | project | compatibility |  | SET |  | ✓ | ✓ |  |  |  |  |  | ✓ | ✓ | ? |
-| insert_content | project | project | compatibility |  | SET | ✓ |  | ✓ | ✓ | specialized |  | ✓ | ✓ |  | ✓ | ? |
-| insert_contents | project | project | compatibility |  | SET | ✓ |  | ✓ | ✓ | specialized |  | ✓ | ✓ |  | ✓ | ? |
 | inspect_image | project | inspect_image | current | eager | EXACT |  | ✓ |  |  |  |  |  |  |  |  | ✓ |
 | inspect_video | project | inspect_video | current | eager | EXACT |  |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | kill_background_command | project | project | compatibility |  | EXACT | ✓ |  |  | ✓ | specialized |  |  |  |  |  | ? |
@@ -169,7 +167,7 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | search_skills | skills | skills | current | eager | SET |  | ✓ | ✓ |  |  |  |  |  |  |  | ✓ |
 | await_agents | swarm | swarm | compatibility |  | SET |  |  |  |  |  |  |  |  |  |  | ? |
 | get_agent_messages | swarm | swarm | current | deferred | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
-| get_agent_result | swarm | swarm | current | eager | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
+| get_agent_result | swarm | swarm | current | deferred | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
 | list_agents | swarm | retained_agents | current | deferred | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
 | list_artifacts | swarm | swarm | contextual |  | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
 | manage_agents | swarm | retained_agents | current | deferred | SET | ✓ |  |  | ✓ | specialized |  |  |  |  |  | ✓ |

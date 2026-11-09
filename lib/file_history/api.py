@@ -111,7 +111,7 @@ def track_edit(base_path: str, rel_path: str, *,
         if v is not None:
             logger.debug('[FileHistory] track_edit %s → v%d (msg=%s task=%s explicit=%s)',
                          rel, v, (message_id or '-')[:8],
-                         (task_id or '-')[:8],
+                         (task_id or '-'),
                          pre_content is not None)
         return v
     except Exception as e:
@@ -224,8 +224,8 @@ def make_snapshot(base_path: str, *,
         }
         snapshot_count = append_snapshot_record(base_path, record)
         logger.info('[FileHistory] snapshot %s task=%s conv=%s files=%d%s',
-                    snap_id[:8], (task_id or '-')[:12],
-                    (conv_id or '-')[:8], len(files),
+                    snap_id[:8], (task_id or '-'),
+                    (conv_id or '-'), len(files),
                     ' external' if external else '')
         # ``append_snapshot_record`` obtains the exact count while it already
         # validates the tail index.  The gate itself is an O(1) stat/modulo

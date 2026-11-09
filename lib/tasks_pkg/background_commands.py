@@ -226,7 +226,7 @@ def wake_completed_background_batch(conv_id: str, user_id: int | None) -> None:
         dispatch_completed_background_batch(conv_id, user_id=int(user_id))
     except Exception as exc:
         logger.warning('[BackgroundCommand] batch wake deferred conv=%s: %s',
-                       conv_id[:8], exc)
+                       conv_id, exc)
 
 
 class BackgroundCommandTask(dict):

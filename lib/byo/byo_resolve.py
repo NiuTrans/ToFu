@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from lib.byo.byo_providers import (
     resolve_model_string, sanitise_extra_headers, touch_provider,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 if TYPE_CHECKING:
     from lib.llm_dispatch.ephemeral import EphemeralSlotHandle
@@ -147,7 +147,7 @@ def dispose_after_terminal(task: dict, handle: EphemeralSlotHandle) -> None:
         if time.time() >= deadline:
             logger.warning('[byo_resolve] ephemeral handle %s: task %s '
                            'still running after 1h, force-disposing',
-                           handle.handle_id, task.get('id', '?')[:8])
+                           handle.handle_id, task_log_tag(task.get('id', '?')))
             break
         time.sleep(0.5)
     dispose_ephemeral_slot(handle)

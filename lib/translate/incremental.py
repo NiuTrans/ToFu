@@ -34,7 +34,7 @@ import time
 import weakref
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.translate._operation_buffer import IncrementalOperationBuffer, segment_kind
 from lib.translate._completed_cache import CompletedTranslationCache
 from runtime_guards import resolve_resource_budget
@@ -376,7 +376,7 @@ class _Accumulator:
                     logger.debug(
                         "[IncTranslate] task=%s idle worker retired; "
                         "completed segment cache retained for terminal handoff",
-                        self.task_id[:8],
+                        task_log_tag(self.task_id),
                     )
                     return
                 if item is _STOP:
@@ -392,7 +392,7 @@ class _Accumulator:
         except Exception as exc:
             logger.error(
                 "[IncTranslate] task=%s failed: %s",
-                self.task_id[:8], exc, exc_info=True,
+                task_log_tag(self.task_id), exc, exc_info=True,
             )
             self._push({
                 "type": "error", "status": "error", "error": str(exc)[:300],
@@ -441,7 +441,7 @@ class _Accumulator:
             logger.warning(
                 '[IncTranslate] task=%s %s segment %s failed '
                 '(%s consecutive=%d/%d); terminal translation remains enabled: %s',
-                self.task_id[:8],
+                task_log_tag(self.task_id),
                 ('terminal reasoning' if terminal_reasoning
                  else 'preview retrying after'),
                 key, kind, failures, _PREVIEW_FAILURE_LIMIT,
@@ -451,7 +451,7 @@ class _Accumulator:
                 logger.warning(
                     '[IncTranslate] task=%s %s previews paused for %.0fs; '
                     'missed blocks retry after the pause',
-                    self.task_id[:8], kind, pause,
+                    task_log_tag(self.task_id), kind, pause,
                 )
         else:
             if terminal_reasoning:
@@ -463,7 +463,7 @@ class _Accumulator:
                 circuit.pop(_PREVIEW_STATE_PAUSED_UNTIL, None)
                 logger.info(
                     '[IncTranslate] task=%s %s previews resumed after a pause',
-                    self.task_id[:8], kind)
+                    task_log_tag(self.task_id), kind)
 
     def _translate_segment(
         self,
@@ -591,10 +591,10 @@ class _Accumulator:
                 raise
             if isinstance(exc, LifecycleConflict) and exc.code == 'turn_in_progress':
                 logger.debug('[IncTranslate] task=%s cache awaits Turn settlement',
-                             self.task_id[:8])
+                             task_log_tag(self.task_id))
             else:
                 logger.warning('[IncTranslate] task=%s idle stamp deferred: %s',
-                               self.task_id[:8], exc)
+                               task_log_tag(self.task_id), exc)
             return False
         if terminal:
             with self._lock:
@@ -635,7 +635,7 @@ class _Accumulator:
         except Exception as exc:
             logger.debug(
                 "[IncTranslate] task=%s push failed: %s",
-                self.task_id[:8], exc,
+                task_log_tag(self.task_id), exc,
             )
 
 

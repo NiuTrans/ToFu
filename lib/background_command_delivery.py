@@ -19,6 +19,12 @@ from lib.project_dispatch.admission import KEY as DISPATCH_ADMISSION_KEY
 
 logger = get_logger(__name__)
 
+# (owner, conversation, turn) -> (projectionRevision, blockId) whose projection
+# this process read with that block attached. A revision names one exact
+# projection, so an unchanged revision skips rereading its body on every
+# maintenance tick; any other revision reads it again.
+_ATTACHED_BACKGROUND_BLOCKS: dict[tuple[int, str, str], tuple[int, str]] = {}
+
 
 class CompletionOwnerAbsent(Exception):
     """queue.enqueue refused a receipt because its owner conversation is absent.
@@ -167,8 +173,10 @@ def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
         return revoked
     from lib.turn_lifecycle import LifecycleConflict, update_turn_projection
     from lib.background_command_projection import background_command_injection_record
+    # Every decision before the attachment reads Turn metadata only; a long
+    # Worker Turn's projection is read once, for the attachment CAS below.
     turn = repository.turn_get(
-        conv_id, execution['turnId'], user_id=user_id)
+        conv_id, execution['turnId'], user_id=user_id, include_projection=False)
     attempt = repository.get_attempt(execution['attemptId'])
     if revoked:
         cause = 'dispatch_grant_revoked'
@@ -204,10 +212,17 @@ def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
                if isinstance(item.get('backgroundCommand'), dict) else {}),
         } for item in deliveries],
     }, attempt_id=execution['attemptId'])
+    attached_key = (user_id, conv_id, execution['turnId'])
+    if _ATTACHED_BACKGROUND_BLOCKS.get(attached_key) == (turn.get('projectionRevision'), receipt['blockId']):
+        return True
+    turn = repository.turn_get(conv_id, execution['turnId'], user_id=user_id)
+    if not isinstance(turn, dict) or turn.get('status') in {'pending', 'running'}:
+        return True
     projection = dict(turn.get('projection') or {})
     previous = projection.get('_bgCommandInjects') or []
     if any(isinstance(row, dict) and row.get('blockId') == receipt['blockId']
            for row in previous):
+        _ATTACHED_BACKGROUND_BLOCKS[attached_key] = (turn['projectionRevision'], receipt['blockId'])
         return True
     projection['_bgCommandInjects'] = [*previous, receipt]
     try:

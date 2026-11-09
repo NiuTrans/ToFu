@@ -172,6 +172,25 @@ def test_successful_login_navigates_into_web_screen() -> None:
     )
 
 
+def test_connection_intent_and_cancel_controls_are_wired() -> None:
+    """Policy is executed by XCTest; these are only Apple shell admission seams."""
+    app = _read(APP / "TofuClientApp.swift")
+    project = _read(IOS / "project.yml")
+    root = _read(APP / "RootView.swift")
+    form = _read(APP / "AddEditProfileView.swift")
+    model = _read(APP / "AppViewModel.swift")
+    cards = _read(APP / "ProfileListView.swift")
+    assert ".onOpenURL" in app and "receiveConnection" in app
+    assert "CFBundleURLSchemes" in project and re.search(r"-\s+tofu\s*$", project, re.M)
+    assert "Use link" in root and "Keep form" in root
+    assert ".id(model.formRevision)" in root
+    assert "UIPasteboard.general.string" in form and "model.receiveConnection" in form
+    assert "Task<Void, Never>?" in model and "ProfileOperationGeneration" in model
+    assert "operationTask?.cancel()" in model
+    assert "model.cancelOperation" in form and "model.cancelOperation" in cards
+    assert ".onDisappear" in form and 'secret = ""' in form
+
+
 def test_build_wiring() -> None:
     project = _read(IOS / "project.yml")
     assert "TofuClientCore" in project and "path: ." in project

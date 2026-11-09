@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.error_envelope import from_json as error_from_json
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.task_replay.task_replay import (
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
@@ -94,7 +94,7 @@ def _json_object(value: Any, *, task_id: str, field: str) -> dict:
         logger.warning(
             '[DurableTaskReplay] invalid %s task=%s: %s',
             field,
-            task_id[:8],
+            task_log_tag(task_id),
             exc,
         )
         return {}

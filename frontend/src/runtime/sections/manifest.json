@@ -358,18 +358,6 @@
      "bindings": [
       "t"
      ]
-    },
-    {
-     "source": "frontend/src/html-safety.ts",
-     "bindings": [
-      "escapeHtml"
-     ]
-    },
-    {
-     "source": "frontend/src/features/myday/presentation-assets.ts",
-     "bindings": [
-      "MYDAY_PRESENTATION_ASSETS"
-     ]
     }
    ],
    "registryImports": [],
@@ -377,30 +365,6 @@
     {
      "name": "Api",
      "kind": "object"
-    },
-    {
-     "name": "_applyBrowserUI",
-     "kind": "function"
-    },
-    {
-     "name": "_applyCodeExecUI",
-     "kind": "function"
-    },
-    {
-     "name": "_applyFetchEnabledUI",
-     "kind": "function"
-    },
-    {
-     "name": "_applySearchModeUI",
-     "kind": "function"
-    },
-    {
-     "name": "newChat",
-     "kind": "function"
-    },
-    {
-     "name": "updateSendButton",
-     "kind": "function"
     }
    ],
    "sections": [
@@ -648,11 +612,17 @@
    "moduleImports": [
     {
      "source": "frontend/src/features/inspector-feed.ts",
-     "bindings": ["createInspectorFeed"]
+     "bindings": [
+      "createInspectorFeed"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-pane-view.ts",
-     "bindings": ["renderInspectorLoading", "renderInspectorFailure", "renderInspectorBack"]
+     "bindings": [
+      "renderInspectorLoading",
+      "renderInspectorFailure",
+      "renderInspectorBack"
+     ]
     },
     {
      "source": "frontend/src/features/diagnostics-message-reconciliation.ts",
@@ -662,27 +632,39 @@
     },
     {
      "source": "frontend/src/features/inspector-session.ts",
-     "bindings": ["createInspectorSession"]
+     "bindings": [
+      "createInspectorSession"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-payloads.ts",
-     "bindings": ["createInspectorPayloads"]
+     "bindings": [
+      "createInspectorPayloads"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-inline.ts",
-     "bindings": ["createInspectorInline"]
+     "bindings": [
+      "createInspectorInline"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-navigation.ts",
-     "bindings": ["createInspectorNavigation"]
+     "bindings": [
+      "createInspectorNavigation"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-trace-view.ts",
-     "bindings": ["renderInspectorTrace"]
+     "bindings": [
+      "renderInspectorTrace"
+     ]
     },
     {
      "source": "frontend/src/features/inspector-details.ts",
-     "bindings": ["createInspectorDetails"]
+     "bindings": [
+      "createInspectorDetails"
+     ]
     },
     {
      "source": "frontend/src/i18n/index.ts",
@@ -824,7 +806,11 @@
     },
     {
      "source": "frontend/src/features/settings/restart-progress-dock.ts",
-     "bindings": ["dockRestartProgress", "recordRestartDiagnostic", "offerRestartReload"]
+     "bindings": [
+      "dockRestartProgress",
+      "recordRestartDiagnostic",
+      "offerRestartReload"
+     ]
     },
     {
      "source": "frontend/src/features/settings/restart-observation.ts",
@@ -941,19 +927,28 @@
     },
     {
      "source": "frontend/src/features/settings/mcp-commands.ts",
-     "bindings": ["createMcpCommands"]
+     "bindings": [
+      "createMcpCommands"
+     ]
     },
     {
      "source": "frontend/src/features/settings/mcp-tool-selection.ts",
-     "bindings": ["createMcpToolSelection"]
+     "bindings": [
+      "createMcpToolSelection"
+     ]
     },
     {
      "source": "frontend/src/features/settings/mcp-settings-reads.ts",
-     "bindings": ["captureMcpSettingsReads", "refreshMcpSettingsAfterWrite"]
+     "bindings": [
+      "captureMcpSettingsReads",
+      "refreshMcpSettingsAfterWrite"
+     ]
     },
     {
      "source": "frontend/src/features/settings/oauth-panel-lifetime.ts",
-     "bindings": ["captureOAuthPanel"]
+     "bindings": [
+      "captureOAuthPanel"
+     ]
     },
     {
      "source": "frontend/src/features/settings/codex-shared-login.ts",
@@ -963,47 +958,71 @@
     },
     {
      "source": "frontend/src/features/settings/catpaw-settings.ts",
-     "bindings": ["catpawSettings"]
+     "bindings": [
+      "catpawSettings"
+     ]
     },
     {
      "source": "frontend/src/features/settings/kimi-code-login.ts",
-     "bindings": ["kimiCodeLogin"]
+     "bindings": [
+      "kimiCodeLogin"
+     ]
     },
     {
      "source": "frontend/src/features/settings/subscription-plans.ts",
-     "bindings": ["subscriptionPlans"]
+     "bindings": [
+      "subscriptionPlans"
+     ]
     },
     {
      "source": "frontend/src/features/settings/model-routing-authority.ts",
-     "bindings": ["runModelRoutingMutation"]
+     "bindings": [
+      "runModelRoutingMutation"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-mutations.ts",
-     "bindings": ["createProviderMutations"]
+     "bindings": [
+      "createProviderMutations"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-key-editor.ts",
-     "bindings": ["createProviderKeyEditor"]
+     "bindings": [
+      "createProviderKeyEditor"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-key-reveal.ts",
-     "bindings": ["createProviderKeyReveal", "maskProviderCredentialSecret"]
+     "bindings": [
+      "createProviderKeyReveal",
+      "maskProviderCredentialSecret"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-key-stats.ts",
-     "bindings": ["createProviderKeyStats"]
+     "bindings": [
+      "createProviderKeyStats"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-model-picker.ts",
-     "bindings": ["createProviderModelPicker"]
+     "bindings": [
+      "createProviderModelPicker"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-model-staging.ts",
-     "bindings": ["addProviderModels"]
+     "bindings": [
+      "addProviderModels"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-connection-staging.ts",
-     "bindings": ["resolveProviderFaceConnection", "authorizeProviderConnection"]
+     "bindings": [
+      "resolveProviderFaceConnection",
+      "authorizeProviderConnection"
+     ]
     },
     {
      "source": "frontend/src/features/settings/provider-settings-projection.ts",

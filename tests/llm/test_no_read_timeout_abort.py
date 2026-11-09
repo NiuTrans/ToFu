@@ -409,7 +409,7 @@ class TestAsyncAbortDuringSilence:
         async def _main():
             resp = _AsyncWedgedResp()
             monkeypatch.setattr('lib.llm.astream.get_async_client',
-                                lambda _p: _FakeAsyncClient(resp))
+                                lambda **_: _FakeAsyncClient(resp))
             monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
             monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
             aborted = {'v': False}
@@ -447,7 +447,7 @@ class TestAsyncAbortDuringSilence:
 
         async def _main():
             monkeypatch.setattr('lib.llm.astream.get_async_client',
-                                lambda _p: _FakeAsyncClient(_AsyncStallResp()))
+                                lambda **_: _FakeAsyncClient(_AsyncStallResp()))
             monkeypatch.setattr('lib.llm._transport.IDLE_HEARTBEAT_S', 0.05)
             monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
             beats = []
@@ -605,7 +605,7 @@ class TestReaperCannotEatAWaitingTask:
 
 @pytest.mark.unit
 class TestBeatLabelHonesty:
-    def _beats_for(self, prefill):
+    def _beats_for(self, prefill, status_kind=None):
         """Drive the real _on_waiting with the task's content pre-set to
         *prefill*, and return the emitted phase events."""
         from types import SimpleNamespace
@@ -643,7 +643,8 @@ class TestBeatLabelHonesty:
                                    'previous attempt [truncation] '
                                    'elapsed_ms=300999'),
                                consecutive_errors=1)
-        status_kind = 'stream_stalled' if prefill else 'waiting_headers'
+        status_kind = status_kind or (
+            'stream_stalled' if prefill else 'waiting_headers')
         captured['on_waiting'](
             status=SimpleNamespace(
                 kind=status_kind,
@@ -658,10 +659,24 @@ class TestBeatLabelHonesty:
     def test_current_attempt_wait_does_not_claim_a_retry(self):
         evs = self._beats_for('')          # nothing streamed
         assert evs and evs[-1]['phase'] == 'waiting_model'
-        assert evs[-1]['detailKey'] == 'stream.phase.waitingForResponse'
+        assert evs[-1]['detailKey'] == 'stream.phase.waitingForProviderResponse'
         assert 'attempt' not in evs[-1]
         assert '[truncation]' not in evs[-1]['detail']
         assert '300999' not in evs[-1]['detail']
+
+    def test_unanswered_request_is_not_reported_as_a_connected_model(self):
+        unanswered = self._beats_for('', status_kind='waiting_headers')[-1]
+        assert unanswered['phase'] == 'waiting_model'
+        assert unanswered['detailKey'] == 'stream.phase.waitingForProviderResponse'
+        assert unanswered['detailArgs'] == {'model': 'kimi-k3', 'elapsed': 60}
+        assert unanswered['detail'] == (
+            'Request sent 60s ago; the kimi-k3 model service has not '
+            'responded yet…')
+
+        connected = self._beats_for('', status_kind='waiting_event')[-1]
+        assert connected['phase'] == 'waiting_model'
+        assert connected['detailKey'] == 'stream.phase.waitingForResponse'
+        assert connected['detailArgs'] == {'model': 'kimi-k3', 'elapsed': 60}
 
     def test_quota_wait_never_claims_recovery_is_disabled(self):
         from types import SimpleNamespace
@@ -710,6 +725,7 @@ class TestBeatLabelHonesty:
         locale_root = os.path.join(
             ROOT, 'frontend', 'src', 'i18n', 'locales')
         required = ('stream.phase.waitingForResponse',
+                    'stream.phase.waitingForProviderResponse',
                     'stream.phase.streamStalled',
                     'stream.phase.semanticProgressTimeoutRetry')
         retired = 'stream.retryReason.firstByteTimeout'

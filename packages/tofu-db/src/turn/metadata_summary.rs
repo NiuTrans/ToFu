@@ -35,6 +35,9 @@ pub(super) fn put_document(
     request: crate::versioned_document::PutRequest,
     maximum_bytes: usize,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    // The writer that carries its successor projection publishes it after
+    // this; every other committed write ends the committed entry.
+    transaction.forget_resident_projection(&request.key);
     let summary = if crate::versioned_document::stores_inline(
         &request.namespace,
         &request.logical_key,

@@ -1247,6 +1247,9 @@ components:
         attemptId: {type: string}
         taskId: {type: string}
         text: {type: string}
+        # Provider-only control/prose witness; public text and channel mirrors
+        # never consume this field, including after a thin-segment reload.
+        modelText: {type: string}
         translatedText: {type: string}
         deliverable: {type: boolean}
         terminal: {type: boolean}
@@ -2063,7 +2066,13 @@ components:
         roundPrepMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         roundSettleMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         finalizeMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        # Informational, inside llmMs: first-token windows whose attempt
+        # showed its first token (or is still waiting live).
         ttftMs: {type: integer, minimum: 0, maximum: 9007199254740991}
+        # Additive (never required), informational like ttftMs: pre-first-
+        # token windows of attempts that failed, were retried or stopped
+        # (e.g. a gateway hold ending in HTTP 504). Never in the bucket sum.
+        failedAttemptMs: {type: integer, minimum: 0, maximum: 9007199254740991}
         overBudget:
           type: array
           maxItems: 256

@@ -488,6 +488,7 @@
         .clone();
         let settlement = restart_settlement(&projection);
         assert_eq!(settlement["cause"], "server_restart");
+        assert_eq!(settlement["evidence"], "system_recovery");
         // A prose tail is never offered as a prefill continuation: the
         // checkpoint resume rolls it back and resends from the last result.
         assert_eq!(

@@ -5190,6 +5190,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           }
         ]
       },
+      "modelText": {
+        "type": "string"
+      },
       "resumable": {
         "type": "boolean"
       },
@@ -5572,6 +5575,11 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "type": "integer"
       },
       "compactionMs": {
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "failedAttemptMs": {
         "maximum": 9007199254740991,
         "minimum": 0,
         "type": "integer"
@@ -6529,6 +6537,7 @@ export type TurnTextSegment = {
   "attemptId"?: string;
   "taskId"?: string;
   "text": string;
+  "modelText"?: string;
   "translatedText"?: string;
   "deliverable"?: boolean;
   "terminal"?: boolean;
@@ -7068,6 +7077,7 @@ export type TurnTimingSummary = {
   "roundSettleMs"?: number;
   "finalizeMs"?: number;
   "ttftMs": number;
+  "failedAttemptMs"?: number;
   "overBudget": ReadonlyArray<TurnTimingOverBudgetSpan>;
 };
 

@@ -185,8 +185,9 @@ def oauth_status():
     tags=['capabilities'], scope='admin',
 )
 def oauth_test():
-    import requests as req
-    from lib.proxy import proxies_for
+    import requests
+
+    from lib.oauth.http import http_get
 
     endpoints = {
         'claude_token': 'https://platform.claude.com/v1/oauth/token',
@@ -198,7 +199,7 @@ def oauth_test():
     results: dict[str, dict] = {}
     for name, url in endpoints.items():
         try:
-            r = req.get(url, proxies=proxies_for(url), timeout=8,
+            r = http_get(url, timeout=8,
                         allow_redirects=False)
             blocked = (
                 (r.status_code == 302 and 'unavailable-in-region'
@@ -213,7 +214,7 @@ def oauth_test():
                 'detail': (r.headers.get('Location', '')[:200]
                            if r.status_code == 302 else r.text[:200]),
             }
-        except req.RequestException as e:
+        except requests.RequestException as e:
             logger.debug('[OAuth.v1] reachability probe %s (%s) failed: %s',
                          name, url, e)
             results[name] = {

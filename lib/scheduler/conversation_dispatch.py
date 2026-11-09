@@ -14,7 +14,7 @@ from lib.turn_initiation import (
     INITIATOR_TIMER,
     stamp_initiator,
 )
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.scheduler._shared import build_task_config, build_turn_ctx_snapshot
 from lib.storage import get_storage_client
 from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
@@ -250,8 +250,8 @@ def dispatch_scheduled_turn(
     logger.info(
         "%s Started turn-native task %s in conv=%s",
         log_prefix,
-        task_id[:8],
-        conversation_id[:12],
+        task_log_tag(task_id),
+        conversation_id,
     )
     return ScheduledTurnDispatch("started", task_id)
 

@@ -37,42 +37,30 @@ def test_write_schema_keeps_rewrite_path_and_reuse_contracts():
             'complete replacement', 'omitted lines are deleted',
             'Relative paths', 'outside registered roots',
             'allow_outside_workspace=true', 'registers as a new root',
-            'system paths', '$HOME itself', 'exactly one source',
-            'empty string creates an empty file', 'content_ref',
-            'previous tool result'):
+            'system paths', '$HOME itself', 'content is required',
+            'empty string creates an empty file'):
         assert phrase in desc, phrase
 
 
-def test_write_schema_accepts_empty_content_or_ref_but_not_missing_or_both():
+def test_write_schema_requires_content_and_accepts_empty_content():
     params = PROJECT_TOOL_WRITE_FILE['function']['parameters']
-    props = params['properties']
     Draft7Validator.check_schema(params)
     validator = Draft7Validator(params)
     base = {'description': 'Create marker', 'path': 'tmp/.keep'}
 
-    # The caption is optional: only the destination is mandatory.
+    # The caption is optional; the destination and its text are mandatory.
+    assert params['required'] == ['path', 'content']
     assert validator.is_valid({'path': 'tmp/.keep', 'content': ''})
     assert validator.is_valid({**base, 'content': ''})
-    assert validator.is_valid({
-        **base, 'content_ref': {'tool_round': 3, 'start': 0, 'end': 12}})
-    # The content choice is an admission rule, not a root combinator
-    # (providers reject those): refusals name both sources and carry the
-    # registered recovery action.
+    assert not validator.is_valid(base)
+    assert not validator.is_valid({**base, 'content_ref': {'tool_round': 3}})
+    assert 'write_file' not in ARGUMENT_ALTERNATIVES
     documents = compile_execution_contract_documents([PROJECT_TOOL_WRITE_FILE])
-    for accepted in ({**base, 'content': ''},
-                     {**base, 'content_ref': {'tool_round': 3}}):
-        validate_tool_arguments_from_documents(documents, 'write_file', accepted)
-    for refused, code in (
-            (base, 'missing_required_arguments'),
-            ({**base, 'content': 'x', 'content_ref': {'tool_round': 3}},
-             'invalid_argument_value')):
-        with pytest.raises(ToolContractError) as rejection:
-            validate_tool_arguments_from_documents(
-                documents, 'write_file', refused)
-        assert rejection.value.code == code
-        assert 'content, content_ref' in str(rejection.value)
-        assert rejection.value.next_action == (
-            ARGUMENT_ALTERNATIVES['write_file'].next_action)
+    validate_tool_arguments_from_documents(documents, 'write_file', {**base, 'content': ''})
+    with pytest.raises(ToolContractError) as rejection:
+        validate_tool_arguments_from_documents(documents, 'write_file', base)
+    assert rejection.value.code == 'missing_required_arguments'
+    assert 'content' in str(rejection.value)
     assert not validator.is_valid({**base, 'content': 'x', 'extra': True})
     assert sanitize_wire_tools([PROJECT_TOOL_WRITE_FILE]) == [
         PROJECT_TOOL_WRITE_FILE]
@@ -87,12 +75,10 @@ def test_write_schema_accepts_empty_content_or_ref_but_not_missing_or_both():
 def test_edit_schema_keeps_anchor_efficiency_and_partial_failure_contracts():
     desc = PROJECT_TOOL_EDIT_FILE['function']['description']
     for phrase in (
-            'ordered anchored edits', 'earlier round', 'Prefer replace',
-            'complete desired replacement', 'retained anchor', 'all line breaks',
-            'insert_after/insert_before', 'content is only new text',
-            'match exactly once',
-            'replace_all permits multiple matches only for replace',
-            'Later edits see earlier changes',
+            'Replace text', 'earlier round', 'copied exactly',
+            'empty content deletes', 'must match once',
+            'replace_all replaces every match', 'keep neighbouring text',
+            'write_file(append=true)', 'Later edits see earlier changes',
             'neither rolls back nor stops the others'):
         assert phrase in desc, phrase
 
@@ -108,7 +94,7 @@ def test_edit_contract_survives_resident_projection_search_and_budget():
     item = found['items'][0]
     assert item['name'] == 'edit_file'
     assert item['arguments_schema'] == resident['function']['parameters']
-    assert 'Prefer replace' in item['summary']
+    assert 'Replace text' in item['summary']
     projected = fit_tool_schema_budget(
         [resident], budget_tokens=tool_schema_tokens([resident], model='kimi-k3'),
         model='kimi-k3')
@@ -119,7 +105,7 @@ def test_edit_description_examples_execute_the_promised_order(tmp_path):
     from lib.project_mod.write_tools import tool_edit_file
 
     function = PROJECT_TOOL_EDIT_FILE['function']
-    examples = re.findall(r'`(\{"operation"[^`]+\})`', function['description'])
+    examples = re.findall(r'`(\{"anchor"[^`]+\})`', function['description'])
     assert len(examples) == 2
     for example, expected in zip(examples, ['A\nB\nC\n', 'B\nA\nC\n']):
         target = tmp_path / 'sample.txt'
@@ -137,8 +123,8 @@ def test_edit_schema_rejects_empty_edits_and_preserves_requested_batch_size():
     Draft7Validator.check_schema(params)
     validator = Draft7Validator(params)
     edit = {
-        'path': 'src/app.py', 'operation': 'insert_after',
-        'anchor': 'def main():', 'content': '\n    run()',
+        'path': 'src/app.py',
+        'anchor': 'def main():', 'content': 'def main():\n    run()',
     }
     assert validator.is_valid({'description': 'Wire main', 'edits': [edit]})
     assert validator.is_valid({'edits': [edit]})

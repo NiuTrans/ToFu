@@ -45,10 +45,16 @@ class WorkspaceBindingError(RuntimeError):
 
 @dataclass(frozen=True)
 class IsolationRefusal:
-    """Why a dispatched worker cannot own an isolated checkout, and the human remedy."""
+    """Why a dispatched worker cannot own an isolated checkout, and the human remedy.
+
+    ``code`` names the cause (managed_repository's codes, or this module's own
+    root checks); ``details`` carries its structured facts, if any.
+    """
     reason: str
     remedy: str
     remedy_zh: str
+    code: str = 'unsupported_root'
+    details: dict | None = None
 
     def message(self) -> str:
         return f'{self.reason} {self.remedy}'
@@ -206,7 +212,8 @@ def _has_commit(root: str, *, cancel=None) -> bool:
     return result.returncode == 0
 
 
-def isolated_workspace_refusal(project_path: str, *, cancel=None) -> IsolationRefusal | None:
+def isolated_workspace_refusal(project_path: str, *, cancel=None,
+                               progress=None) -> IsolationRefusal | None:
     """Prepare this root for isolated workers, or explain what Tofu cannot fix.
 
     People never run Git for this: managed_repository turns a plain folder or an
@@ -217,55 +224,62 @@ def isolated_workspace_refusal(project_path: str, *, cancel=None) -> IsolationRe
     against a commit. The accepted project path may alias that physical root;
     resolving it does not rekey the conversation or its dispatch grant.
     Delegation calls this before any worker exists; binding calls it before a
-    worker's first model request.
+    worker's first model request. Preparing a large folder takes as long as its
+    volume needs: ``progress`` observes each advance (the waiting task's
+    liveness) and ``cancel`` (its Stop) ends the preparation.
     """
     local = _local_path(project_path)
     if not local or not os.path.isdir(local):
         return IsolationRefusal(
             f'Project root {project_path} is not an existing local directory.',
             'Open an existing local folder as the project, then delegate again.',
-            '请将一个存在的本地文件夹作为项目打开，然后重新委派。')
+            '请将一个存在的本地文件夹作为项目打开，然后重新委派。', code='folder_missing')
     from lib.project_mod.managed_repository import (
-        ManagedRepositoryUnavailable, prepare_managed_repository,
+        ManagedRepositoryUnavailable, PreparationCancelled, prepare_managed_repository,
     )
     try:
-        prepare_managed_repository(local)
+        prepare_managed_repository(local, progress=progress, cancel=cancel)
     except ManagedRepositoryUnavailable as error:
-        return IsolationRefusal(error.reason, error.remedy, error.remedy_zh)
+        return IsolationRefusal(error.reason, error.remedy, error.remedy_zh,
+                                code=error.code, details=error.details)
+    except PreparationCancelled as error:
+        from lib.llm.llm_errors import AbortedError
+        raise AbortedError('Task cancelled during workspace admission') from error
     try:
         source = _checkout(local, cancel=cancel)
     except WorkspaceBindingError as error:
         return IsolationRefusal(
             f'Project root {project_path} has an unsupported Git layout ({error}).',
             'Use a standard checkout whose Git directory is .git at the repository top level.',
-            '请改用 .git 目录位于仓库根目录的标准 Git 检出。')
+            '请改用 .git 目录位于仓库根目录的标准 Git 检出。', code='unsupported_git_layout')
     if source is None:
         # Preparation just made it one; only a concurrent removal reaches this.
         return IsolationRefusal(
             f'Project root {project_path} stopped being a Git repository while Tofu prepared '
             'it for isolated workers.',
             'Delegate the work again; Tofu prepares the folder automatically.',
-            '请重新委派，Tofu 会自动准备该文件夹。')
+            '请重新委派，Tofu 会自动准备该文件夹。', code='concurrent_repository')
     toplevel, canonical = source
     if toplevel != canonical:
         return IsolationRefusal(
             f'Project root {project_path} is a linked Git worktree of {canonical}; workers are '
             'isolated only from a primary checkout.',
             f'Open the primary checkout {canonical} as the project.',
-            f'请将主检出 {canonical} 作为项目打开。')
+            f'请将主检出 {canonical} 作为项目打开。', code='linked_worktree')
     if local != toplevel:
         return IsolationRefusal(
             f'Project root {project_path} is a subdirectory of the Git repository {toplevel}; '
             'worker workspaces are registered per repository.',
             f'Open {toplevel} as the project, or make {project_path} its own Git repository.',
-            f'请将 {toplevel} 作为项目打开，或把 {project_path} 初始化为独立的 Git 仓库。')
+            f'请将 {toplevel} 作为项目打开，或把 {project_path} 初始化为独立的 Git 仓库。',
+            code='inside_other_repository')
     if not _has_commit(toplevel, cancel=cancel):
         # Preparation records the first commit; only a concurrent change reaches this.
         return IsolationRefusal(
             f'The Git repository {toplevel} has no commits yet, so workers have no baseline '
             'to start from or publish onto.',
             'Delegate the work again; Tofu records the first commit automatically.',
-            '请重新委派，Tofu 会自动创建第一次提交。')
+            '请重新委派，Tofu 会自动创建第一次提交。', code='no_commits')
     return None
 
 
@@ -274,8 +288,12 @@ def _refuse_unisolatable_dispatch_root(task: dict) -> None:
     from lib.project_dispatch.admission import KEY, requires_isolated_workspace
     if not requires_isolated_workspace(task):
         return
+    def advanced():
+        # Preparation progress is this Worker's liveness until its first round.
+        task['_dispatch_heartbeat'] = time.time()
+
     refusal = isolated_workspace_refusal(task['config'][KEY]['projectPath'],
-                                         cancel=_AdmissionStop(task))
+                                         cancel=_AdmissionStop(task), progress=advanced)
     if refusal is not None:
         raise WorkspaceBindingError(refusal.message(), user_hint=refusal.hint())
 
@@ -347,7 +365,30 @@ def _emit_workspace_preparing(task: dict) -> None:
         logger.debug('[WorkspaceDelivery] preparation phase emit failed: %s', error)
 
 
+def _start_storage(task: dict, operation, *, start: bool, label: str,
+                   effect_free: bool = False):
+    """At task start a transient storage refusal waits instead of failing it.
+
+    The persistence-wait contract retains the exact replay-safe operation until
+    ACK, owner Stop or server shutdown (2026-11-06 18:03: a start failed on
+    ``database_timeout`` while the authority was congested). Terminal and
+    refresh bindings keep their existing failure handling.
+    """
+    if not start:
+        return operation()
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    from lib.llm.llm_errors import AbortedError
+    try:
+        return wait_for_persistence(task, operation, label=label, effect_free=effect_free)
+    except AbortedError:
+        # The workspace cancellation vocabulary is the task's Stop, not the
+        # storage wait's.
+        _check_workspace_cancelled(task)
+        raise
+
+
 def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None:
+    import functools
     from lib.integration_state_repository import find_workspace
 
     source = _checkout(path, cancel=cancel)
@@ -363,7 +404,9 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
     # receive it. Otherwise only explicit existing registration is authority;
     # a linked cwd, even with task-stamped writes, cannot claim a dirty peer.
     work_id = workspace_work_id(task)
-    registered = find_workspace(source[1], work_id, user_id=_owner(task))
+    lookup = functools.partial(find_workspace, source[1], work_id, user_id=_owner(task))
+    registered = _start_storage(task, lookup, start=create, label='workspace lookup',
+                                effect_free=True)
     if registered is None:
         if source[0] != source[1]:
             raise WorkspaceBindingError('Linked workspace was not registered')
@@ -391,12 +434,16 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
         create_task_workspace(source[1], work_id, user_id=_owner(task),
             conversation_id=str(task.get('convId') or ''),
             title=str(task.get('lastUserQuery') or '')[:500], task=task)
-        registered = find_workspace(source[1], work_id, user_id=_owner(task))
+        registered = _start_storage(task, lookup, start=create, label='workspace lookup',
+                                    effect_free=True)
         if registered is None:
             raise WorkspaceBindingError('New workspace registration was not acknowledged')
     workspace = _local_path(registered.get('workspace_path'))
     if _read_only(workspace, task):
         raise WorkspaceBindingError('Registered workspace is readonly; writable execution refused')
+    restored = (_restore_missing_checkout(source[1], work_id, task)
+                if create and registered.get('managed') and not os.path.lexists(workspace)
+                else None)
     actual = _checkout(workspace, cancel=cancel)
     if (not actual or actual[0] != workspace or actual[1] != source[1]
             or actual[0] == actual[1]):
@@ -410,10 +457,20 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
     # Pass the canonical root: even a disappearing registration must not fall
     # through integration's linked-checkout adoption path.
     from lib.integration_control import bind_task_workspace
-    result = bind_task_workspace(
-        source[1], work_id, user_id=_owner(task),
-        conversation_id=str(task.get('convId') or ''),
-        title=str(task.get('lastUserQuery') or '')[:500])
+    try:
+        # Idempotent: an existing registration and delivery receipt are reused.
+        # A start binding names this attempt: a receipt an earlier attempt of
+        # the work id left reopens as this attempt's generation.
+        result = _start_storage(task, functools.partial(
+            bind_task_workspace, source[1], work_id, user_id=_owner(task),
+            conversation_id=str(task.get('convId') or ''),
+            title=str(task.get('lastUserQuery') or '')[:500], cancel=cancel,
+            executor_task_id=str(task['id']) if create else ''),
+            start=create, label='workspace binding')
+    except Exception:
+        # A Stop that retired a blocked binding read is a cancellation.
+        _check_workspace_cancelled(task)
+        raise
     if result is None:
         raise WorkspaceBindingError('Workspace registration disappeared during binding')
     if not isinstance(result, dict) or not all(
@@ -423,8 +480,10 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
         'canonicalRoot', 'workspacePath', 'workId')}
     durable_runtime = (registered.get('origin') or {}).get('_workspaceDelivery') or {}
     if isinstance(durable_runtime, dict):
+        # A restored checkout holds none of the runtime bridges recorded before it was lost.
+        lost_with_checkout = ('runtimePaths', 'runtimePrepared') if restored else ()
         for key in ('verification', 'runtimePaths', 'runtimePrepared', 'publicationMode'):
-            if key in durable_runtime:
+            if key in durable_runtime and key not in lost_with_checkout:
                 row[key] = durable_runtime[key]
     for cached in (task.get('_workspaceDelivery') or {}).get('repositories') or []:
         if cached.get('workspacePath') == row['workspacePath']:
@@ -442,7 +501,50 @@ def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None
         raise WorkspaceBindingError('Workspace belongs to another project')
     if source[0] != source[1] and source[0] != actual[0]:
         raise WorkspaceBindingError('Task already owns a different linked workspace')
+    if restored:
+        _announce_restored_checkout(task, row['workspacePath'], restored)
     return row
+
+
+_RESTORATION_SOURCES = {
+    'wip': 'its work in progress, saved when the task last settled or paused',
+    'checkpoint': 'its last checkpoint',
+    'input': 'its input snapshot (no work of the task had been saved)',
+}
+
+
+def _restore_missing_checkout(canonical: str, work_id: str, task: dict) -> dict | None:
+    """Rebuild a registered managed checkout that disappeared; integration owns the Git work."""
+    from lib.integration_control import restore_task_workspace
+    try:
+        return restore_task_workspace(canonical, work_id, user_id=_owner(task), task=task)
+    except Exception as error:
+        _check_workspace_cancelled(task)
+        from lib.llm.llm_errors import AbortedError
+        if isinstance(error, AbortedError):
+            raise
+        raise WorkspaceBindingError(
+            f'Registered workspace is missing and could not be restored from Git: {error}'[:1000]
+        ) from error
+
+
+def _announce_restored_checkout(task: dict, workspace: str, restored: dict) -> None:
+    """Tell the resumed model that its checkout was rebuilt, and from which commit."""
+    prepared = task.get('_workspaceRuntimePrepared')
+    if prepared and workspace in prepared:
+        prepared.remove(workspace)
+    sha, head = restored['sourceSha'], restored['head']
+    text = (f'[Workspace restored] The checkout of this task, {workspace}, was missing, so Tofu '
+            f'rebuilt it at the same path from {_RESTORATION_SOURCES[restored["source"]]}: '
+            f'commit {sha[:12]} on HEAD {head[:12]}. Tracked and untracked files are as they '
+            'were saved. Edits made after that save, files Git ignores (build outputs, caches, '
+            'installed dependencies) and file-history undo from before the restore are not in '
+            'it; rerun any build or install your next steps need.')
+    if restored.get('lostHead'):
+        text += (f' Commits the lost checkout made after that save are kept at '
+                 f'{restored["lostHead"][:12]}.')
+    from lib.project_mod.integration_radar import queue_transient_advisory
+    queue_transient_advisory(task, f'workspace-restored:{sha}', text)
 
 
 def _persist(task: dict, row: dict) -> None:
@@ -540,7 +642,10 @@ def bind_worker_workspace(task: dict) -> dict | None:
 
     with measure_task_startup('workspace_persist', identity=identity):
         for row in rows.values():
-            _persist(task, row)  # persist before allowing any runner/tool write
+            # Persist before allowing any runner/tool write; a replay re-applies
+            # the same patch.
+            _start_storage(task, lambda row=row: _persist(task, row), start=True,
+                           label='workspace persist')
     updated = dict(config)
 
     updated['workspacePublicationModes'] = [
@@ -773,6 +878,32 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
         acknowledgement_key='_workspaceDeliveryAcknowledgedOutcome')
 
 
+def save_worker_workspaces(task: dict) -> list[dict]:
+    """Save the work in progress of every checkout bound to this task, at round settlement.
+
+    Integration saves only checkouts on a local volume, whose durability is Git's,
+    and never writes their HEAD or index. A fenced stale executor saves nothing:
+    the recovered attempt may already be working in the checkout.
+    """
+    if task.get('_transientRuntime') or task.get('_workspaceDeliveryOwnershipRejected'):
+        return []
+    rows = (task.get('_workspaceDelivery') or {}).get('repositories') or []
+    if not rows:
+        return []
+    from lib.integration_control import save_workspace_wip
+    saved = []
+    for row in rows:
+        try:
+            commit = save_workspace_wip(row['canonicalRoot'], workspace_work_id(task),
+                                        user_id=_owner(task))
+        except Exception as error:
+            saved.append({'checkout': row.get('workspacePath', ''), 'error': str(error)[:300]})
+            continue
+        if commit:
+            saved.append({'checkout': row['workspacePath'], 'wip': commit})
+    return saved
+
+
 def record_task_workspace_intents(task: dict, project_path: str = '') -> dict | None:
     """Persist boot handoff before work.finish, without capturing old checkouts."""
     def record_intent(*args, **kwargs):
@@ -829,7 +960,8 @@ def _settle_task_workspaces(task: dict, project_path: str = '', project_paths=No
             known[root] = row
             row.update(status='pending', outcome=outcome)
             result = settle_workspace(
-                row['canonicalRoot'], workspace_work_id(task), user_id=_owner(task), outcome=outcome)
+                row['canonicalRoot'], workspace_work_id(task), user_id=_owner(task), outcome=outcome,
+                executor_task_id=str(task['id']))
             if not isinstance(result, dict):
                 raise WorkspaceBindingError('Registered workspace settlement returned no receipt')
             result = result.get('delivery') or result

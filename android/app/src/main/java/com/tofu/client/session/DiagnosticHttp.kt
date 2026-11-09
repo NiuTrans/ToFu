@@ -46,23 +46,23 @@ object DiagnosticHttp {
                 override fun connectStart(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { prior.connectStart(call, inetSocketAddress, proxy); record("D", "connect port=${inetSocketAddress.port} proxyType=${proxy.type()}") }
                 override fun secureConnectStart(call: Call) { prior.secureConnectStart(call); record("D", "tls handshake") }
                 override fun connectEnd(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?) { prior.connectEnd(call, inetSocketAddress, proxy, protocol) }
-                override fun connectFailed(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?, ioe: IOException) { prior.connectFailed(call, inetSocketAddress, proxy, protocol, ioe); record("E", "connect failed=${ioe.javaClass.simpleName} reason=${ioe.message}") }
+                override fun connectFailed(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?, ioe: IOException) { prior.connectFailed(call, inetSocketAddress, proxy, protocol, ioe); record("E", "connect failed=${ioe.javaClass.simpleName}") }
                 override fun connectionAcquired(call: Call, connection: okhttp3.Connection) { prior.connectionAcquired(call, connection) }
                 override fun connectionReleased(call: Call, connection: okhttp3.Connection) { prior.connectionReleased(call, connection) }
                 override fun requestHeadersStart(call: Call) { prior.requestHeadersStart(call) }
                 override fun requestBodyStart(call: Call) { prior.requestBodyStart(call) }
                 override fun requestBodyEnd(call: Call, byteCount: Long) { prior.requestBodyEnd(call, byteCount) }
-                override fun requestFailed(call: Call, ioe: IOException) { prior.requestFailed(call, ioe); record("E", "request failed=${ioe.javaClass.simpleName} reason=${ioe.message}") }
+                override fun requestFailed(call: Call, ioe: IOException) { prior.requestFailed(call, ioe); record("E", "request failed=${ioe.javaClass.simpleName}") }
                 override fun responseHeadersStart(call: Call) { prior.responseHeadersStart(call) }
                 override fun responseBodyStart(call: Call) { prior.responseBodyStart(call) }
                 override fun responseBodyEnd(call: Call, byteCount: Long) { prior.responseBodyEnd(call, byteCount) }
-                override fun responseFailed(call: Call, ioe: IOException) { prior.responseFailed(call, ioe); record("E", "response failed=${ioe.javaClass.simpleName} reason=${ioe.message}") }
+                override fun responseFailed(call: Call, ioe: IOException) { prior.responseFailed(call, ioe); record("E", "response failed=${ioe.javaClass.simpleName}") }
                 override fun satisfactionFailure(call: Call, response: Response) { prior.satisfactionFailure(call, response) }
                 override fun cacheHit(call: Call, response: Response) { prior.cacheHit(call, response) }
                 override fun cacheMiss(call: Call) { prior.cacheMiss(call) }
                 override fun cacheConditionalHit(call: Call, response: Response) { prior.cacheConditionalHit(call, response) }
                 override fun callEnd(call: Call) { prior.callEnd(call); record("D", "complete elapsedMs=${elapsed()}") }
-                override fun callFailed(call: Call, ioe: IOException) { prior.callFailed(call, ioe); record("E", "failed=${ioe.javaClass.simpleName} reason=${ioe.message} elapsedMs=${elapsed()}") }
+                override fun callFailed(call: Call, ioe: IOException) { prior.callFailed(call, ioe); record("E", "failed=${ioe.javaClass.simpleName} elapsedMs=${elapsed()}") }
                 override fun canceled(call: Call) { prior.canceled(call); record("W", "cancelled elapsedMs=${elapsed()}") }
             }
         }.build()

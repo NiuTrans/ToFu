@@ -123,6 +123,73 @@ def test_native_terminal_ack_requires_owned_turn_task_and_replay_commit(
     assert events[0]['event']['type'] == 'done'
 
 
+@pytest.mark.parametrize('initiator', ['channel', 'human'])
+def test_native_router_control_outcome_commits_real_turn_and_replay(
+    application_storage, monkeypatch, tmp_path, initiator,
+):
+    """The Python terminal adapter must survive the selected durable authority."""
+    from lib.agent_core.native_process import TerminalRequest
+    from lib.router.binding import global_router
+    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.native_terminal import NativeTaskTerminalPolicy, project_native_terminal
+    from lib.turn_lifecycle import bind_task, build_api_messages, create_turn_pair, get_turn
+
+    monkeypatch.setattr('lib.router.home.router_home_root', lambda: str(tmp_path / 'router'))
+    binding = global_router(1, create=True)
+    pair = create_turn_pair(
+        binding['conversationId'], command_id=f'native-{initiator}-notice',
+        input_projection={'content': 'notice or request', '_initiator': initiator,
+                          'origin': {'initiator': initiator}},
+        config={'projectPath': binding['projectPath']}, user_id=1)
+    task = create_task(binding['conversationId'], [], {
+        'model': 'fixture-model', 'projectPath': binding['projectPath'],
+        '_turnId': pair['turn']['turnId']}, user_id=1)
+    task.update(_turnId=pair['turn']['turnId'],
+                _attemptId=pair['attempt']['attemptId'])
+    bind_task(task['_attemptId'], task['id'], user_id=1)
+    content = '[SILENT]'
+    expected_decision = 'accepted' if initiator == 'channel' else 'rejected'
+    candidate = TerminalRequest(
+        PrincipalContext.user(subject_id='native-router-terminal', owner_user_id=1),
+        task['id'], f'commit-{task["id"]}', 1,
+        json.dumps({'type': 'done', 'status': 'done', 'result': {
+            'messages': [{'role': 'user', 'content': 'notice or request'},
+                         {'role': 'assistant', 'content': content,
+                          'reasoning_content': 'reviewed'}], 'usage': []}}).encode(),
+        b'{"invariants_satisfied":true}')
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        policy = NativeTaskTerminalPolicy(
+            principal=candidate.principal, task=task,
+            operation_id=candidate.operation_id, executor=executor,
+            project=project_native_terminal, candidate_bytes=65536)
+        assert asyncio.run(policy.persist(candidate)) == expected_decision
+    stored = get_turn(binding['conversationId'], task['_turnId'], user_id=1)
+    if initiator == 'channel':
+        assert stored['status'] == 'completed'
+        assert stored['projection']['content'] == ''
+        assert any(segment.get('noteKind') == 'deliberate-silence'
+                   for segment in stored['projection']['segments'])
+        following = create_turn_pair(
+            binding['conversationId'], command_id='after-reviewed-notice',
+            input_projection={'content': 'What did you decide?'},
+            config={'projectPath': binding['projectPath']}, user_id=1)
+        replay = build_api_messages(binding['conversationId'], following['turn']['turnId'], {
+            'projectPath': binding['projectPath']}, user_id=1, allow_model_replay=False)
+        assert any(message.get('role') == 'assistant' and message.get('content') == content
+                   for message in replay)
+    else:
+        assert stored['status'] == 'failed'
+        assert stored['projection']['content'] == ''
+        from lib.turn_verdict import task_terminal_evidence, derive_turn_verdict
+        verdict = derive_turn_verdict(task_terminal_evidence(task))
+        assert verdict.status.value == 'failed'
+        assert task['error']['kind'] == 'abnormal_stop'
+        assert task['status'] == 'done' and task['error']['kind'] == 'abnormal_stop'
+        assert task['messages'][-1]['content'] == ''
+        assert not any(segment.get('noteKind') == 'deliberate-silence'
+                       for segment in stored['projection']['segments'])
+
+
 @pytest.mark.parametrize('streaming', [False, True])
 @pytest.mark.parametrize('outcome', ['done', 'error', 'aborted', 'text_fault', 'long_text',
                                      'approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_image','chat_image','image_without_admission','image_feedback_overflow','anthropic_schema','responses_gateway','responses_preparation','preparation_fault','native_context','native_context_refusal','native_context_deadline','native_context_inbox','responses_image','absolute_deadline','native_model_account','native_cost'])

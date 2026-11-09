@@ -31,7 +31,7 @@ import threading
 import time
 import weakref
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 
 logger = get_logger(__name__)
 
@@ -78,11 +78,11 @@ def plant_durable_abort(task_id: str, *, user_id: int, source: str) -> bool:
             _FLAG_KIND, str(task_id), str(int(user_id)), _FLAG_TTL_S)
     except Exception as e:
         logger.debug('[task-abort-signal] plant failed task=%s: %s',
-                     str(task_id)[:8], e)
+                     task_log_tag(task_id), e)
         return False
     logger.info('[task-abort-signal] ⚠️ durable abort planted for task=%s '
                 '(source=%s) — the owning replica delivers it at its next '
-                'watch sweep', str(task_id)[:8], source)
+                'watch sweep', task_log_tag(task_id), source)
     try:
         from lib.log import audit_log as _audit
         _audit('task_durable_abort_planted', task_id=str(task_id),
@@ -113,10 +113,10 @@ def plant_durable_interrupt(task_id: str, *, user_id: int, source: str) -> bool:
             _INTERRUPT_FLAG_TTL_S)
     except Exception as e:
         logger.debug('[task-abort-signal] interrupt plant failed task=%s: %s',
-                     str(task_id)[:8], e)
+                     task_log_tag(task_id), e)
         return False
     logger.info('[task-abort-signal] durable cmd-interrupt planted for '
-                'task=%s (source=%s)', str(task_id)[:8], source)
+                'task=%s (source=%s)', task_log_tag(task_id), source)
     try:
         from lib.log import audit_log as _audit
         _audit('task_durable_interrupt_planted', task_id=str(task_id),
@@ -153,7 +153,7 @@ def _sweep_once() -> None:
                 value = store.get_value(_FLAG_KIND, task_id)
             except Exception as e:
                 logger.debug('[task-abort-signal] probe failed task=%s: %s',
-                             task_id[:8], e)
+                             task_log_tag(task_id), e)
                 continue
             if value is None:
                 continue
@@ -164,7 +164,7 @@ def _sweep_once() -> None:
                 store.delete_value(_FLAG_KIND, task_id)
             except Exception as e:
                 logger.debug('[task-abort-signal] flag delete failed '
-                             'task=%s: %s', task_id[:8], e)
+                             'task=%s: %s', task_log_tag(task_id), e)
             rt.abort_owned(
                 task_id, user_id=owner, source='durable_abort_signal')
         # Per-command interrupt: same flag mechanics, delivered as
@@ -177,7 +177,7 @@ def _sweep_once() -> None:
                 value = store.get_value(_INTERRUPT_FLAG_KIND, task_id)
             except Exception as e:
                 logger.debug('[task-abort-signal] interrupt probe failed '
-                             'task=%s: %s', task_id[:8], e)
+                             'task=%s: %s', task_log_tag(task_id), e)
                 continue
             if value is None:
                 continue
@@ -188,7 +188,7 @@ def _sweep_once() -> None:
                 store.delete_value(_INTERRUPT_FLAG_KIND, task_id)
             except Exception as e:
                 logger.debug('[task-abort-signal] interrupt flag delete '
-                             'failed task=%s: %s', task_id[:8], e)
+                             'failed task=%s: %s', task_log_tag(task_id), e)
             pid = task.get('_subprocess_pid')
             if not pid:
                 continue  # no active command — mirrors no_active_command

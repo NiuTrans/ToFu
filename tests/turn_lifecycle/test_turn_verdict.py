@@ -467,6 +467,7 @@ def test_provider_result_adoption_requires_positive_finish_evidence():
         'storage_frame_overflow',
         'turn_attempt_stale_fence',
         'conversation_attempt_stale_fence',
+        'worker_lease_lost',
     ],
 )
 def test_internal_fence_abort_is_never_a_user_abort(fence_reason):

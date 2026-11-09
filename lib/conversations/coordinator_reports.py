@@ -20,7 +20,7 @@ import uuid
 from lib.conversations.project_coordination import ProjectCoordinationRepository
 from lib.conversations.project_identity import normalize_project_path, project_channel_key
 from lib.identity import require_user_id
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[2] / 'contracts/project_coordination_v1.schema.json').read_text())
 POLICY = CONTRACT['reporting']

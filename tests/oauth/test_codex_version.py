@@ -364,7 +364,8 @@ def test_fetch_uses_existing_egress_and_timeout(state, route):
         routing.assert_called_once_with(codex_version._NPM_LATEST_URL, user_id='test-owner')
         if route == 'direct':
             direct.assert_called_once_with(codex_version._NPM_LATEST_URL,
-                                           timeout=codex_version._FETCH_TIMEOUT_S)
+                                           timeout=codex_version._FETCH_TIMEOUT_S,
+                                           network_scope='subscription')
             remote.assert_not_called()
         else:
             remote.assert_called_once_with(codex_version._NPM_LATEST_URL,

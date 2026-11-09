@@ -130,10 +130,22 @@ class StreamingScheduler:
 
         # Internal state — guarded by _lock
         self._lock = threading.Lock()
-        self._pending: list[SubTaskSpec] = []        # specs waiting for deps
+        # Not-yet-launched entries keyed by admission sequence (insertion
+        # order). Readiness is indexed, not rescanned: each entry counts its
+        # distinct prerequisites absent from ``_completed`` and is listed under
+        # each of them in ``_waiters``, so a completion touches only its own
+        # dependents and the whole DAG settles in O(V + E), not O(V^2).
+        self._pending: dict[int, SubTaskSpec] = {}
+        self._next_seq = 0
+        self._unmet: dict[int, int] = {}
+        self._waiters: dict[str, list[int]] = {}
+        self._ready: set[int] = set()
         # In-flight submissions include worker handoffs; lifecycle drain and
         # dependency settlement need all of them, not only admitted execution.
         self._running: dict[str, SubTaskSpec] = {}
+        # Notified when ``_running`` becomes empty so shutdown waits on
+        # settlement instead of polling the count.
+        self._running_drained = threading.Condition(self._lock)
         #: id → WALL-CLOCK execution admission (``time.time()``, epoch seconds).
         #: Deliberately NOT ``monotonic()``: this value is surfaced to the
         #: browser so a reloaded swarm panel can continue each agent's live
@@ -186,7 +198,7 @@ class StreamingScheduler:
             for sid, (done_spec, _done_result) in self._completed.items():
                 seen_objectives.add(done_spec.objective.strip().lower())
                 existing_ids.add(sid)
-            for s in self._pending:
+            for s in self._pending.values():
                 seen_objectives.add(s.objective.strip().lower())
                 existing_ids.add(s.id)
             for s_id, running_spec in self._running.items():
@@ -224,7 +236,7 @@ class StreamingScheduler:
             # ── Warn about unknown deps ──
             new_ids = {s.id for s in specs}
             all_known = (set(self._completed.keys())
-                         | {s.id for s in self._pending}
+                         | {s.id for s in self._pending.values()}
                          | set(self._running.keys())
                          | new_ids)
             for s in specs:
@@ -235,10 +247,9 @@ class StreamingScheduler:
                             'ignoring dep', s.id, dep_id)
 
             for spec in specs:
-                self._pending.append(spec)
-            logger.debug('[Scheduler] After add: pending=%d running=%d completed=%d pending_ids=%s',
-                         len(self._pending), len(self._running), len(self._completed),
-                         [s.id for s in self._pending])
+                self._enqueue_locked(spec)
+            logger.debug('[Scheduler] After add: pending=%d running=%d completed=%d',
+                         len(self._pending), len(self._running), len(self._completed))
             ready = self._reserve_ready_locked()
         self._submit_ready(ready)
         return list(specs)
@@ -459,8 +470,11 @@ class StreamingScheduler:
         Running agents are not interrupted — only queued work is removed.
         """
         with self._lock:
-            cancelled = list(self._pending)
+            cancelled = list(self._pending.values())
             self._pending.clear()
+            self._unmet.clear()
+            self._waiters.clear()
+            self._ready.clear()
             return cancelled
 
     def shutdown(self, wait: bool = True, timeout: float = 30.0, *, require_quiescence: bool = False):
@@ -486,10 +500,10 @@ class StreamingScheduler:
         if not wait:
             self._pool.shutdown(wait=False)
             return
-        deadline = time.monotonic() + max(0.0, timeout)
-        while self.running_count > 0 and time.monotonic() < deadline:
-            time.sleep(0.05)
-        still = self.running_count
+        with self._running_drained:
+            self._running_drained.wait_for(
+                lambda: not self._running, timeout=max(0.0, timeout))
+            still = len(self._running)
         if still:
             logger.warning('[Scheduler] shutdown: %d agent(s) still running '
                            'after %.0fs — releasing pool anyway', still, timeout)
@@ -497,12 +511,36 @@ class StreamingScheduler:
 
     # ── Internal helpers ─────────────────────────────
 
-    def _deps_satisfied(self, spec: SubTaskSpec) -> bool:
-        """All depends_on IDs are in self._completed.  Caller holds _lock."""
-        for dep_id in (spec.depends_on or []):
-            if dep_id not in self._completed:
-                return False
-        return True
+    def _enqueue_locked(self, spec: SubTaskSpec) -> None:
+        """Index a pending entry by its prerequisites absent from ``_completed``.
+
+        An entry is ready once every ``depends_on`` id is in ``_completed``;
+        an unknown id stays unmet until a spec with that id settles.
+        Caller holds _lock.
+        """
+        seq = self._next_seq
+        self._next_seq += 1
+        self._pending[seq] = spec
+        unmet = {dep_id for dep_id in (spec.depends_on or [])
+                 if dep_id not in self._completed}
+        self._unmet[seq] = len(unmet)
+        for dep_id in unmet:
+            self._waiters.setdefault(dep_id, []).append(seq)
+        if not unmet:
+            self._ready.add(seq)
+
+    def _release_dependents_locked(self, completed_id: str) -> None:
+        """Count one settled prerequisite for its waiters.  Caller holds _lock.
+
+        Waiters are popped, so a duplicate completion of the same id cannot
+        count twice; entries added later already saw it in ``_completed``.
+        """
+        for seq in self._waiters.pop(completed_id, ()):
+            if seq not in self._unmet:
+                continue  # cancelled while waiting
+            self._unmet[seq] -= 1
+            if self._unmet[seq] == 0:
+                self._ready.add(seq)
 
     def _inject_deps_locked(self, spec: SubTaskSpec):
         """Render completed prerequisite evidence without rewriting user context.
@@ -539,24 +577,18 @@ class StreamingScheduler:
             logger.debug('[Scheduler] ready reservation skipped — abort flag set')
             return []
 
-        still_pending = []
         launched = []
-        blocked = []
-        for spec in self._pending:
-            if self._deps_satisfied(spec):
-                self._running[spec.id] = spec
-                launched.append(spec)
-            else:
-                still_pending.append(spec)
-                waiting_for = [d for d in (spec.depends_on or []) if d not in self._completed]
-                blocked.append((spec.id, waiting_for))
-        self._pending = still_pending
+        # Admission order is insertion order, as when pending was a scanned list.
+        for seq in sorted(self._ready):
+            spec = self._pending.pop(seq)
+            del self._unmet[seq]
+            self._running[spec.id] = spec
+            launched.append(spec)
+        self._ready.clear()
 
         if launched:
-            logger.debug('[Scheduler] Reserved %d agent(s): %s',
-                         len(launched), [spec.id for spec in launched])
-        if blocked:
-            logger.debug('[Scheduler] %d spec(s) still blocked on deps: %s', len(blocked), blocked)
+            logger.debug('[Scheduler] Reserved %d agent(s); %d still blocked on deps',
+                         len(launched), len(self._pending))
 
         return launched
 
@@ -777,6 +809,7 @@ class StreamingScheduler:
         # is actually in the queue.
         with self._lock:
             self._completed[spec.id] = (spec, result)
+            self._release_dependents_locked(spec.id)
             self._all_results.append((spec, result))
             self._results_queue.put((spec, result))
             self._running.pop(spec.id, None)
@@ -787,9 +820,11 @@ class StreamingScheduler:
             # Same for the liveness record: a settled agent must not keep the
             # swarm-wide "still producing" verdict alive for its siblings.
             self._beacon.forget(spec.id)
-            logger.debug('[Scheduler] Queue state after agent=%s: pending=%d running=%s completed=%d',
+            if not self._running:
+                self._running_drained.notify_all()
+            logger.debug('[Scheduler] Queue state after agent=%s: pending=%d running=%d completed=%d',
                          spec.id, len(self._pending),
-                         list(self._running.keys()), len(self._completed))
+                         len(self._running), len(self._completed))
             # Reserve dependents atomically with completion. Physical startup
             # follows outside this lock, including failed-submission settlement.
             return self._reserve_ready_locked()

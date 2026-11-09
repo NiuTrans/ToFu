@@ -3,9 +3,9 @@
   "generatedBy": "scripts/gen_storage_operation_catalog.py",
   "sourceProtocol": "storage.v1",
   "sourceSchemaVersion": 70,
-  "sourceRegistryVersion": 55,
-  "operationCount": 384,
-  "operationsSha256": "182fdf59007c7f6dd81f92ade6be8985976547cc237f09ee0aabb80ca3189685",
+  "sourceRegistryVersion": 58,
+  "operationCount": 386,
+  "operationsSha256": "4c66779acf597e78781c7f148bc05c9e06cb5213a19014392fb27090f4866caa",
   "operations": [
     {
       "name": "artifact.create",
@@ -427,6 +427,14 @@
       "name": "conversation.trash.prune",
       "domain": "conversations",
       "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.turn_usage",
+      "domain": "conversations",
+      "kind": "query",
       "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
@@ -2873,6 +2881,14 @@
       "ownerScope": "handler-enforced"
     },
     {
+      "name": "turn.projection.page",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
       "name": "turn.projection.update",
       "domain": "turns",
       "kind": "command",
@@ -3021,6 +3037,7 @@
       "domain": "worker_jobs",
       "kind": "command",
       "receiptRequired": false,
+      "receiptWhenTrue": "retain_claim",
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },

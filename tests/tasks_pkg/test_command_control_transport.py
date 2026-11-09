@@ -37,6 +37,10 @@ def test_control_round_trip_checks_incarnation_owner_and_exact_call():
 @pytest.mark.parametrize('changed', [
     {'ownerId': True}, {'ownerId': 0}, {'method': 'kill'}, {'taskId': ''},
     {'deadlineUnixMs': 0}, {'params': {'unexpected': True}}, {'extra': True},
+    {'method': 'swarm_abort', 'taskId': ''}, {'method': 'swarm_agent_stop'},
+    {'method': 'swarm_agent_stop', 'params': {'agent_id': ''}},
+    {'method': 'background_activity'},  # An owner method names no task.
+    {'method': 'background_activity', 'taskId': '', 'params': {'agent_id': 'a'}},
 ])
 def test_invalid_or_expired_wire_request_never_reaches_the_owner(changed):
     from lib.tasks_pkg.command_control_transport import CommandControlServer
@@ -90,18 +94,99 @@ def test_listener_shutdown_joins_entered_callback_and_closes_admission():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('result', [{}, {'interrupted': 'yes'}, {'backgrounded': True}])
-def test_remote_response_requires_the_requested_operation_result(result):
+@pytest.mark.parametrize('method,task_id,result', [
+    ('interrupt', 'task', {}), ('interrupt', 'task', {'interrupted': 'yes'}),
+    ('interrupt', 'task', {'backgrounded': True}),
+    ('swarm_abort', 'swarm', {'aborted': 'yes'}), ('swarm_abort', 'swarm', {'stopped': True}),
+    ('swarm_agent_stop', 'run', {'stopped': True, 'status': 3}),
+    ('swarm_agent_stop', 'run', {'stopped': False, 'pid': 9}),
+    # An owner view is never "no such task", and each list holds rows.
+    ('background_activity', '', None), ('background_activity', '', {'swarms': []}),
+    ('background_activity', '', {'swarms': [1], 'backgroundCommands': []}),
+    # Process metrics are never "no such task"; every series is complete and typed.
+    ('storage_rpc_metrics', '', None), ('storage_rpc_metrics', '', {'swarms': []}),
+    ('storage_rpc_metrics', '', {'histograms': [{'labels': {}, 'buckets': [1.0], 'counts': [1]}]}),
+    ('storage_rpc_metrics', '', {'histograms': [{'labels': {'kind': 3}, 'buckets': [1.0],
+                                                 'counts': [1], 'sum': 0.5, 'count': 1}]}),
+    ('storage_rpc_metrics', '', {'histograms': [{'labels': {}, 'buckets': [1.0, 2.0],
+                                                 'counts': [1], 'sum': 0.5, 'count': 1}]}),
+    ('storage_rpc_metrics', '', {'histograms': [{'labels': {}, 'buckets': [1.0],
+                                                 'counts': [-1], 'sum': 0.5, 'count': 1}]}),
+])
+def test_remote_response_requires_the_requested_operation_result(method, task_id, result):
     from lib.tasks_pkg.command_control_transport import CommandControlServer, call, CommandControlUnavailable
+    params = {'agent_id': 'a'} if method == 'swarm_agent_stop' else {}
     async def run():
         server = CommandControlServer('incarnation', lambda *args, **kwargs: result)
         endpoint = await server.start()
         try:
             with pytest.raises(CommandControlUnavailable):
-                await asyncio.to_thread(call, endpoint, 'interrupt', 'task', user_id=41)
+                await asyncio.to_thread(call, endpoint, method, task_id, user_id=41, params=params)
         finally:
             await server.close()
     asyncio.run(run())
+
+
+def test_swarm_controls_and_owner_view_round_trip_exact_arguments():
+    from lib.tasks_pkg.command_control_transport import CommandControlServer, call
+    calls = []
+    results = {'swarm_abort': {'aborted': True},
+               'swarm_agent_stop': {'stopped': False, 'reason': 'not_running', 'status': 'pending'},
+               'background_activity': {'swarms': [{'swarm_id': 'run'}], 'backgroundCommands': []}}
+    def apply(method, task_id, *, user_id, deadline_unix_ms, **params):
+        calls.append((method, task_id, user_id, params))
+        return results[method]
+    async def run():
+        server = CommandControlServer('incarnation', apply)
+        endpoint = await server.start()
+        try:
+            for method, task_id, params in (('swarm_abort', 'swarm', {}),
+                                            ('swarm_agent_stop', 'run', {'agent_id': 'a'}),
+                                            ('background_activity', '', {})):
+                assert await asyncio.to_thread(call, endpoint, method, task_id, user_id=41,
+                                               params=params) == results[method]
+        finally:
+            await server.close()
+    asyncio.run(run())
+    assert calls == [('swarm_abort', 'swarm', 41, {}),
+                     ('swarm_agent_stop', 'run', 41, {'agent_id': 'a'}),
+                     ('background_activity', '', 41, {})]
+
+
+def test_execution_storage_histogram_round_trips_from_the_owning_process():
+    """The real control owner answers with this process's storage RPC series."""
+    from lib import observability
+    from lib.tasks_pkg.command_control_transport import CommandControlServer, call
+    from lib.tasks_pkg.command_controls import apply_command_control
+    store = observability._STORE
+    with store.lock:  # shared with neighbors on this xdist worker
+        saved = dict(store.histograms)
+        store.histograms.clear()
+    observability.record_storage_rpc('query', 'turn.get', 0.003)
+    observability.record_storage_rpc('query', 'turn.get', 0.2)
+    observability.record_storage_rpc('command', 'turn.event.record', 0.04, outcome='error')
+
+    async def run():
+        server = CommandControlServer('incarnation', apply_command_control)
+        endpoint = await server.start()
+        try:
+            return await asyncio.to_thread(call, endpoint, 'storage_rpc_metrics', '',
+                                           user_id=41, params={})
+        finally:
+            await server.close()
+    try:
+        result = asyncio.run(run())
+    finally:
+        with store.lock:
+            store.histograms.clear()
+            store.histograms.update(saved)
+    rows = {(row['labels']['kind'], row['labels']['operation'], row['labels']['outcome']): row
+            for row in result['histograms']}
+    assert set(rows) == {('query', 'turn.get', 'success'), ('command', 'turn.event.record', 'error')}
+    read = rows[('query', 'turn.get', 'success')]
+    assert read['count'] == 2 and read['sum'] == pytest.approx(0.203)
+    assert dict(zip(read['buckets'], read['counts']))[0.005] == 1
+    assert read['counts'][-1] == 2 and read['counts'] == sorted(read['counts'])
 
 
 def test_repeated_close_cancellation_still_joins_the_callback():

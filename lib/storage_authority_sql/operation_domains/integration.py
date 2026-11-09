@@ -67,6 +67,35 @@ def _delivery_denied(origin: Mapping[str, Any]) -> bool:
             and delivery.get('taskOutcome') in ('failed', 'cancelled', 'stopped'))
 
 
+def _delivery_generation(receipt: Mapping[str, Any]) -> str:
+    value = receipt.get('executorTaskId')
+    return value if isinstance(value, str) else ''
+
+
+def _delivery_patch(stored: Any, proposed: dict[str, Any]) -> dict[str, Any] | None:
+    """The receipt ``proposed`` may store over ``stored``; ``None`` keeps ``stored``.
+
+    A receipt records one executor generation (``executorTaskId``, the attempt
+    whose outcome it is). Within a generation a terminal denial stays final. A
+    write naming another generation is a stale writer, except a fresh
+    ``working`` receipt, which opens the next generation: the attempt starting
+    in the checkout owns everything the receipt says from then on.
+    """
+    if not isinstance(stored, dict):
+        return proposed
+    generation = _delivery_generation(proposed)
+    if generation != _delivery_generation(stored):
+        if (generation and proposed.get('state') == 'working'
+                and proposed.get('taskOutcome') in (None, '')):
+            return proposed
+        return None
+    if _delivery_denied({'delivery': stored}):
+        if proposed.get('taskOutcome') != stored['taskOutcome']:
+            return None
+        return {**stored, **proposed}
+    return proposed
+
+
 def _delivery_needs_action(row: Mapping[str, Any], *, retained: bool) -> bool:
     """The receipt asks the delivery worker to act (``delivery.py`` dispatch).
 
@@ -588,7 +617,7 @@ def _discard(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _set_meta(session: Session, payload: Mapping[str, Any]) -> Any:
-    """Merge origin metadata without replacing a terminal delivery denial."""
+    """Merge origin metadata; the delivery receipt changes only as ``_delivery_patch`` admits."""
     user_id = _integer(payload, 'user_id', minimum=1)
     project_root = _text(payload, 'project_root')
     task_id = _text(payload, 'task_id', 512)
@@ -613,15 +642,15 @@ def _set_meta(session: Session, payload: Mapping[str, Any]) -> Any:
         'integration.workspace', f'{user_id}|{project_root}|{task_id}')
     row = _required_workspace(session, user_id, project_root, task_id)
     merged = _origin_document(row.get('origin_json'))
-    if _delivery_denied(merged) and 'delivery' in patch:
-        old_delivery = merged['delivery']
-        next_delivery = patch['delivery']
-        if next_delivery.get('taskOutcome') != old_delivery['taskOutcome']:
-            # Neither replacement nor an empty/unknown/new terminal outcome
-            # can erase the original denial. Unrelated metadata still merges.
+    if 'delivery' in patch:
+        delivery = _delivery_patch(merged.get('delivery'), patch['delivery'])
+        if delivery is None:
+            # Neither another generation's stale write nor a replacement or an
+            # empty/unknown/new terminal outcome can erase the receipt (or its
+            # denial). Unrelated metadata still merges.
             patch.pop('delivery')
         else:
-            patch['delivery'] = {**old_delivery, **next_delivery}
+            patch['delivery'] = delivery
     merged.update(patch)
     if _delivery_denied(merged):
         # Receipt revocation and queue removal commit together. Keep refs.

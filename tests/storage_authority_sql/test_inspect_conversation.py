@@ -360,26 +360,31 @@ def _write_rotation_and_tail(directory, text, mtime):
     (directory / 'app.log').write_text(text, encoding='utf-8')
 
 
-def test_log_scan_matches_short_id_tokens_but_not_a_shared_prefix(tmp_path):
-    """Model-replay/translation call sites log ``conversation_id[:8]``."""
+def test_log_scan_keeps_legacy_short_id_lines_only_with_an_own_run(tmp_path):
+    """Lines written before whole-id logging carry ``conversation_id[:8]``;
+    only one of the conversation's own runs attributes such a line."""
     from debug import inspect_conversation as inspector
 
     full = 'GET /api/v4/conversations/mvyt8wab9nt9fa 200'
-    short = '[ModelReplay] conv=mvyt8wab restore=x'
+    own = '[rid:0c0f3fa8] [ModelReplay] conv=mvyt8wab restore=x'
     _write_rotation_and_tail(tmp_path, '\n'.join([
-        full, short,
+        full, own,
+        '[ModelReplay] conv=mvyt8wab restore=no-run',
+        '[rid:9b1e2c3d] [ModelReplay] conv=mvyt8wab restore=other-run',
         '[ModelReplay] conv=mvyt8wabzzzzzz restore=another-conversation',
         '[Translate] committed conv=xmvyt8wab turn=embedded',
         '[Chat] unrelated line',
     ]) + '\n', 1_000_100.0)
 
-    sections = inspector._scan_logs('mvyt8wab9nt9fa', 50, tmp_path,
-                                    window=(1_000_000.0, 1_005_000.0))
+    sections = inspector._scan_logs(
+        'mvyt8wab9nt9fa', 50, tmp_path, window=(1_000_000.0, 1_005_000.0),
+        runs={'conversation-attempt:0c0f3fa8-1111-4222-8333-944445555666'})
 
+    omitted = '; 2 legacy short-ID line(s) omitted'
     assert sections == [
         ('--- app.log.2026-11-02: 2 line(s) '
-         '(rotation overlapping the conversation lifetime)', [full, short]),
-        ('--- app.log: 2 line(s) (last 4 MiB)', [full, short]),
+         '(rotation overlapping the conversation lifetime)' + omitted, [full, own]),
+        ('--- app.log: 2 line(s) (last 4 MiB)' + omitted, [full, own]),
     ]
 
 
@@ -398,8 +403,8 @@ def test_log_match_filters_conversation_lines_before_the_per_file_cap(tmp_path):
 
     from debug import inspect_conversation as inspector
 
-    lines = [f'[ModelReplay] conv=mvyt8wab restore=r{number}' if number % 2
-             else f'[Chat] conv=mvyt8wab noise {number}' for number in range(10)]
+    lines = [f'[ModelReplay] conv=mvyt8wab9nt9fa restore=r{number}' if number % 2
+             else f'[Chat] conv=mvyt8wab9nt9fa noise {number}' for number in range(10)]
     lines.append('[ModelReplay] conv=other123 restore=not-this-conversation')
     _write_rotation_and_tail(tmp_path, '\n'.join(lines) + '\n', 1_000_100.0)
 
@@ -407,12 +412,130 @@ def test_log_match_filters_conversation_lines_before_the_per_file_cap(tmp_path):
         'mvyt8wab9nt9fa', 2, tmp_path, window=(1_000_000.0, 1_005_000.0),
         log_match=re.compile(r'ModelReplay|Translate\] committed'))
 
-    kept = ['[ModelReplay] conv=mvyt8wab restore=r7', '[ModelReplay] conv=mvyt8wab restore=r9']
+    kept = ['[ModelReplay] conv=mvyt8wab9nt9fa restore=r7',
+            '[ModelReplay] conv=mvyt8wab9nt9fa restore=r9']
     assert sections == [
         ('--- app.log.2026-11-02: 2 line(s) '
          '(rotation overlapping the conversation lifetime)', kept),
         ('--- app.log: 2 line(s) (last 4 MiB)', kept),
     ]
+
+
+WORKER_A = 'worker-1aaaaaaaaaaaaaaaaaaaaaaa'
+WORKER_B = 'worker-1bbbbbbbbbbbbbbbbbbbbbbb'
+RUN_A = 'ab50150c-1111-4222-8333-944445555666'
+RUN_B = '234f3b4e-7777-4888-9999-aaaabbbbcccc'
+COORDINATOR_RUN = 'c6354b89-2222-4333-8444-955556666777'
+
+
+def _insert_worker(db_path: Path, conv_id: str, attempt_id: str) -> None:
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        'INSERT INTO storage_conversations VALUES (?,?,?,?,?,?,?,?,?,?)',
+        (conv_id, 1, 'worker', '[]', 1787213775740, 1787213970001, '{}', 0, '', 3))
+    connection.execute(
+        'INSERT INTO storage_conversation_turns VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (f'turn-{conv_id}', conv_id, 1, 'main', None, 0, 'assistant', 'reply', '',
+         'completed', attempt_id,
+         json.dumps({'role': 'assistant', 'content': 'done', 'timestamp': 1787213775740}),
+         1, '{}', 1787213775740, 1787213775740))
+    connection.commit()
+    connection.close()
+
+
+def test_logs_never_mix_workers_whose_ids_share_eight_characters(tmp_path, capsys):
+    """Every Worker id starts with ``worker-``, so the 8-character prefix that
+    lines carried before whole-id logging (``conv=worker-1``) names about one
+    Worker in sixteen: LONGCTX-ATTRIB 48a9650c blamed 42 cache misses on
+    another Worker's checkpoint rebuilds."""
+    from debug import inspect_conversation as inspector
+
+    db_path = tmp_path / 'tofu.db'
+    _create_sidecar_schema(db_path)
+    _insert_worker(db_path, WORKER_A, RUN_A)
+    _insert_worker(db_path, WORKER_B, RUN_B)
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    lines = {
+        'a': f'[rid:{RUN_A}] [CacheTrack] conv={WORKER_A} call=501 cache_read dropped',
+        'b': f'[rid:{RUN_B}] [CacheTrack] conv={WORKER_B} call=157 cache_read dropped',
+        'a_legacy': f'[rid:{RUN_A[:8]}] [CacheTrack] conv=worker-1 call=500 cache_read dropped',
+        'b_legacy': f'[rid:{RUN_B[:8]}] [ModelReplay] conv=worker-1 checkpoint=prepared',
+        'legacy_without_run': '[ModelReplay] conv=worker-1 restore=checkpoint_missing',
+        'coordinator': f'[rid:{COORDINATOR_RUN}] [ProjectMessage] steer conv={WORKER_A}',
+    }
+    (logs / 'app.log').write_text('\n'.join(lines.values()) + '\n', encoding='utf-8')
+
+    def inspect(conv_id):
+        argv = [conv_id, '--db', str(db_path), '--logs-dir', str(logs), '--json']
+        assert inspector.main(argv) == 0
+        return json.loads(capsys.readouterr().out)
+
+    payload = inspect(WORKER_A)
+    assert payload['logs'] == [
+        lines['a'], lines['a_legacy'], '⚑ other run | ' + lines['coordinator']]
+    assert payload['logFiles'] == [
+        '--- app.log: 3 line(s) (last 4 MiB); 1 ⚑ other run; '
+        '2 legacy short-ID line(s) omitted']
+
+    payload = inspect(WORKER_B)
+    assert payload['logs'] == [lines['b'], lines['b_legacy']]
+    assert payload['logFiles'] == [
+        '--- app.log: 2 line(s) (last 4 MiB); 2 legacy short-ID line(s) omitted']
+
+
+CHILD_RUN = '0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6'
+
+
+@pytest.mark.parametrize('line, verdict', [
+    (f'[rid:{RUN_A}] [CacheTrack] conv={WORKER_A} call=3', 'kept'),
+    # A swarm child of the attempt runs in the conversation under its own task id.
+    (f'[Task {CHILD_RUN}][R2] conv={WORKER_A} stream complete', 'kept'),
+    (f'[rid:{CHILD_RUN[:8]}] [CacheTrack] conv=worker-1 call=1', 'kept'),
+    # An HTTP request id is not a run; the whole ID alone attributes the line.
+    (f'[rid:1f2e3d4c] GET /api/v4/conversations/{WORKER_A}/turns 200', 'kept'),
+    (f'[rid:{COORDINATOR_RUN}] delegated task=conversation-attempt:{RUN_A} '
+     f'conv={WORKER_A}', 'kept'),
+    (f'[rid:{COORDINATOR_RUN}] [ProjectMessage] steer conv={WORKER_A}', 'marked'),
+    (f'[Task {COORDINATOR_RUN}][R3] conv={WORKER_A}', 'marked'),
+    (f'[rid:{RUN_A[:8]}] [CacheTrack] conv=worker-1 call=2', 'kept'),
+    (f'[Task {RUN_A[:8]}][R2] conv=worker-1 stream complete', 'kept'),
+    (f'[{RUN_A}] conv=worker-1 Round 4 result', 'kept'),
+    ('[rid:9b1e2c3d] [CacheTrack] conv=worker-1 call=9', 'omitted'),
+    ('[ModelReplay] conv=worker-1 checkpoint=prepared', 'omitted'),
+    (f'[rid:{RUN_B}] conv={WORKER_B}', None),
+    ('conv=worker-1aaaaaaaaaaaaaaaaaaaaaaaz other conversation', None),
+])
+def test_log_attribution_rules(line, verdict):
+    from debug.inspect_conversation import OTHER_RUN_MARK, _LogAttribution
+
+    runs = {f'conversation-attempt:{RUN_A}#agent:{CHILD_RUN}'}
+    result = _LogAttribution(WORKER_A, runs).classify(line)
+
+    expected = {'kept': ('kept', line), 'marked': ('kept', OTHER_RUN_MARK + line),
+                'omitted': ('omitted', line), None: None}[verdict]
+    assert result == expected
+    # Runs read from only some turns cannot tell another conversation's run from
+    # an unread turn's: nothing is marked, and legacy lines still need a known run.
+    partial = _LogAttribution(WORKER_A, runs, runs_complete=False).classify(line)
+    assert partial == (('kept', line) if verdict == 'marked' else expected)
+
+
+def test_conversation_runs_come_from_transcript_records_and_attempt_rows():
+    from debug.inspect_conversation import _conversation_runs
+
+    document = {'messages': [
+        {'role': 'user', '_attemptId': 'input-attempt'},
+        {'role': 'assistant', '_attemptId': RUN_A,
+         'toolRounds': [{'taskId': f'conversation-attempt:{RUN_B}#agent:reviewer',
+                         'inspectorRef': {'taskId': 'conversation-attempt:round-ref'}}],
+         'segments': [{'attemptId': 'segment-attempt'}],
+         'activityTimeline': {'entries': [{'taskId': 'conversation-attempt:timeline'}]}},
+        'not a message']}
+
+    assert _conversation_runs(document, ['conversation-attempt:retried', None]) == {
+        'input-attempt', RUN_A, RUN_B, 'reviewer', 'round-ref', 'segment-attempt',
+        'timeline', 'retried'}
 
 
 @pytest.mark.parametrize('argv,message', [

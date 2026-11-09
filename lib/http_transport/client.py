@@ -3,8 +3,8 @@
 Replaces ad-hoc ``requests.get/post`` calls scattered across the
 project. The unified API:
 
-  - **Auto-applies** ``proxies_for(url)`` from ``lib.proxy`` so internal
-    URLs bypass the corporate proxy and external URLs use it.
+  - **Automatic route recovery** from the shared network authority, with
+    explicit bypasses and connect-only failover for every external origin.
   - **Default timeout** of 30s (override per-call).
   - **Default User-Agent** of ``Tofu/<version>`` (override via headers).
   - **Connection reuse** through one requests Session per worker thread and
@@ -44,7 +44,6 @@ import asyncio
 import contextlib
 import os
 import threading
-import time
 import weakref
 from typing import Any, Optional
 
@@ -52,24 +51,16 @@ import requests
 
 import lib as _lib
 from lib.log import get_logger
+from lib.http_transport.connection_setup import NetworkRoutesExhausted
+from lib.http_transport.outbound import managed_session
 
 from lib.llm.diagnostic_timing import current_timing, timed_call, timing_stage
-from lib.proxy import async_proxy_for, is_subscription_host
-from lib.proxy import proxies_for, report_outcome as _report_outcome
-from lib.proxy import (
-    report_subscription_route,
-    subscription_route_candidates,
-)
 
 logger = get_logger(__name__)
 
 
-class SubscriptionRoutesExhausted(requests.exceptions.ConnectionError):
-    """Every selected subscription route failed before request delivery.
-
-    Preserve connect-only evidence for callers without retaining the original
-    proxy exceptions, whose messages can contain credentials.
-    """
+# Historical import retained for model transport exception classification.
+SubscriptionRoutesExhausted = NetworkRoutesExhausted
 
 
 # ── Defaults ──────────────────────────────────────────────────────
@@ -114,24 +105,13 @@ def _build_headers(extra: Optional[dict]) -> dict:
     return h
 
 
-def _httpx_proxy_url(url: str) -> Optional[str]:
-    """Proxy URL for the httpx async client — delegates to
-    ``lib.proxy.async_proxy_for`` so the async transport honours env
-    ``no_proxy`` exactly like the sync one (httpx alone ignores it once an
-    explicit ``proxy=`` is set)."""
-    return async_proxy_for(url)
-
-
 def _sync_session() -> requests.Session:
     session = getattr(_sync_local, 'session', None)
     if session is None:
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
+        session = managed_session(
             pool_connections=_POOL_MAX_KEEPALIVE,
             pool_maxsize=_POOL_MAX_CONNECTIONS,
             pool_block=False)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
         _sync_local.session = session
         with _sync_sessions_lock:
             _sync_sessions.add(session)
@@ -209,7 +189,7 @@ def _sync_request(method: str, url: str, **kwargs):
         session.cookies.clear()
 
 
-def _async_pool_key(proxy, verify):
+def _async_pool_key(proxy, verify, automatic=False):
     try:
         hash(verify)
         verify_key = verify
@@ -217,13 +197,14 @@ def _async_pool_key(proxy, verify):
         logger.debug('[HTTP] non-hashable TLS verify object; using identity: %s',
                      exc)
         verify_key = ('identity', id(verify))
-    return proxy, verify_key
+    return proxy, verify_key, automatic
 
 
-def _async_client(proxy=None, verify=True):
+def _async_client(proxy=None, verify=True, automatic=False):
     import httpx
+    from lib.http_transport.outbound_async import managed_async_client
     loop = asyncio.get_running_loop()
-    key = _async_pool_key(proxy, verify)
+    key = _async_pool_key(proxy, verify, automatic)
     with _async_clients_lock:
         per_loop = _async_clients.setdefault(loop, {})
         client = per_loop.get(key)
@@ -235,11 +216,11 @@ def _async_client(proxy=None, verify=True):
                 # Preserve the stateless semantics of one-shot AsyncClient.
                 return None
 
-        client = httpx.AsyncClient(
-            proxy=proxy,
+        client = managed_async_client(
+            proxy=proxy, automatic=automatic,
             verify=verify,
             limits=httpx.Limits(
-                max_connections=_POOL_MAX_CONNECTIONS,
+                max_connections=None,
                 max_keepalive_connections=_POOL_MAX_KEEPALIVE,
                 keepalive_expiry=30.0),
         )
@@ -334,94 +315,11 @@ def http_request(method: str, url: str, *,
     Caller is responsible for closing streamed responses (use http_stream
     context manager instead).
     """
-    # Server-side POST/PUT/etc. must not silently follow a user-controlled
-    # redirect. Apart from SSRF, requests may rewrite a 301/302 POST into GET
-    # and discard the signed/request body. Public GET helpers retain their
-    # historical redirect behaviour; strict fetches use lib.safe_fetch, which
-    # validates every hop.
     extra.setdefault('allow_redirects', method.upper() in ('GET', 'HEAD'))
-    route_plan = []
-    if use_proxy and 'proxies' not in extra:
-        from urllib.parse import urlparse
-        host = (urlparse(url).hostname or '').lower()
-        if is_subscription_host(host):
-            route_plan = timed_call('network_route', subscription_route_candidates, url)
-        if not route_plan:
-            extra['proxies'] = timed_call('network_route', proxies_for, url)
-
-    # Subscription paths are concrete and independently health-tracked.  A
-    # connection-setup failure is safe to move to the next path because no
-    # response headers were received; any delivered HTTP response is final
-    # and is never replayed on another route.
-    if route_plan:
-        attempted = set()
-        for route in route_plan:
-            attempted.add(route.route_id)
-            attempt_extra = dict(extra)
-            attempt_extra['proxies'] = route.requests_proxies()
-            started = time.monotonic()
-            try:
-                response = _sync_request(
-                    method, url, timeout=timeout,
-                    headers=_build_headers(headers), **attempt_extra)
-            except requests.exceptions.ConnectionError as e:
-                from lib.subscription_routes import is_safe_connect_failure
-                if not is_safe_connect_failure(e):
-                    report_subscription_route(url, route, False)
-                    raise
-                report_subscription_route(url, route, False)
-                logger.info('[HTTP] %s connection failed via %s — trying '
-                            'next subscription route', url, route.label)
-                # The cold probe race returns on its first success; sibling
-                # probes keep running.  Refresh now so a just-completed
-                # alternative joins this same request's failover chain.
-                known = {item.route_id for item in route_plan}
-                for candidate in timed_call('network_route', subscription_route_candidates, url):
-                    if (candidate.route_id not in attempted
-                            and candidate.route_id not in known):
-                        route_plan.append(candidate)
-                        known.add(candidate.route_id)
-                continue
-            except Exception:
-                # Read/body timeouts are ambiguous: upstream may have accepted
-                # the request, so do not replay it over a different path.
-                raise
-            report_subscription_route(
-                url, route, True,
-                (time.monotonic() - started) * 1000.0)
-            return response
-        raise SubscriptionRoutesExhausted(
-            'all server subscription routes failed during connection '
-            'setup') from None
-
-    _t0 = time.monotonic()
-    try:
-        resp = _sync_request(
-            method, url,
-            timeout=timeout,
-            headers=_build_headers(headers),
-            **extra,
-        )
-    except requests.exceptions.ReadTimeout:
-        # The request REACHED the peer; only the body was slow. That is
-        # evidence about the upstream, never about this egress path — and the
-        # path owns a consecutive-failure budget that takes it out of service
-        # for a cooldown. On a pool with ONE entry, convicting it here turned
-        # one slow upstream into a total external blackout: the entry cooled
-        # down, `proxies_for` then offered no proxy, and every other host fell
-        # back to a direct path that resolves nothing on this class of host
-        # (observed 2026-10-21: an 8s Artificial Analysis read timeout by
-        # proxy, then DNS failures from the self-update and AA refreshers).
-        # The streaming LLM transports already convict connect-phase failures
-        # only; this is the same rule for the sync transport.
-        logger.debug('[HTTP] %s read timeout — not charged to the egress path',
-                     url)
-        raise
-    except Exception:
-        _report_outcome(url, False)
-        raise
-    _report_outcome(url, True, (time.monotonic() - _t0) * 1000.0)
-    return resp
+    if not use_proxy and 'proxies' not in extra:
+        extra['proxies'] = {'no_proxy': '*'}
+    return _sync_request(method, url, timeout=timeout,
+                         headers=_build_headers(headers), **extra)
 
 
 def http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT,
@@ -507,11 +405,13 @@ async def async_http_request(method: str, url: str, *,
     httpx-specific keyword arguments map cleanly: ``json=``, ``params=``,
     ``data=``, ``content=``, ``files=``, ``cookies=``.
     """
-    proxy = _httpx_proxy_url(url) if use_proxy else None
+    scope = extra.pop('network_scope', None)
+    if scope is not None:
+        extra['extensions'] = {**extra.get('extensions', {}), 'tofu_network_scope': scope}
     follow_redirects = extra.pop(
         'follow_redirects', method.upper() in ('GET', 'HEAD'))
     verify = extra.pop('verify', True)
-    client = _async_client(proxy=proxy, verify=verify)
+    client = _async_client(verify=verify, automatic=use_proxy)
     return await client.request(
         method, url,
         timeout=timeout,
@@ -565,11 +465,13 @@ async def async_http_stream(method: str, url: str, *,
             async for line in resp.aiter_lines():
                 ...
     """
-    proxy = _httpx_proxy_url(url) if use_proxy else None
+    scope = extra.pop('network_scope', None)
+    if scope is not None:
+        extra['extensions'] = {**extra.get('extensions', {}), 'tofu_network_scope': scope}
     follow_redirects = extra.pop(
         'follow_redirects', method.upper() in ('GET', 'HEAD'))
     verify = extra.pop('verify', True)
-    client = _async_client(proxy=proxy, verify=verify)
+    client = _async_client(verify=verify, automatic=use_proxy)
     async with client.stream(method, url,
                              timeout=timeout,
                              follow_redirects=follow_redirects,

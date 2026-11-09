@@ -19,6 +19,7 @@ from lib.agent_core.native_process import ApprovalPolicy, NativeProcessClient, P
 from lib.agent_core.native_process import valid_ack_budget
 from lib.model_routing.native_route import Route, Result, run_native_route
 from lib.tasks_pkg.native_terminal import NativeTaskTerminalPolicy, project_native_terminal, task_lifetime_matches
+from lib.log import task_log_tag
 
 
 class NativeTaskRounds:
@@ -399,7 +400,7 @@ async def run_native_task(
             from lib.tasks_pkg.manager import append_event
             model, tools = context_policy.completion_binding()
             publish_final_messages_snapshot(owner_task, owner_task.get('messages'),
-                model=model, tid=terminal_task_id[:8], tools=tools, publish=append_event)
+                model=model, tid=task_log_tag(terminal_task_id), tools=tools, publish=append_event)
     terminal = NativeTaskTerminalPolicy(
         principal=client.principal, task=task, operation_id=profile.get('operation_id'),
         executor=executor, project=project_outcome, candidate_bytes=profile['frame_bytes'], transient=transient,

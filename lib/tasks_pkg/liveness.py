@@ -21,7 +21,9 @@ invocation reporting to its parent for a child).
 Clocks (wall time, both must be stale): ``_t_last_event`` advances on real
 progress events (deltas, tool results and output, retry/wait phases; tool
 heartbeat self-ticks never count) and ``_dispatch_heartbeat`` on live provider
-dispatch, model waits and ratified human waits.
+dispatch, model waits, ratified human waits and each observed advance of work a
+call owns (a completed Coordinator status poll, an advancing worker-root
+preparation).
 
 Silence never counts before ``silence_origin``: the end of the task's last
 explained wait (the reaper stamps ``EXPLAINED_AT_KEY`` while it observes one) or
@@ -98,7 +100,7 @@ def judge(task: dict, now: float, threshold: float, *, commands=None) -> Verdict
     ``commands`` are ``(pid, own silence)`` per live foreground command; omitted,
     they are read from the task's command registry.
     """
-    reason = explained_wait(task)
+    reason = explained_wait(task, now)
     if reason:
         return Verdict('explained', reason)
     origin = silence_origin(task)

@@ -20,14 +20,14 @@ import json
 import math
 from collections.abc import Mapping
 
-import lib.storage.storage_projection as _storage_projection
+import lib.task_replay.persistence_projection as _persistence_projection
 from lib.agent_core.events import EventType, Phase
 from lib.cost import (
     _ANTHROPIC_CACHE_WRITE_1H_MUL, _cache_write_1h_tokens, _legacy_preset_to_model,
     _round, normalize_usage, split_input_tokens,
 )
 from lib.pricing import DEFAULT_USD_CNY_RATE, get_pricing_data, lookup_pricing
-from lib.storage.storage_projection import (
+from lib.task_replay.persistence_projection import (
     _TOOL_ROUNDS_KEEP_TAIL_INTACT, _elide_results_payloads, _elide_string_field,
     _swarm_stub_snapshot_from_handle, sanitize_usage_for_persist,
     trim_tool_round_for_persist,
@@ -351,7 +351,7 @@ def compact_tool_rounds_for_frame_budget(
     """
     if not isinstance(rounds, list) or not rounds:
         return rounds
-    budget = (_storage_projection.TOOL_ROUNDS_FRAME_BUDGET_BYTES
+    budget = (_persistence_projection.TOOL_ROUNDS_FRAME_BUDGET_BYTES
               if budget_bytes is None else budget_bytes)
     total = sum(_string_payload_chars(item) for item in rounds)
     if total <= budget:
@@ -914,7 +914,7 @@ def compact_trace_document(document, *, source=None):
             aggregate_keys = (
                 'totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
                 'approvalWaitMs', 'flowStepMs', 'orchestrationMs',
-                'unattributedMs', 'ttftMs',
+                'unattributedMs', 'ttftMs', 'failedAttemptMs',
                 'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
                 'startupMs', 'roundPrepMs', 'roundSettleMs', 'finalizeMs',
             )

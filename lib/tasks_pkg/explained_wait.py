@@ -34,11 +34,28 @@ owns the wait:
   The wait is explained only while a published child is itself live: the
   child is a registered task judged by its own clocks and command watch, and
   once it is reaped or finished the parent's silence is unexplained again.
+- ``_deviceWaits`` — a task blocked in ``desktop.bridge.send_desktop_command``
+  while its queued command is claimed by a device that is still connected
+  (the bridge's own ``_command_active_locked`` rule: same owner, a poll inside
+  the connection window, the command in the device's active set). An unclaimed
+  command, a settled one or a device that stopped polling explains nothing:
+  the command's pickup deadline, a transport timeout, the stale-mount verdict
+  or an explicit Stop still owns that silence.
 - host filesystem stall — a keepalive ``stat`` unanswered past the stale-mount
   bound (``lib.fs_keepalive.filesystem_unresponsive``). Worktrees, logs and the
   storage authority share that mount, so blocked I/O silences every agent at
   once and no stop can interrupt it; a verdict could only take effect when the
   I/O returns, i.e. exactly when the agent could continue (2026-11-02).
+
+A Coordinator waiting on live Workers publishes no marker here. That silence is
+owned by the observation itself: ``conversations.coordinator_workers`` refreshes
+the waiter's existing dispatch heartbeat after every COMPLETED status poll, and
+only then, exactly like a ratified human wait. Delegation's worker-root
+preparation (``project_mod.managed_repository``) refreshes it the same way, on
+each observed advance and never while a step is blocked. A declared-wait marker whose
+freshness is the same stall threshold would be redundant while polls complete
+and would delay the reap of a genuinely blocked status read from one threshold
+to two, because the reaper restarts silence from the last explained verdict.
 
 An explained wait never grants cancellation immunity: explicit Stop, an
 execution deadline, and the operator bound
@@ -46,9 +63,11 @@ execution deadline, and the operator bound
 """
 
 from contextlib import contextmanager
+import time
 
 STORAGE_WAIT_KEY = '_storageWaits'
 CHILD_INVOCATION_WAIT_KEY = '_childInvocationWaits'
+DEVICE_WAIT_KEY = '_deviceWaits'
 
 
 @contextmanager
@@ -69,10 +88,43 @@ def _live_child(child):
             and child.get('status') in ('pending', 'running'))
 
 
-def explained_wait(task):
-    """Name the external owner of this task's silence, or '' when none does."""
+@contextmanager
+def device_wait(task, command):
+    """Publish one task's queued desktop command for the duration of its wait.
+
+    ``command`` is the bridge's own queued-command mapping, read under
+    ``command_queue_lock`` by :func:`_live_device_claim`, so a claim follows the
+    device's real presence instead of a second copy. Several commands of one task
+    share the wait mapping, keyed by command id; an empty mapping means no device
+    wait owns the silence.
+    """
+    waits = task.setdefault(DEVICE_WAIT_KEY, {})
+    waits[command['id']] = command
+    try:
+        yield
+    finally:
+        waits.pop(command['id'], None)
+
+
+def _live_device_claim(command, now):
+    """The bridge's own activity rule: claimed by a device still connected."""
+    if not isinstance(command, dict):
+        return False
+    from lib.desktop import bridge
+    with bridge.command_queue_lock:
+        queued = bridge.command_queue.get(command['id'])
+        return bool(queued is not None and bridge._command_active_locked(queued, now))
+
+
+def explained_wait(task, now=None):
+    """Name the external owner of this task's silence, or '' when none does.
+
+    ``now`` is the caller's wall clock (the liveness judge passes its own, so a
+    test's controlled clock and the verdict never disagree).
+    """
     if not isinstance(task, dict):
         return ''
+    now = time.time() if now is None else now
     if task.get(STORAGE_WAIT_KEY):
         return 'storage'
     # Deferred: the task manager imports this module at server boot, and the
@@ -84,6 +136,10 @@ def explained_wait(task):
     if isinstance(children, dict) and any(
             _live_child(child) for child in list(children.values())):
         return 'child-invocation'
+    devices = task.get(DEVICE_WAIT_KEY)
+    if isinstance(devices, dict) and any(
+            _live_device_claim(claim, now) for claim in list(devices.values())):
+        return 'device'
     from lib.fs_keepalive import filesystem_unresponsive
     if filesystem_unresponsive():
         return 'filesystem'

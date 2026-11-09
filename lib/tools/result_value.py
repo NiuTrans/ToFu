@@ -2,6 +2,7 @@
 
 sourceCoverage describes upstream completeness (unknown absent assertion).
 retentionCoverage describes retained received evidence, independently of upstream.
+Result text is well-formed Unicode by construction (well_formed_text).
 """
 from __future__ import annotations
 import json
@@ -18,10 +19,29 @@ INLINE_LIMIT = 1024 * 1024
 _ARTIFACT_TEXT_CHUNK_BYTES = 4 * 1024 * 1024
 logger = get_logger(__name__)
 
+
+def well_formed_text(text: str) -> str:
+    """Return ``text`` encodable as UTF-8, keeping every character it can.
+
+    Producers can hand over unpaired UTF-16 surrogates: PDF text extraction,
+    JSON ``\\udXXX`` escapes, JavaScript string slicing. No UTF-8 store,
+    provider request or browser can carry one. Each unpaired code unit becomes
+    U+FFFD, as ``String.prototype.toWellFormed`` does, and a pair split across
+    two code points is rejoined into its character. Clean text is returned as is.
+    """
+    if text.isascii():
+        return text
+    try:
+        text.encode('utf-16-le')
+    except UnicodeEncodeError:
+        return text.encode('utf-16-le', 'surrogatepass').decode('utf-16-le', 'replace')
+    return text
+
+
 class TrustedResultText(str):
     def __new__(cls, text, *, canonical=None, envelope=False, source_omitted=False,
                 projection_normalized=False):
-        obj = super().__new__(cls, text)
+        obj = super().__new__(cls, well_formed_text(text) if isinstance(text, str) else text)
         if source_omitted is True and isinstance(canonical, CapturedToolResult):
             canonical = replace(canonical, source_omitted=True)
         if projection_normalized is True and isinstance(canonical, CapturedToolResult):
@@ -43,6 +63,15 @@ class ResultPart:
     reference: str = ''
     mime_type: str = ''
     metadata: tuple = ()
+    def __post_init__(self):
+        # Every producer builds parts; repairing here keeps canonical evidence
+        # encodable for program inputs, artifacts and manifests alike.
+        if isinstance(self.text, str):
+            object.__setattr__(self, 'text', well_formed_text(self.text))
+        metadata = tuple((key, well_formed_text(value) if isinstance(value, str) else value)
+                         for key, value in self.metadata)
+        if metadata != self.metadata:
+            object.__setattr__(self, 'metadata', metadata)
     def manifest(self):
         out = {'kind': self.kind}
         if self.kind == 'artifact':

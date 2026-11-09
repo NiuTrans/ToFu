@@ -362,7 +362,7 @@ def _authenticated_get(
 
     route = desktop_egress.route_request(url, user_id=user_id)
     if route == "direct":
-        from lib.http_transport.client import http_get
+        from lib.oauth.http import http_get
 
         response = http_get(url, headers=headers, timeout=timeout)
     else:
@@ -698,7 +698,7 @@ def _authenticated_post(
 
     route = desktop_egress.route_request(url, user_id=user_id)
     if route == "direct":
-        from lib.http_transport.client import http_post
+        from lib.oauth.http import http_post
 
         return http_post(url, headers=headers, data=body, timeout=timeout)
     return desktop_egress.egress_http(

@@ -50,7 +50,7 @@ def test_unreadable_existing_file_is_not_overwritten_or_recorded_as_created(proj
     assert mods.get_modifications(str(project)) == []
 
 
-@pytest.mark.parametrize('action', ['append', 'diff', 'insert', 'diffs', 'inserts', 'edit'])
+@pytest.mark.parametrize('action', ['append', 'diff', 'diffs', 'edit'])
 def test_text_edits_refuse_lossy_decoding(project, action):
     original = b'\xffold\r\n'
     target = project / 'file.txt'
@@ -58,10 +58,8 @@ def test_text_edits_refuse_lossy_decoding(project, action):
     base = str(project)
     if action == 'append': result = _ops.tool_write_file(base, 'file.txt', 'new', append=True)
     elif action == 'diff': result = _ops.tool_apply_diff(base, 'file.txt', 'old', 'new')
-    elif action == 'insert': result = _ops.tool_insert_content(base, 'file.txt', 'old', 'new')
     elif action == 'diffs': result = _ops.tool_apply_diffs(base, [{'path':'file.txt', 'search':'old', 'replace':'new'}])
-    elif action == 'edit': result = _ops.tool_edit_file(base, [{'path':'file.txt', 'operation':'replace', 'anchor':'old', 'content':'new'}])
-    else: result = _ops.tool_insert_contents(base, [{'path':'file.txt', 'anchor':'old', 'content':'new'}])
+    else: result = _ops.tool_edit_file(base, [{'path':'file.txt', 'anchor':'old', 'content':'new'}])
     assert target.read_bytes() == original
     if isinstance(result, dict):
         assert result['ok'] is False and result['errorKind'] == 'read-failed'
@@ -70,7 +68,7 @@ def test_text_edits_refuse_lossy_decoding(project, action):
     assert mods.get_modifications(base) == []
 
 
-@pytest.mark.parametrize('action', ['append', 'diff', 'insert', 'diffs', 'inserts', 'edit'])
+@pytest.mark.parametrize('action', ['append', 'diff', 'diffs', 'edit'])
 @pytest.mark.parametrize('history_enabled', [False, True])
 def test_text_edit_undo_preserves_crlf(project, monkeypatch, action, history_enabled):
     if not history_enabled:
@@ -82,10 +80,8 @@ def test_text_edit_undo_preserves_crlf(project, monkeypatch, action, history_ena
     base = str(project)
     if action == 'append': result = _ops.tool_write_file(base, 'file.txt', 'new\r\n', append=True, task_id='task')
     elif action == 'diff': result = _ops.tool_apply_diff(base, 'file.txt', 'old', 'new', task_id='task')
-    elif action == 'insert': result = _ops.tool_insert_content(base, 'file.txt', 'old', 'new\r\n', task_id='task')
     elif action == 'diffs': result = _ops.tool_apply_diffs(base, [{'path':'file.txt', 'search':'old', 'replace':'new'}], task_id='task')
-    elif action == 'edit': result = _ops.tool_edit_file(base, [{'path':'file.txt', 'operation':'replace', 'anchor':'old', 'content':'new'}], task_id='task')
-    else: result = _ops.tool_insert_contents(base, [{'path':'file.txt', 'anchor':'old', 'content':'new\r\n'}], task_id='task')
+    else: result = _ops.tool_edit_file(base, [{'path':'file.txt', 'anchor':'old', 'content':'new'}], task_id='task')
     if isinstance(result, dict): assert result['ok'], result
     else: assert 'FAIL' not in result, result
     records = mods.get_modifications(base)
@@ -115,7 +111,7 @@ def test_reverse_patch_is_exact_without_file_history(project, monkeypatch, origi
     assert target.read_bytes() == original.encode('utf-8')
 
 
-@pytest.mark.parametrize('action', ['diff', 'insert'])
+@pytest.mark.parametrize('action', ['diff', 'edit'])
 def test_unavailable_inverse_evidence_refuses_mutation(project, monkeypatch, action):
     from lib.project_mod.write_intents import IntentError, IntentStore
     def refuse_evidence(*args, **kwargs):
@@ -127,8 +123,11 @@ def test_unavailable_inverse_evidence_refuses_mutation(project, monkeypatch, act
     if action == 'diff':
         result = _ops.tool_apply_diff(str(project), 'file.txt', 'old', 'newnewnew')
     else:
-        result = _ops.tool_insert_content(str(project), 'file.txt', 'old', 'added')
-    assert result['ok'] is False
-    assert 'injected undo evidence persistence failure' in result['error']
+        result = _ops.tool_edit_file(str(project), [
+            {'path': 'file.txt', 'anchor': 'old', 'content': 'old added'}])
+    if isinstance(result, dict):
+        assert result['ok'] is False
+        result = result['error']
+    assert 'injected undo evidence persistence failure' in result
     assert target.read_bytes() == original
     assert mods.get_modifications(str(project)) == []

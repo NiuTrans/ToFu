@@ -357,6 +357,69 @@ def test_native_text_and_terminal_share_the_same_policy(monkeypatch):
                 if segment.get('type') == 'system_note')['noteKind'] == 'deliberate-silence'
 
 
+def test_native_human_only_control_text_is_not_an_empty_success(monkeypatch):
+    import json
+    from lib.agent_core.native_process import TerminalRequest
+    from lib.identity import PrincipalContext
+    from lib.tasks_pkg.native_terminal import project_native_terminal
+
+    for content in ('[SILENT]', '[SILENT][END_TURN: done]'):
+        _eligible(monkeypatch)
+        _turns(monkeypatch, initiator='human')
+        task = _task()
+        task.update(content='', thinking='', _silentTextCandidate=content)
+        event = {'type': 'done', 'status': 'done', 'result': {
+            'messages': [HUMAN, {'role': 'assistant', 'content': content}], 'usage': []}}
+        project_native_terminal(task, TerminalRequest(
+            PrincipalContext.user(subject_id='test', owner_user_id=7),
+            'router-task', 'commit', 1, json.dumps(event).encode(),
+            b'{"invariants_satisfied":true}'))
+        assert task['content'] == '' and task['messages'][-1]['content'] == ''
+        assert '_silentTurn' not in task and '_silentTextCandidate' not in task
+        assert task['status'] == 'done' and task['finishReason'] == 'abnormal_stop'
+        assert task['error']['kind'] == 'abnormal_stop'
+        task['status'] = 'running'
+        task.pop('error', None)
+        task['content'] = content
+        with patch('lib.tasks_pkg.stream_handler._budget._interruptible_sleep', lambda *_: None):
+            decision = analyse_stream_result(
+                {'role': 'assistant', 'content': content}, 'stop', task,
+                'router-task', 'model', 0, 0, [HUMAN], {'_empty_stop': True})
+        assert decision['action'] == 'continue' and task['content'] == ''
+        assert task['messages'][-1]['content'] == ''
+
+
+def test_tool_round_marker_is_private_replay_not_public_or_channel_text(monkeypatch):
+    from lib.tasks_pkg.tool_dispatch import _parse
+    _eligible(monkeypatch)
+    _turns(monkeypatch)
+    task = _task()
+    task.update(content='', toolRounds=[], _tool_schema=[])
+    assistant = {'role': 'assistant', 'content': '[SILENT]', 'tool_calls': [{
+        'id': 'call-read', 'type': 'function', 'function': {
+            'name': 'read_files', 'arguments': '{"path":"AGENTS.md"}'}}]}
+    parsed, _ = _parse.parse_tool_calls(assistant, task, 0, 0, False)
+    row = parsed[0][5]
+    row.update(toolContent='AGENTS.md guidance', status='done')
+    assert row.get('assistantContent', '') == ''
+    assert row['assistantModelContent'] == '[SILENT]'
+    from lib.tasks_pkg.segments import assemble_segments, segments_to_json, rehydrate_segments
+    from lib.tasks_pkg.conv_message_builder._transform import _build_assistant_messages
+    segments = assemble_segments(task)
+    assert all(segment.get('text') != '[SILENT]' for segment in segments
+               if segment.get('type') == 'text')
+    public = {'role': 'assistant', 'content': '', 'toolRounds': task['toolRounds'],
+              'segments': segments_to_json(segments)}
+    replay = _build_assistant_messages(public)
+    assert replay[0]['content'] == '[SILENT]'
+    assert replay[0]['tool_calls'][0]['id'] == 'call-read'
+    thin = segments_to_json(segments)
+    assert _build_assistant_messages({**public, 'segments': thin})[0]['content'] == '[SILENT]'
+    restored = rehydrate_segments(thin, task['toolRounds'])
+    tool = next(segment for segment in restored if segment.get('type') == 'tool_use')
+    assert tool['_round'] is task['toolRounds'][0]
+
+
 def test_native_denied_or_partial_control_text_remains_an_ordinary_candidate(monkeypatch):
     import json
     from lib.agent_core.native_process import TerminalRequest
@@ -374,10 +437,11 @@ def test_native_denied_or_partial_control_text_remains_an_ordinary_candidate(mon
             PrincipalContext.user(subject_id='test', owner_user_id=7),
             'router-task', 'commit', 1, json.dumps(event).encode(),
             b'{"invariants_satisfied":true}'))
-        assert task['content'] == expected
+        public = expected
+        assert task['content'] == public
         assert '_silentTurn' not in task
         assert '_silentTextCandidate' not in task
-        assert strip_end_turn_marker(task['content']) == expected
+        assert strip_end_turn_marker(task['content']) == public
 
 
 def test_registered_silence_note_is_required_and_structural_flush_releases_prose(monkeypatch):

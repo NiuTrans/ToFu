@@ -41,7 +41,7 @@ import time
 from quart import Blueprint
 
 from lib.api_response import api_bad_request, api_internal_error, api_ok, safe_route
-from lib.log import get_logger, log_context
+from lib.log import get_logger, log_context, task_log_tag
 from lib.openapi import api_meta
 from lib.request_parser import (
     BadRequest, optional_bool, optional_int, optional_list, optional_str,
@@ -448,7 +448,7 @@ def search_run_async():
     })
     task_id = task['id']
     logger.info('[api_v1.search] async task=%s query=%r',
-                task_id[:8], params['query'][:100])
+                task_log_tag(task_id), params['query'][:100])
 
     def _worker():
         _search_runtime.append_event(task_id, {
@@ -458,7 +458,7 @@ def search_run_async():
         try:
             result = _run_search(owner_user_id=owner_user_id, **params)
         except Exception as e:
-            logger.exception('[api_v1.search] async task=%s failed', task_id[:8])
+            logger.exception('[api_v1.search] async task=%s failed', task_log_tag(task_id))
             _search_runtime.finish(task_id, error=e,
                                    error_context='api_v1.search:async')
             return
@@ -588,25 +588,27 @@ def swarm_status(task_id):
 @require_scope('agents:swarm')
 @api_meta(summary='Abort a swarm', tags=['agents'], scope='agents:swarm')
 def swarm_abort(task_id):
+    # The session lives in the process that runs its conversation.
+    from quart import current_app
+
+    from lib.api_response import api_not_found, api_service_unavailable
+    from lib.tasks_pkg.command_control_runtime import execute
+    from lib.tasks_pkg.command_control_transport import CommandControlUnavailable
     try:
-        from lib.swarm.integration import abort_swarm
-    except ImportError as e:
-        return api_internal_error(e, context='Swarm unavailable',
-                                  source='api_v1.agents.swarm_abort')
-    try:
-        result = abort_swarm(
-            task_id,
-            user_id=int(request_user_id()),
-        )
+        result = execute(current_app, 'swarm_abort', task_id, user_id=int(request_user_id()))
+    except CommandControlUnavailable:
+        return api_service_unavailable('The execution owner did not confirm the swarm abort.')
     except Exception as e:
         logger.warning('[api_v1.swarm] abort failed task=%s: %s',
                        task_id, e, exc_info=True)
         return api_internal_error(e, context='Swarm abort failed',
                                   source='api_v1.agents.swarm_abort',
                                   log_traceback=False)
-    if not result.get('success'):
-        from lib.api_response import api_not_found
+    if result is None:
         return api_not_found('Swarm not found')
+    if not result['aborted']:
+        return api_internal_error(RuntimeError('Swarm abort failed'), context='Swarm abort failed',
+                                  source='api_v1.agents.swarm_abort', log_traceback=False)
     return api_ok({'aborted': task_id})
 
 

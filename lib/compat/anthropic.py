@@ -28,7 +28,7 @@ from lib.compat._common import (
     short_id,
 )
 from lib.error_envelope import BadRequest
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.turn_verdict import terminal_finish_reason
 
 logger = get_logger(__name__)
@@ -376,7 +376,7 @@ async def stream_anthropic_chunks(task, model: str
                 yield ': heartbeat\n\n'
     except (GeneratorExit, asyncio.CancelledError):
         logger.info('[compat:anthropic] stream client disconnected task=%s',
-                    task_id[:8])
+                    task_log_tag(task_id))
         raise
     finally:
         unregister_waiter(task_id)

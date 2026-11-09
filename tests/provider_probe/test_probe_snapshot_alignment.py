@@ -37,7 +37,7 @@ def _cell(key_idx, credential_id, wire, status='ok'):
 
 def _task(credential_ids, cells):
     return {
-        'provider_id': 'u1_sankuai',
+        'provider_id': 'u1_example_corp',
         'credential_ids': credential_ids,
         'status': 'done',
         'started_at': 1,

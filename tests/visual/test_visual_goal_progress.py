@@ -59,7 +59,7 @@ def test_goal_root_and_current_worker_progress(frontend_visual_page, tmp_path, l
       window.t=(key,values)=>(locale[key]||key).replace(/\{(\w+)\}/g,(_,k)=>values?.[k]??'');
       window.escapeHtml=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
       const row=document.createElement('aside');row.id='sidebar-status';document.body.append(row);
-      window.renderSidebar=()=>{const html=_convStatusHtml(_convStatusFlags({id:'goal'}));row.innerHTML=html.dotHtml+html.statusTag;};
+      window.renderSidebar=()=>{const html=_convStatusHtml(_convStatusFlags({id:'goal',_conversationSyncHealth:{state:'live'}}));row.innerHTML=html.dotHtml+html.statusTag;};
       renderSidebar();
     }''', locale)
     assert frame.locator('#sidebar-status .conv-streaming-dot').count() == 1

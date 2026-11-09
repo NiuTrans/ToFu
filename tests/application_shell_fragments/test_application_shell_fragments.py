@@ -9,6 +9,7 @@ import pytest
 from quart import Quart
 
 import lib.application_shell_fragments as fragments
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -16,6 +17,7 @@ pytestmark = pytest.mark.unit
 
 def _served_index_html() -> str:
     """Return the shell through the production HTTP composition path."""
+    require_shipped_graph()
     import routes.common as common
 
     async def _request() -> str:
@@ -80,6 +82,7 @@ def test_fragment_parity_drift_fails_closed(tmp_path, monkeypatch):
 
 
 def test_index_cache_owns_fragment_signature_and_injection(monkeypatch):
+    require_shipped_graph()
     import routes.common as common
 
     for key in common._bundled_index_cache:

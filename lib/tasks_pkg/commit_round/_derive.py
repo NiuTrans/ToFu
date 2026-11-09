@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.project_mod.receipts import file_change_identity
 
 logger = get_logger(__name__)
@@ -244,12 +244,12 @@ def note_live_file_change(task_id: str | None, entry: dict) -> bool:
             log = logger.debug if expected_late else logger.warning
             log('[Derive] live file-change stamp matched no running task '
                 '(task=%s registered=%s status=%s aborted=%s)',
-                str(task_id)[:8], probe is not None, status, aborted)
+                task_log_tag(task_id), probe is not None, status, aborted)
         return bool(stamped)
     except Exception as e:  # presentation only — the journal stays authoritative
         logger.warning('[Derive] live file-change stamp skipped '
                        '(task=%s error_type=%s)',
-                       str(task_id)[:8], type(e).__name__[:64])
+                       task_log_tag(task_id), type(e).__name__[:64])
         return False
 
 
@@ -287,5 +287,5 @@ def _note_external_file_changes(task_id, owner_user_id, entries, binding):
             and task.get('status') in ('pending', 'running') and not task.get('aborted')
             and not (task.get('abort_event') and task['abort_event'].is_set())), updater=apply))
     except Exception:
-        logger.warning('[Derive] remote file-change projection failed for task %s', str(task_id)[:8])
+        logger.warning('[Derive] remote file-change projection failed for task %s', task_log_tag(task_id))
         return False

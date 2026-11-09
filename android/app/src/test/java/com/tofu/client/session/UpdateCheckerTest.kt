@@ -44,6 +44,25 @@ class UpdateCheckerTest {
         assertNull(UpdateChecker("0.1.17") { null }.check(emptyList()))
     }
 
+    @Test fun all_failed_probes_return_unknown_not_a_successful_up_to_date_status() = runTest {
+        assertNull(UpdateChecker("0.1.18") { null }.check(listOf(profile("https://offline.test/"))))
+    }
+
+    @Test fun a_partial_failure_cannot_claim_the_whole_server_set_is_up_to_date() = runTest {
+        val checker = UpdateChecker("0.1.18") { url ->
+            if (url.contains("offline")) null else AdvertisedClient("0.1.18", "u")
+        }
+        assertNull(checker.check(listOf(profile("https://offline.test/"), profile("https://available.test/"))))
+    }
+
+    @Test fun cancellation_is_not_downgraded_to_an_unknown_probe() = runTest {
+        try {
+            UpdateChecker("0.1.18") { throw kotlinx.coroutines.CancellationException("cancelled") }
+                .check(listOf(profile("https://a.test/")))
+            org.junit.Assert.fail("update cancellation must propagate")
+        } catch (_: kotlinx.coroutines.CancellationException) { }
+    }
+
     @Test
     fun a_throwing_probe_is_ignored() = runTest {
         val checker = UpdateChecker("0.1.17") { url ->

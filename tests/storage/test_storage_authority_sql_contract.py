@@ -1418,6 +1418,8 @@ def test_turn_lifecycle_sidecar_recovery_settles_pending_attempt(storage, monkey
     turn = get_turn('turn-recovery-sidecar', created['turn']['turnId'], user_id=1)
     assert turn['status'] == 'interrupted'
     assert turn['settlement']['cause'] == 'server_restart'
+    # The attempt died with its server; no person stopped it.
+    assert turn['settlement']['evidence'] == 'system_recovery'
     operations = {item['operation']
                   for item in turn['settlement']['resumeOptions']}
     assert 'continue' not in operations
@@ -3480,6 +3482,118 @@ def test_conversation_activity_dates_roundtrip_is_distinct_and_owner_scoped(
     })
 
     assert result == {'candidate_count': 1, 'counts': [1, 1]}
+
+
+def test_conversation_turn_usage_projects_only_priced_turns_in_window(storage):
+    """Only usage-bearing main-lane Turns in the window cross the RPC."""
+    client = storage.client
+    _import_conversation(
+        client,
+        'usage-owned',
+        user_id=1,
+        created_at=100,
+        updated_at=900,
+        settings={'model': 'conversation-model', 'large': 'x' * 20_000},
+        messages=[
+            {'role': 'user', 'timestamp': 150, 'content': 'q' * 50_000},
+            {'role': 'assistant', 'timestamp': 160, 'content': 'a' * 50_000,
+             'usage': {'prompt_tokens': 7, 'completion_tokens': 3},
+             'apiRounds': [{'round': 1, 'usage': {'prompt_tokens': 7}}],
+             'model': 'model-x', 'providerId': 'provider-y'},
+            {'role': 'assistant', 'timestamp': 170, 'usage': {}},
+            {'role': 'assistant', 'timestamp': 500,
+             'usage': {'prompt_tokens': 9}, 'preset': 'opus',
+             'provider_id': 'snake'},
+            {'role': 'assistant', 'timestamp': 260,
+             'usage': {'prompt_tokens': 11}, 'provider_id': 'snake'},
+        ],
+    )
+    _import_conversation(
+        client, 'usage-foreign', user_id=2, created_at=100, updated_at=900,
+        messages=[{'role': 'assistant', 'timestamp': 160,
+                   'usage': {'prompt_tokens': 1}}],
+    )
+
+    result = client.query('conversation.turn_usage', {
+        'user_id': 1, 'conv_id': 'usage-owned',
+        'timestamp_gte': 150, 'timestamp_lt': 300,
+        'title_fallback_characters': 30,
+    })
+
+    # The Turn projection keeps its stored attribution fields (it stores a
+    # snake-case provider as providerId); an empty title is stored as the
+    # default title, so no fallback is read.
+    assert result == {
+        'metadata': {'id': 'usage-owned', 'title': 'New Chat',
+                     'created_at': 100, 'updated_at': 900,
+                     'settings': {'model': 'conversation-model'}},
+        'message_count': 5,
+        'title_fallback': '',
+        'turns': [
+            {'index': 1, 'timestamp': 160,
+             'usage': {'prompt_tokens': 7, 'completion_tokens': 3},
+             'model': 'model-x', 'providerId': 'provider-y'},
+            {'index': 4, 'timestamp': 260,
+             'usage': {'prompt_tokens': 11}, 'providerId': 'snake'},
+        ],
+    }
+    assert client.query('conversation.turn_usage', {
+        'user_id': 1, 'conv_id': 'usage-foreign',
+        'timestamp_gte': 0, 'timestamp_lt': 1000,
+    }) is None
+    for invalid in ({'timestamp_gte': 5, 'timestamp_lt': 5},
+                    {'timestamp_gte': True, 'timestamp_lt': 5},
+                    {'timestamp_gte': 0, 'timestamp_lt': 5,
+                     'title_fallback_characters': 257}):
+        with pytest.raises(StorageError) as error:
+            client.query('conversation.turn_usage', {
+                'user_id': 1, 'conv_id': 'usage-owned', **invalid})
+        assert error.value.code == 'database_protocol_error'
+
+
+def test_conversation_turn_usage_keeps_unplaced_frozen_archive_rows():
+    """An archive row is dropped only when its integer time is outside."""
+    from lib.storage_authority_sql.operations_pkg._conversation_usage import (
+        _conversation_turn_usage,
+    )
+
+    archived = [
+        {'role': 'user', 'content': 'imported question', 'timestamp': 0},
+        {'role': 'assistant', 'content': 'untimed', 'usage': {'p': 1}},
+        {'role': 'assistant', 'timestamp': 0, 'usage': {'p': 2}},
+        {'role': 'assistant', 'timestamp': 9_000, 'usage': {'p': 3}},
+        {'role': 'assistant', 'timestamp': 150, 'usage': {'p': 4},
+         'model': 'm'},
+        {'role': 'assistant', 'timestamp': '160', 'usage': {'p': 5}},
+    ]
+
+    class _FakeSession:
+        backend = 'sqlite'
+
+        def fetch_one(self, sql, params=()):
+            if 'messages_json' in sql:
+                return {'messages_json': json.dumps(archived)}
+            return {'id': 'legacy', 'title': '', 'created_at_ms': 100,
+                    'updated_at_ms': 200, 'settings_json': '{"preset": "q"}'}
+
+        def fetch_all(self, sql, params=()):
+            assert 'FROM storage_conversation_turns' in sql
+            return []
+
+    result = _conversation_turn_usage(_FakeSession(), {
+        'user_id': 7, 'conv_id': 'legacy', 'timestamp_gte': 100,
+        'timestamp_lt': 1_000, 'title_fallback_characters': 8,
+    })
+
+    assert result['message_count'] == 6
+    assert result['title_fallback'] == 'imported'
+    assert result['metadata']['settings'] == {'preset': 'q'}
+    assert result['turns'] == [
+        {'index': 1, 'usage': {'p': 1}},
+        {'index': 2, 'timestamp': 0, 'usage': {'p': 2}},
+        {'index': 4, 'timestamp': 150, 'usage': {'p': 4}, 'model': 'm'},
+        {'index': 5, 'timestamp': '160', 'usage': {'p': 5}},
+    ]
 
 
 def test_conversation_count_op_roundtrip(storage):

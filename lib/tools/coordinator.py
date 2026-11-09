@@ -1,5 +1,6 @@
 """Model-visible dispatch-only Coordinator tools; handlers reuse existing owners."""
 
+from lib.project_dispatch.contract import schema as _dispatch_schema
 from lib.router.contract import schema as _router_schema
 
 
@@ -17,9 +18,17 @@ COORDINATOR_TOOLS = [
           'running/queued state, errors, settlement and available resume operations. Passive; never wakes it. '
           'Use when the owner delegates management of a concrete Session, then get_conversation for content. '
           'Project Coordinators inspect their project; the Global Router can inspect any owned conversation. '
-          'Pass turn_id to focus one Turn. Preserve its currentAttemptId and projectionRevision for control_conversation.',
+          'Pass turn_id to read exactly one Turn of a conversation of any size. Without it you get the newest '
+          'Turns of one lane (default main) that fit one readable result; pass window.next_before_ordinal as '
+          'before_ordinal (with the same lane_id) for older Turns. '
+          'Preserve the Turn currentAttemptId and projectionRevision for control_conversation.',
           {'conversation_id': {'type': 'string', 'minLength': 1},
-           'turn_id': {'type': 'string', 'minLength': 1}}, ['conversation_id']),
+           'turn_id': {'type': 'string', 'minLength': 1},
+           'lane_id': {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                       'description': 'Turn laneId to list; default main.'},
+           'before_ordinal': {'type': 'integer', 'minimum': 0,
+                              'description': 'Exact window.next_before_ordinal from the previous result.'}},
+          ['conversation_id']),
     _tool('control_conversation',
           'Operate an existing Session within the current authorized request using the same commands as the owner: '
           'continue (Continue generating), checkpoint_resume, regenerate (retry from the start), or stop. '
@@ -28,7 +37,14 @@ COORDINATOR_TOOLS = [
           'Resumes retain the target model, config, context and existing grants. Stop targets only that exact '
           'current Attempt and withdraws its conversation dispatch as the owner Stop does. Resuming an earlier '
           'Turn can discard later same-lane Turns; inspect the latest state before choosing the Turn. Stop '
-          'does not need expected_revision. Never send a synthetic human message or approve '
+          'does not need expected_revision. '
+          'follow_up gives an ended Worker session you dispatched its next instruction (instruction): pin its '
+          'latest settled Turn, Attempt and revision; the instruction becomes that conversation\'s next Turn and '
+          'nothing is regenerated. An unreviewed, undelivered result continues under the same assignment, grant '
+          'and checkout; a reviewed or delivered one continues as a new assignment in the same conversation '
+          '(the result names assignment_id). Prefer follow_up to a new Worker for the same goal, and to '
+          'review decision=rework when the same Worker should fix its own result; then await_project_workers. '
+          'Never send a synthetic human message or approve '
           'a human question. Project Coordinators control their project; the Global Router can control any owned '
           'conversation. An automatic continuation may control only its original request dispatched Workers. '
           'Global Router only: when your current request has no owner message of its own (a standing instruction '
@@ -39,9 +55,11 @@ COORDINATOR_TOOLS = [
           {'conversation_id': {'type': 'string', 'minLength': 1},
            'turn_id': {'type': 'string', 'minLength': 1},
            'attempt_id': {'type': 'string', 'minLength': 1},
-           'action': {'type': 'string', 'enum': ['continue', 'checkpoint_resume', 'regenerate', 'stop']},
+           'action': {'type': 'string', 'enum': ['continue', 'checkpoint_resume', 'regenerate', 'stop', 'follow_up']},
            'expected_revision': {'type': 'integer', 'minimum': 1},
            'resume_anchor': {'type': 'object', 'description': 'Exact anchor from settlement.resumeOptions.'},
+           'instruction': {**_dispatch_schema('request')['properties']['brief'],
+                           'description': 'follow_up only: the Worker\'s next instruction.'},
            'owner_delegation': _router_schema('ownerDelegationAuthority'),
            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
           ['conversation_id', 'turn_id', 'attempt_id', 'action', 'idempotency_key']),
@@ -100,7 +118,11 @@ COORDINATOR_TOOLS.append(_tool('update_task_progress',
     'progress without tracking sessions, so write it for them: one entry per task they care about, in their words, '
     'most relevant first. Never list Workers, conversations, assignment IDs or internal steps, and never put '
     'questions or requests for the human on the board (ask with ask_human). Send the complete board every time; '
-    'tasks you omit disappear. Update it whenever a task starts, advances meaningfully, finishes or is dropped.',
+    'tasks you omit disappear. Update it whenever a task starts, advances meaningfully, finishes or is dropped. '
+    'A task carrying due is a promise to the human: set due whenever you tell them you will do or report something '
+    'later (for example "I will report when X finishes" or "I will resume at 23:20"). You are woken once at that '
+    'time if it is still open, so finish it or report then; re-date it with a reason, or cancel it and say why. An '
+    'open promise cannot be omitted or lose its due. Do not date ordinary tasks.',
     {'summary': {**_progress['properties']['summary'],
                  'description': 'One sentence for the human on where things stand overall.'},
      'tasks': {**_progress['properties']['tasks'],
@@ -112,19 +134,22 @@ COORDINATOR_TOOLS.append(_tool('update_task_progress',
                               'description': 'pending: not started; in_progress; completed; cancelled: dropped.'},
                    'progress': {**_progress_task['properties']['progress'],
                                 'description': 'One line: what is done and what happens next.'},
+                   'due': {**_progress_task['properties']['due'],
+                           'description': 'Only for a promise: ISO 8601 date-time with offset, in the future. '
+                           'Example: 2026-11-09T23:20:00+08:00.'},
                }}}},
     _progress['required']))
 
-from lib.project_dispatch.contract import schema as _dispatch_schema
 for _name, _definition, _description in (
     ('get_project_workers', 'getProjectWorkers',
      'List a page of registered Worker execution assignments for this original request, including work from earlier Coordinator turns. '
      'This is not a roster of every created conversation: use list_conversations with scope=project to find empty conversation shells. '
-     'Use scope=project on new human input to find earlier work in this Coordinator binding (32-row history pages). Use next_cursor as after_id; an empty filtered page can still have a cursor. Source Turn and current_request distinguish earlier objectives. Passive facts only; get_project_assignment reads full evidence.'),
+     'Use scope=project on new human input to find earlier work in this Coordinator binding (history pages of up to 32 rows). A page keeps only the rows that fit one readable result; use next_cursor as after_id to continue exactly after the last row shown. An empty filtered page can still have a cursor. Source Turn and current_request distinguish earlier objectives. Passive facts only; get_project_assignment reads full evidence.'),
     ('cancel_project_work', 'cancelProjectWork',
      'Cancel an owned Worker in this Coordinator binding when handling human steering; automatic continuations may cancel only their original request Workers. Withdraws its grant and stops every live attempt in its Worker conversation, including turns that ran without the assignment binding. '
      'Late background-command results stay attached to the cancelled attempt as assignment evidence and never start another automatic Worker turn; running commands are not killed. '
-     'Preserves results and receipts. Cancel failed or superseded work before marking the request complete.'),
+     'Preserves results and receipts. Cancel failed or superseded work before marking the request complete. '
+     'Returns a compact receipt: assignment_id, decision, grant_revision, revoked, execution_status, delivery and next_step.'),
     ('finish_project_request', 'finishProjectRequest',
      'Stop automatic continuation of this original request after sending a report_to_user. '
      'Supply its exact report_turn_id. outcome=complete requires accepted current results and confirmed delivery '
@@ -145,7 +170,9 @@ for _name, _definition, _description in (
      'never human acceptance. Publication is asynchronous: await_project_workers with wait_for=delivery '
      'and confirm canonical_delivery before reporting completion. A review is immutable; repairs use a new assignment. Exception: if delivery reports '
      'project_publication_result_changed, the Worker result gained a later revision after your accept; re-read it and, '
-     'if still correct, accept again with the current result_revision and the same checkpoint_sha.'),
+     'if still correct, accept again with the current result_revision and the same checkpoint_sha. '
+     'Returns a compact receipt (assignment_id, decision, grant_revision, result_revision, checkpoint_sha, delivery, '
+     'canonical_delivery, next_step), not the brief or transcript.'),
     ('delegate_project_work', 'delegateRequest',
      'Create and start an independent ordinary Worker conversation for part of the current human request. '
      'For verified prerequisites, provide dependencies with exact assignment/grant/result revisions and file checkpoint SHA. '
@@ -193,8 +220,9 @@ for _name, _definition, _description in (
      'message sent while you were replying (by the steer_id in its label); that exact text is forwarded as '
      'their request. With instruction_id, the active standing instruction\'s frozen owner text is forwarded and the '
      'triggering event (note, event_id) travels as nonhuman evidence. A project without a Project Router gets one. '
-     'A busy Project Router receives it at its next step; an idle one starts. The note is delivered separately as '
-     'nonhuman context, never inside the owner\'s text. Retrying the same arguments never forwards twice. This '
+     'A busy Project Router receives it at its next step; an idle one starts. The note and trigger travel inside '
+     'the same request as labelled nonhuman context; the owner\'s exact words stay the authority. Retrying the '
+     'same arguments never forwards twice. This '
      'does not execute work: follow results through relayed reports and get_router_projects.'),
     ('get_router_projects',
      'getRouterProjects',
@@ -219,11 +247,12 @@ for _name, _definition, _description in (
      'the Settings restart path, detached from your turn: the frontend is built first and the old server stops '
      'only if that succeeds. It refuses while a protected step (a git_land landing or an export) runs, and while '
      'other conversations run unless the owner asked to restart anyway (interrupt_running_conversations=true; '
-     'they resume with Continue). Without the grant it refuses and nothing is pending: tell the owner to turn on '
-     '"Act for me" in your header or to restart in Settings. The grant lets you act for the owner, never speak '
-     'for them: it answers no question and approves no prompt meant for the owner. Every call is in the owner\'s '
-     'audit log; a retry with the same idempotency_key never restarts twice, and your own turn may be '
-     'interrupted by the restart and resume afterwards.'),
+     'they resume from their checkpoint by themselves afterwards). Without the grant it refuses and nothing is '
+     'pending: tell the owner to turn on "Act for me" in your header or to restart in Settings. The grant lets you '
+     'act for the owner, never speak for them: it answers no question and approves no prompt meant for the '
+     'owner. Every call is in the owner\'s audit log; a retry with the same idempotency_key never restarts '
+     'twice. When the restart ends, completed or not, you receive one nonhuman restart-complete notice as a new '
+     'turn; report the outcome to the owner from it.'),
 ):
     _schema = _router_arguments(_definition)
     ROUTER_TOOL_SCHEMAS.append(_tool(_name, _description, _schema['properties'], _schema['required']))

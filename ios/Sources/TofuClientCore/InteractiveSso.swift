@@ -20,7 +20,7 @@ public enum InteractiveSso {
     public static func isCompletionCandidate(profile: Profile, finishedUrl: String, cookieHeader: String?) -> Bool {
         guard profile.authType == .interactiveSso, let header = cookieHeader,
               !header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let own = ServerUrl.parse(profile.baseUrl), let landed = ServerUrl.parse(finishedUrl),
+              let own = ServerUrl.parse(profile.baseUrl), let landed = ServerUrl.parseNavigation(finishedUrl),
               own.origin == landed.origin else { return false }
         let base = own.components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let path = landed.components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tests/search/test_search_settings.py — lib/search/search_settings.py + update_search_settings tool.
 
-Pins the contract of the one saved search behaviour, the fetch blocklist:
+Pins the contract of the one saved search behaviour, the operator URL blocklist:
 
   * block_domain/unblock_domain edit skip_domains with the SAME normaliser
     the optimizer's block_search_domain action uses, then persist, hot-reload
@@ -107,24 +107,35 @@ class TestBlocklistWrites:
         assert res['ok'] is False and 'block_domain' in res['errors']
         assert not cfg_file['path'].exists()
 
-    def test_unblock_removes(self, cfg_file, monkeypatch):
-        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'keep.com', 'drop.com'},
-                            raising=False)
-        ss.apply_updates({'block_domain': 'drop.com'})
+    def test_unblock_removes(self, cfg_file):
+        cfg_file['path'].write_text(json.dumps({'search': {
+            'skip_domains': ['drop.com', 'keep.com'], 'skip_domains_schema': 2}}))
         res = ss.apply_updates({'unblock_domain': 'www.drop.com'})
         assert res['applied']['unblock_domain'] == ['drop.com']
-        saved = _saved(cfg_file['path'])['search']['skip_domains']
-        assert 'drop.com' not in saved and 'keep.com' in saved
+        assert _saved(cfg_file['path'])['search']['skip_domains'] == ['keep.com']
 
-    def test_skip_domains_seed_never_shrinks_effective_set(self, cfg_file,
-                                                           monkeypatch):
-        """No saved list: seed from lib.SKIP_DOMAINS so blocking one host can
-        never silently drop the built-in blocklist."""
-        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'builtin1.com', 'builtin2.com'},
-                            raising=False)
+    def test_missing_list_holds_no_bans_and_nothing_is_seeded(self, cfg_file,
+                                                              monkeypatch):
+        """No saved list means no operator bans: blocking one host stores just
+        that host. Seeding the in-memory set into the file is how built-in
+        fetch skips once became bans on every surface."""
+        monkeypatch.setattr(_lib, 'SKIP_DOMAINS', {'stale.example'}, raising=False)
         ss.apply_updates({'block_domain': 'new.com'})
-        saved = set(_saved(cfg_file['path'])['search']['skip_domains'])
-        assert saved == {'builtin1.com', 'builtin2.com', 'new.com'}
+        saved = _saved(cfg_file['path'])['search']
+        assert saved['skip_domains'] == ['new.com']
+        assert saved['skip_domains_schema'] == 2
+
+    def test_first_write_drops_hosts_seeded_before_the_split(self, cfg_file):
+        """A schema-1 list keeps its operator entries but loses the seeded
+        defaults; a later deliberate ban of one of them is honoured."""
+        cfg_file['path'].write_text(json.dumps({'search': {'skip_domains': [
+            'tiktok.com', 'x.com', 'youtube.com', 'spam.example']}}))
+        ss.apply_updates({'block_domain': 'new.com'})
+        assert _saved(cfg_file['path'])['search']['skip_domains'] == [
+            'new.com', 'spam.example']
+        ss.apply_updates({'block_domain': 'x.com'})
+        assert _saved(cfg_file['path'])['search']['skip_domains'] == [
+            'new.com', 'spam.example', 'x.com']
 
     def test_merge_does_not_clobber_other_sections(self, cfg_file):
         cfg_file['path'].write_text(json.dumps({

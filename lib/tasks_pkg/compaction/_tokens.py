@@ -896,7 +896,7 @@ def _should_force_compact(
     """
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
-    log_id = conv_id[:8] if conv_id else '?'
+    log_id = conv_id if conv_id else '?'
 
     with _cooldown_lock:
         last = _summary_cooldowns.get(conv_id, 0)

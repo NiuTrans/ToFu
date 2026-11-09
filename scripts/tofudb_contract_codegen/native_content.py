@@ -200,6 +200,7 @@ def render_content(tables) -> list[str]:
         f'pub const RAW_ARCHIVE_CONVERSATION_INDEX_NAMESPACE: &str = "{raw_archives["conversationIndexNamespace"]}";',
         f'pub const RAW_ARCHIVE_CONVERSATION_STATS_NAMESPACE: &str = "{raw_archives["conversationStatsNamespace"]}";',
         f'pub const RAW_ARCHIVE_OWNER_AGE_INDEX_NAMESPACE: &str = "{raw_archives["ownerAgeIndexNamespace"]}";',
+        f'pub const RAW_ARCHIVE_OWNER_BODY_AGE_INDEX_NAMESPACE: &str = "{raw_archives["ownerBodyAgeIndexNamespace"]}";',
         f'pub const RAW_ARCHIVE_OWNER_AGE_BACKFILL_NAMESPACE: &str = "{raw_archives["ownerAgeBackfillNamespace"]}";',
         "pub const MAX_RAW_ARCHIVE_STORED_BYTES: usize = "
         f"{raw_archives['maximumStoredBytes']};",

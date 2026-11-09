@@ -91,7 +91,7 @@ from lib.agent_core.execution_session import (
 )
 from lib.ids import short_id
 from lib.identity import PrincipalContext, require_user_id
-from lib.log import get_logger, req_id, set_log_context, set_req_id
+from lib.log import get_logger, req_id, set_log_context, set_req_id, task_log_tag
 from lib.task_replay.task_replay import (
     TASK_REPLAY_EVENT_SEQUENCE_FIELD,
     TASK_REPLAY_EVENT_TYPE_FIELD,
@@ -181,11 +181,16 @@ from lib.agent_core import task_abort_signal
 
 
 def _terminal_reclaimable(task: dict) -> bool:
-    """Only settled carriers with no entered callback or durability debt expire."""
+    """Only settled carriers with no entered callback or durability debt expire.
+
+    ``_exitReceiptPending`` is debt too: a durable owner still needs this
+    carrier as evidence of physical exit and clears the mark once recorded.
+    """
     return (task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
             and not task.get('_executionTerminalizing')
             and not task.get('_finalize_started_at')
             and not task.get('_terminalPersistencePending')
+            and not task.get('_exitReceiptPending')
             and not task.get('_activeWorkerCount'))
 
 
@@ -461,13 +466,24 @@ class TaskRuntime:
                 '[TaskRuntime:%s] registry over capacity=%d; all retained '
                 'tasks are active or awaiting durable persistence',
                 self.kind, self.max_tasks)
-        logger.debug('[TaskRuntime:%s] created task %s', self.kind, task_id[:8])
+        logger.debug('[TaskRuntime:%s] created task %s', self.kind, task_log_tag(task_id))
         return task
 
     def get(self, task_id: str) -> Optional[dict]:
         """Internal task lookup; HTTP adapters must use :meth:`get_owned`."""
         with self._lock:
             return self._tasks.get(task_id)
+
+    def has_live_carrier(self, task_id: str) -> bool:
+        """Whether the carrier registered under this id has not yet exited.
+
+        Live until the same predicate retention uses holds: settled, no entered
+        callback and no terminalization or durability debt. A Turn settles before
+        its worker finishes finalizing, so a settled status alone is not exit.
+        """
+        with self._lock:
+            task = self._tasks.get(str(task_id or ''))
+            return task is not None and not _terminal_reclaimable(task)
 
     def snapshot(self) -> list[dict]:
         """Return a stable registry-membership snapshot for service policies.
@@ -541,7 +557,7 @@ class TaskRuntime:
                 logger.error(
                     '[TaskRuntime:%s] execution start invariant failed '
                     'task=%s: %s',
-                    self.kind, task_id[:8], exc,
+                    self.kind, task_log_tag(task_id), exc,
                 )
                 return False
             task['status'] = 'running'
@@ -670,7 +686,7 @@ class TaskRuntime:
                 or owner_user_id < 1):
             logger.error(
                 '[TaskRuntime:%s] refused ownerless live-task adoption id=%s',
-                self.kind, task_id[:8])
+                self.kind, task_log_tag(task_id))
             return False
         raw_principal = task.get('_principalContext')
         try:
@@ -693,7 +709,7 @@ class TaskRuntime:
         except (PermissionError, TypeError, ValueError) as exc:
             logger.error(
                 '[TaskRuntime:%s] refused invalid-principal adoption id=%s: %s',
-                self.kind, task_id[:8], exc)
+                self.kind, task_log_tag(task_id), exc)
             return False
         # Fill the standard fields a bare/legacy dict may lack so the
         # runtime paths (append_event's events_lock, abort's abort_event)
@@ -729,7 +745,7 @@ class TaskRuntime:
         # class this closes was invisible for hours at lower levels.
         logger.warning('[TaskRuntime:%s] re-adopted live task %s (was missing '
                        'from the registry while still emitting events)',
-                       self.kind, task_id[:8])
+                       self.kind, task_log_tag(task_id))
         return True
 
     def list_running(self) -> list[dict]:
@@ -817,7 +833,7 @@ class TaskRuntime:
                 hinted_next_seq = int(task.get('_eventNextSeq') or 0)
             except (TypeError, ValueError, OverflowError, RecursionError) as exc:
                 logger.debug('[TaskRuntime:%s] invalid next event sequence '
-                             'task=%s: %s', self.kind, task_id[:8], exc)
+                             'task=%s: %s', self.kind, task_log_tag(task_id), exc)
                 hinted_next_seq = -1
             # A retained event's wire ``seq`` is more authoritative than the
             # private hint. Reconcile on every append so a legacy/recovered
@@ -829,13 +845,13 @@ class TaskRuntime:
                 except (AttributeError, TypeError, ValueError, OverflowError) as exc:
                     logger.debug('[TaskRuntime:%s] legacy event sequence '
                                  'fallback task=%s: %s',
-                                 self.kind, task_id[:8], exc)
+                                 self.kind, task_log_tag(task_id), exc)
                     base_seq = task.get('_eventBaseSeq', 0)
                     try:
                         next_seq = max(0, int(base_seq)) + len(events)
                     except (TypeError, ValueError, OverflowError) as exc:
                         logger.debug('[TaskRuntime:%s] invalid event base '
-                                     'task=%s: %s', self.kind, task_id[:8], exc)
+                                     'task=%s: %s', self.kind, task_log_tag(task_id), exc)
                         next_seq = len(events)
             else:
                 next_seq = hinted_next_seq if hinted_next_seq >= 0 else 0
@@ -887,7 +903,7 @@ class TaskRuntime:
                 except (AttributeError, TypeError, ValueError) as exc:
                     logger.debug('[TaskRuntime:%s] invalid retained base '
                                  'sequence task=%s: %s',
-                                 self.kind, task_id[:8], exc)
+                                 self.kind, task_log_tag(task_id), exc)
                     task['_eventBaseSeq'] = seq + 1 - len(events)
             else:
                 task['_eventBaseSeq'] = seq + 1
@@ -896,14 +912,14 @@ class TaskRuntime:
                 if serialization_error is not None:
                     logger.warning(
                         '[TaskRuntime:%s] unencodable event reset memory replay '
-                        'task=%s seq=%s: %s', self.kind, task_id[:8], seq,
+                        'task=%s seq=%s: %s', self.kind, task_log_tag(task_id), seq,
                         serialization_error)
                 else:
                     logger.warning(
                         '[TaskRuntime:%s] event bytes=%d exceed max=%d; reset '
                         'memory replay task=%s seq=%s', self.kind,
                         oversized_event_bytes, self.max_event_bytes,
-                        task_id[:8], seq)
+                        task_log_tag(task_id), seq)
         if trimmed:
             try:
                 from lib.observability import record_task_event_eviction
@@ -934,7 +950,7 @@ class TaskRuntime:
                     logger.warning(
                         '[TaskRuntime:%s] authoritative persistence recovered '
                         'task=%s seq=%s after %.1fs (%d frames withheld)',
-                        self.kind, task_id[:8], seq,
+                        self.kind, task_log_tag(task_id), seq,
                         time.time() - float(withheld_at or 0.0),
                         withheld_count)
             except Exception as e:
@@ -946,7 +962,7 @@ class TaskRuntime:
                     # not a failed durable write. Keep it invisible without
                     # planting a delivery-wedge or persistence-error report.
                     logger.debug('[TaskRuntime:%s] owner cancelled event task=%s seq=%s',
-                                 self.kind, task_id[:8], seq)
+                                 self.kind, task_log_tag(task_id), seq)
                     return seq
                 # v2 events have a stronger contract than the legacy task
                 # channel: every frame is durable before visibility, not just
@@ -967,7 +983,7 @@ class TaskRuntime:
                     log_fn = logger.debug if is_stale_fence else logger.error
                     log_fn('[TaskRuntime:%s] authoritative persistence failed; '
                            'withholding push task=%s seq=%s: %s',
-                           self.kind, task_id[:8], seq,
+                           self.kind, task_log_tag(task_id), seq,
                            _persistence_failure_detail(e))
                     # Delivery-wedge marker (the 2026-08-19 msy4gswgss7tjd
                     #   case): the task keeps 'running' while EVERY
@@ -981,7 +997,7 @@ class TaskRuntime:
                         task.get('_pushWithheldCount') or 0) + 1
                     return seq
                 logger.debug('[TaskRuntime:%s] before_push failed task=%s: %s',
-                             self.kind, task_id[:8], e)
+                             self.kind, task_log_tag(task_id), e)
         check_publication()
         if self.push_channel and deliver_push:
             try:
@@ -994,7 +1010,7 @@ class TaskRuntime:
                 )
             except Exception as e:
                 logger.debug('[TaskRuntime:%s] push_event failed task=%s: %s',
-                             self.kind, task_id[:8], e)
+                             self.kind, task_log_tag(task_id), e)
         return seq
 
     def finish(self, task_id: str, *, result: Any = None,
@@ -1185,7 +1201,7 @@ class TaskRuntime:
             terminal_event['result'] = result
         self.append_event(task_id, terminal_event)
         logger.debug('[TaskRuntime:%s] task %s finished: %s%s',
-                     self.kind, task_id[:8], final_status,
+                     self.kind, task_log_tag(task_id), final_status,
                      ' (DEGRADED)' if (quality or {}).get('degraded') else '')
         return True
 
@@ -1205,7 +1221,7 @@ class TaskRuntime:
                 return False
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] abort requested for task %s',
-                    self.kind, task_id[:8])
+                    self.kind, task_log_tag(task_id))
         return True
 
     def abort_owned(self, task_id: str, *, user_id: int,
@@ -1245,7 +1261,7 @@ class TaskRuntime:
                 task.setdefault('_abortSource', str(source or 'unknown'))
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] owner abort requested for task %s',
-                    self.kind, task_id[:8])
+                    self.kind, task_log_tag(task_id))
         return True
 
     def remove_owned(self, task_id: str, *, user_id: int) -> bool:
@@ -1288,7 +1304,7 @@ class TaskRuntime:
             # Adopted legacy/test carriers may predate the private session.
             pass
         logger.info('[TaskRuntime:%s] owner removed task %s',
-                    self.kind, task_id[:8])
+                    self.kind, task_log_tag(task_id))
         return True
 
     def discard(self, task_id: str) -> Optional[dict]:
@@ -1340,7 +1356,7 @@ class TaskRuntime:
         task_id = task.get('id') or task.get('task_id') or '?'
         logger.warning('[TaskRuntime:%s] task %s stalled (no events for %.0fs '
                        '> %.0fs) — declaring worker_lost',
-                       self.kind, str(task_id)[:8],
+                       self.kind, task_log_tag(task_id),
                        time.time() - last, self.stall_timeout)
         return self.finish(
             task_id,
@@ -1418,7 +1434,7 @@ class TaskRuntime:
                 'sse', self.kind, len(page.events), reset=page.cursor_reset)
         except Exception as exc:
             logger.debug('[TaskRuntime:%s] replay metric skipped task=%s: %s',
-                         self.kind, task_id[:8], exc)
+                         self.kind, task_log_tag(task_id), exc)
 
         extras = {
             **worker_observation,
@@ -1583,7 +1599,7 @@ class TaskRuntime:
 
     def _finish_worker_crash(self, task_id: str, task: dict | None, error: Exception) -> None:
         logger.error('[TaskRuntime:%s] worker for task %s crashed: %s',
-                     self.kind, task_id[:8], error, exc_info=True)
+                     self.kind, task_log_tag(task_id), error, exc_info=True)
         if task is not None:
             self.finish(task_id, error=error, expected_task=task,
                         error_context=f'{self.kind}:worker_crash')
@@ -1740,7 +1756,7 @@ class TaskRuntime:
                     error = done.exception()
                     if error is not None:
                         logger.error('[TaskRuntime:%s] background worker %s failed: %s',
-                                     self.kind, worker._tofu_task_id[:8], error,
+                                     self.kind, task_log_tag(worker._tofu_task_id), error,
                                      exc_info=(type(error), error, error.__traceback__))
 
             future.add_done_callback(completed)
@@ -1781,7 +1797,7 @@ class TaskRuntime:
         try:
             threading.Thread(
                 target=worker,
-                name=thread_name or f'{self.kind}-{worker._tofu_task_id[:8]}',
+                name=thread_name or f'{self.kind}-{task_log_tag(worker._tofu_task_id)}',
                 daemon=True,
             ).start()
         except Exception as error:

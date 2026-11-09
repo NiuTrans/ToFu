@@ -405,7 +405,8 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
     consecutive_errors = 0
     negotiated_v3 = False
 
-    with requests.Session() as poll_session:
+    from lib.http_transport.outbound import managed_session
+    with managed_session() as poll_session:
         while True:
             if stop_event is not None and stop_event.is_set():
                 logger.info('[Agent] stop_event set — shutting down cleanly')

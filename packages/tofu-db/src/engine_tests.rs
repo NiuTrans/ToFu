@@ -272,6 +272,59 @@
     }
 
     #[test]
+    fn distinct_carried_recovery_reads_each_history_page_once_without_a_payload_cache() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        for index in 0..128 {
+            let payload = format!("old history content {index}");
+            engine.commit_transaction(b"history", &[payload.as_bytes()]).unwrap();
+        }
+        indexed_rotate(&mut engine);
+        let pages = engine.blocks.history_payload_metadata_ids(
+            engine.history_manifest.as_ref().unwrap()).unwrap().len();
+        let payloads: Vec<_> = (0..=65_536)
+            .map(|index| format!("new carried content {index}").into_bytes()).collect();
+        let ids = payloads.iter().map(|payload| BlockId::for_payload(payload)).collect();
+        engine.blocks.set_cache_capacity_bytes(0).unwrap();
+        vfs.arm_fault(None).unwrap();
+        let started = std::time::Instant::now();
+        let mut lookup = engine.blocks.prepare_carried_recovery(ids).unwrap();
+        for payload in &payloads {
+            let id = BlockId::for_payload(payload);
+            assert_eq!(engine.blocks.restore_carried_with_lookup(payload, &mut lookup).unwrap(), id);
+            engine.blocks.stage_pending_sync_for_recovery(id, &lookup).unwrap();
+            assert_eq!(engine.blocks.pending_payload(id).unwrap().unwrap().as_slice(), payload);
+        }
+        let reads = vfs.trace().unwrap().iter().filter(|operation| **operation == Operation::Read).count();
+        eprintln!("distinct_history_recovery references={} metadata_blocks={pages} reads={reads} elapsed_us={}",
+            payloads.len(), started.elapsed().as_micros());
+        assert!(reads <= pages * 2, "recovery repeated the same history pages: {reads} reads for {pages} metadata blocks");
+    }
+
+    #[test]
+    fn prepared_history_recovery_still_verifies_payloads_and_uses_valid_ordinary_copies() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let payload = b"history bytes must still be verified after batch preparation";
+        let id = engine.commit_transaction(b"carried", &[payload]).unwrap().block_ids[0];
+        indexed_rotate(&mut engine);
+        engine.blocks.set_cache_capacity_bytes(0).unwrap();
+        let mut lookup = engine.blocks.prepare_carried_recovery(BTreeSet::from([id])).unwrap();
+        assert_eq!(engine.blocks.get_for_recovery(id, &lookup).unwrap(), payload);
+        let reference = &engine.history_manifest.as_ref().unwrap().segments[0];
+        let index = crate::history_payload::SegmentIndex::decode(
+            &engine.blocks.get(reference.payload_index_block_id.unwrap()).unwrap(), reference.block_id).unwrap();
+        let offset = index.entries.iter().find(|entry| entry.0 == id).unwrap().1;
+        let mut file = vfs.open(&indexed_block_path(reference.block_id),
+            OpenRequest { write: true, ..OpenRequest::default() }).unwrap();
+        file.write_all_at(16 + u64::from(offset), b"!").unwrap();
+        assert_eq!(engine.blocks.get_for_recovery(id, &lookup).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        engine.blocks.put_loose(payload).unwrap();
+        assert_eq!(engine.blocks.get_for_recovery(id, &lookup).unwrap(), payload);
+        engine.blocks.remove_blocks(&[id]).unwrap();
+        assert_eq!(engine.blocks.restore_carried_with_lookup(payload, &mut lookup).unwrap(), id);
+        assert_eq!(engine.blocks.pending_payload(id).unwrap().unwrap().as_slice(), payload);
+    }
+
+    #[test]
     #[ignore = "explicit paired recovery I/O experiment on a disposable authority"]
     fn repeated_carried_recovery_paired_measurement() {
         let parent = std::env::var_os("TOFUDB_RESTART_BENCH_PARENT").map(PathBuf::from)
@@ -1734,7 +1787,36 @@
 
     #[test]
     fn oversized_spill_does_not_flush_unrelated_carried_backlog() {
+        fn spill_barriers(vfs: &DeterministicVfs) -> usize {
+            vfs.trace().unwrap().iter().filter(|operation|
+                matches!(operation, Operation::SyncAll | Operation::SyncData | Operation::SyncDirectory)
+            ).count()
+        }
         for (references, recovered) in [(false, false), (true, false), (false, true), (true, true)] {
+            let large = vec![0xAB; MAX_CARRIED_PAYLOAD_BYTES + 1];
+            let root_payload = b"separately referenced authority root";
+            let commit_large = |engine: &mut Engine| if references {
+                let id = engine.write_block(&large).unwrap();
+                let root = engine.write_block(root_payload).unwrap();
+                engine.commit_references_with_authority_state(b"large", &[id], Some(root)).unwrap();
+                (id, Some(root))
+            } else {
+                (engine.commit_transaction(b"large", &[&large]).unwrap().block_ids[0], None)
+            };
+            // The same spill with no unrelated carried backlog: barriers must
+            // depend only on the current references, not on what else is staged.
+            let (twin_vfs, mut twin) = initialized_simulated_engine();
+            twin.commit_transaction(b"small", &[b"twin seed"]).unwrap();
+            if recovered {
+                drop(twin);
+                twin_vfs.crash().unwrap();
+                twin = Engine::open_with_vfs(Path::new("/data"), twin_vfs.clone()).unwrap();
+            }
+            twin_vfs.arm_fault(None).unwrap();
+            commit_large(&mut twin);
+            let expected_barriers = spill_barriers(&twin_vfs);
+            drop(twin);
+
             let (vfs, mut engine) = initialized_simulated_engine();
             let mut earlier = Vec::new();
             for index in 0_u32..256 {
@@ -1749,22 +1831,10 @@
                 engine = Engine::open_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
             }
             vfs.arm_fault(None).unwrap();
-            let large = vec![0xAB; MAX_CARRIED_PAYLOAD_BYTES + 1];
-            let root_payload = b"separately referenced authority root";
-            let (large_id, root) = if references {
-                let id = engine.write_block(&large).unwrap();
-                let root = engine.write_block(root_payload).unwrap();
-                engine.commit_references_with_authority_state(b"large", &[id], Some(root)).unwrap();
-                (id, Some(root))
-            } else {
-                (engine.commit_transaction(b"large", &[&large]).unwrap().block_ids[0], None)
-            };
-            let barriers = vfs.trace().unwrap().iter().filter(|operation|
-                matches!(operation, Operation::SyncAll | Operation::SyncData | Operation::SyncDirectory)
-            ).count();
-            // Includes initial shard publication and the independent root's
-            // CONTROL update, in addition to the reference/WAL barriers.
-            assert!(barriers <= 16, "spill barriers must depend on current references: {barriers}");
+            let (large_id, root) = commit_large(&mut engine);
+            let barriers = spill_barriers(&vfs);
+            assert_eq!(barriers, expected_barriers,
+                "spill barriers must depend on current references only");
             for (id, _) in &earlier {
                 assert!(engine.blocks.pending_payload(*id).unwrap().is_some(),
                         "large commit must not materialize unrelated WAL-carried blocks");
@@ -4740,6 +4810,10 @@
 
     mod adoption_isolation {
         include!("engine_adoption_tests.rs");
+    }
+
+    mod history_retirement {
+        include!("engine_history_retirement_tests.rs");
     }
 
     fn indexed_block_path(id: BlockId) -> PathBuf {

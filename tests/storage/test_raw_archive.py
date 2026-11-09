@@ -681,6 +681,28 @@ def test_raw_archive_delete_debits_usage_counter():
     assert updates == [("60", "raw_archive_stored_bytes")]
 
 
+def test_raw_archive_scrub_names_the_constraint_that_bound():
+    """With both budgets exceeded the per-Attempt budget is named, in the
+    native authority's order; free-space exhaustion stays quota_exhausted."""
+    from lib.storage_authority_sql.operations_pkg import _raw_archives
+
+    def put(payload):
+        session = _RecordingSession(
+            [
+                ("storage_generation_attempts", {"attempt_id": "attempt"}),
+                ("SUM(stored_bytes)",
+                 {"total": _raw_archives._MAX_ARCHIVE_STORED_BYTES}),
+            ],
+            meta_value=str(payload["budget_bytes"]),
+        )
+        return _raw_archives._raw_archive_put(session, payload)
+
+    both = put(_unit_payload())
+    assert (both["truncationReason"], both["storedBytes"]) == ("attempt_limit", 0)
+    space = put({**_unit_payload(), "available_free_bytes": 1})
+    assert (space["truncationReason"], space["storedBytes"]) == ("quota_exhausted", 0)
+
+
 def test_raw_archive_budget_stays_exact_across_replay_and_delete(chat_sidecar):
     from lib.storage import get_storage_client
     from lib.turn_lifecycle import bind_task, create_turn_pair

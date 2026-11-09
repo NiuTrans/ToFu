@@ -390,7 +390,7 @@ def _read_turn_segments(conv_id, turn_id, *, user_id):
     except Exception as e:
         logger.warning(
             '[Translate] segment read failed conv=%s turn=%s: %s',
-            (conv_id or '?')[:8], (turn_id or '?')[:8], e,
+            (conv_id or '?'), (turn_id or '?')[:8], e,
         )
         return None
 
@@ -437,7 +437,7 @@ def _build_segment_translation_map(conv_id, turn_id, system_prompt,
         system_prompt,
         source,
         target,
-        log_tag=(conv_id or '?')[:8],
+        log_tag=(conv_id or '?'),
         progress_cb=progress_cb,
         abort_check=abort_check,
         overall_deadline=_segment_enrichment_deadline_seconds(_total_chars),

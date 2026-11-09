@@ -15,6 +15,10 @@ Modules:
   autoreply — Global Router answers return to their command-chat thread
   dx/       — 大象 adapter: bridge.mjs, adapter.py, supervisor.py
   github/   — GitHub adapter: client, normalize, adapter (poller), account, supervisor
+  bots/     — bot platform core (C12): transport port, ids, session, account, supervisor
+  wecom/    — 企业微信 智能机器人 long-connection transport
+  qq/       — QQ 官方机器人 token, gateway and OpenAPI transport
+  wechat/   — 微信 ClawBot iLink long-poll transport and QR login
 
 This package root deliberately imports nothing (no import-time work).
 """

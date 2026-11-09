@@ -98,7 +98,6 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     'strreplacefile': 'apply_diff',
     'edits': 'apply_diffs',
     'multiedit': 'apply_diffs',  # Claude Code's batch-edit tool
-    'insert': 'insert_content',
     # ── shell ──
     'bash': 'run_command',
     'shell': 'run_command',
@@ -271,7 +270,7 @@ def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, st
     # Unified-edit migration: old Tofu names and familiar foreign-harness
     # names all converge on edit_file when that is the session's visible edit
     # surface. The structural repair pass then converts their legacy argument
-    # shapes into ``edits=[{operation, anchor, content, ...}]``. In rollback
+    # shapes into ``edits=[{anchor, content, ...}]``. In rollback
     # sessions edit_file is absent, so the ordinary legacy aliases below keep
     # resolving to apply_diff/apply_diffs exactly as before.
     if 'edit_file' in valid and name.lower() in {

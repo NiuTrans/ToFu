@@ -16,6 +16,7 @@ def render_execution(tables, worker, inputs) -> list[str]:
         field for field in table["fields"] if field["name"] == "agent_id"
     )
     return [
+        f'pub const WORKER_PROCESS_OWNER_PREFIX: &str = {json.dumps(worker["leaseAuthority"]["processBoundOwner"]["prefix"])};',
         f'pub const WORKER_JOB_STATES: &[&str] = &{json.dumps(worker["states"])};',
         f'pub const WORKER_EXECUTION_WITNESS_FORMAT: &str = {json.dumps(worker["conversationExecutionWitness"]["format"])};',
         f'pub const WORKER_EXECUTION_CONFIG_KEY: &str = {json.dumps(worker["conversationExecutionWitness"]["configKey"])};',

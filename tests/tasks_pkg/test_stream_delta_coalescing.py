@@ -415,7 +415,7 @@ def test_projection_deadline_never_extends_the_existing_text_window():
 def test_durable_text_uses_existing_frame_budget_and_keeps_explicit_override(
         monkeypatch, frame_chars, expected_events):
     from types import SimpleNamespace
-    monkeypatch.setattr('lib.storage.storage_event_policy.resolve_storage_event_budget',
+    monkeypatch.setattr('lib.agent_core.storage_event_policy.resolve_storage_event_budget',
         lambda: SimpleNamespace(event_max_bytes=frame_chars*6))
     monkeypatch.setattr('lib.turn_lifecycle.next_progress_projection_deadline', lambda _: None)
     for override, expected in ((None, expected_events), (2, 2)):
@@ -438,7 +438,7 @@ def test_durable_text_uses_existing_frame_budget_and_keeps_explicit_override(
 def test_transient_text_keeps_its_portable_policy_without_storage_composition(monkeypatch):
     def unexpected():
         raise AssertionError('Transient text must not resolve durable storage policy')
-    monkeypatch.setattr('lib.storage.storage_event_policy.resolve_storage_event_budget', unexpected)
+    monkeypatch.setattr('lib.agent_core.storage_event_policy.resolve_storage_event_budget', unexpected)
     task = _stream_task()
     del task['_attemptId']
     emitted = []

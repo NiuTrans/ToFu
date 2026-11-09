@@ -212,7 +212,7 @@ def _auto_translate_user_active(text, config, *, user_id, conv_id=None):
             elapsed = time.monotonic() - started_at
             logger.warning('[Send] Auto-translate timed out after %.1fs, '
                            'sending original text (conv=%s, %d chars)',
-                           elapsed, (conv_id or '?')[:8], len(text))
+                           elapsed, (conv_id or '?'), len(text))
             return text, None, None, 'timed_out'
         if result and result.strip():
             _model = None
@@ -362,7 +362,7 @@ def start_deferred_input_translation(conversation_id, turn_id, config, *,
                 conversation_id, turn_id, config, user_id=user_id)
         except BaseException as exc:
             logger.warning('[Send] Deferred input translation failed conv=%s turn=%s: %s',
-                           str(conversation_id)[:8], str(turn_id)[:8], exc,
+                           str(conversation_id), str(turn_id)[:8], exc,
                            exc_info=True)
             future.set_exception(exc)
             return

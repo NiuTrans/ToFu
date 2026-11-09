@@ -9,6 +9,8 @@ from benchmarks.conversation_compare import compare
 from benchmarks.conversation_provenance import FORMAT, REQUIRED_SOURCES
 pytestmark = pytest.mark.unit
 
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/new_runtime_owner.py'}
+
 
 def source_snapshot():
     return {'native_source_sha256': 'a' * 64,
@@ -56,6 +58,40 @@ def test_complete_low_latency_evidence_passes_only_its_declared_scope():
     result = assess(evidence())
     assert result['passed']
     assert 'browser-send-to-visible-feedback' in result['uncovered']
+
+
+@pytest.mark.parametrize('receipt', [None, [], {}, {'format': 'unsupported'}])
+def test_unsupported_provenance_refuses_without_reading_the_checkout(monkeypatch, receipt):
+    report = evidence()
+    report['provenance'] = receipt
+
+    def forbidden():
+        raise AssertionError('unsupported provenance cannot use a checkout inventory')
+
+    monkeypatch.setattr('benchmarks.conversation_acceptance.capture_sources', forbidden)
+    result = assess(report)
+    assert result['correctness_passed'] and result['coverage_passed']
+    assert not result['passed'] and not result['latency_passed']
+    assert not result['current_source_qualified'] and not result['frozen_build_comparable']
+    assert 'provenance receipt missing or unsupported' in result['provenance']['frozen_failures']
+
+
+def test_supported_provenance_captures_a_fresh_complete_inventory_on_every_assessment(monkeypatch):
+    report = evidence()
+    current = source_snapshot()
+    observations = []
+
+    def capture():
+        observations.append(deepcopy(current))
+        return deepcopy(current)
+
+    monkeypatch.setattr('benchmarks.conversation_acceptance.capture_sources', capture)
+    assert assess(report)['passed']
+    current['files']['lib/new_runtime_owner.py'] = 'c' * 64
+    result = assess(report)
+    assert not result['current_source_qualified'] and not result['passed']
+    assert result['frozen_build_comparable']
+    assert len(observations) == 2 and observations[0] != observations[1]
 
 
 @pytest.mark.parametrize('p99', [47000, 16534, float('nan'), float('inf'), None, -1])

@@ -18,6 +18,8 @@ served 1:1 by tofu-db's semantic executor.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
 import logging
 import random
 import threading
@@ -35,6 +37,7 @@ from lib.storage.frame_admission import (
     FrameByteAdmission,
     process_response_frame_admission,
 )
+from lib.storage.retry import observe_storage_wait
 from lib.storage.retry_log import RetryLogThrottle, retry_log_throttle
 from lib.storage.v2_semantics import application_notice, application_result, request_payload
 from lib.storage.protocol import validate_operation
@@ -55,11 +58,15 @@ from tofu_db.wire import (
 # Native queries replay freely; commands preserve their receipt identity
 # across classified transient failures. Protocol/integrity failures and the
 # instance-bound checkpoint port never enter this ordinary semantic retry loop.
-# Busy is flow control, not failure: a busy command gets a deeper bounded
-# budget with exponential backoff inside the caller's deadline, while every
-# other command failure keeps the shallow fail-fast budget. Backoff starts
-# fine-grained: rotation install windows are millisecond-scale, so a 10 ms
-# first retry turns an invisible wait into a p99 event.
+# A runtime-bound client waits these failures out while its supervised
+# authority is alive, with no aggregate time window: the runtime's liveness
+# verdict ends the wait, never elapsed time (docs/STORAGE.md, "Client retry
+# contract"). A client without that witness (standalone tools and tests), a
+# metrics observer and a call on an event-loop thread keep an attempt bound:
+# _BUSY_COMMAND_ATTEMPTS for a busy command, read_attempts otherwise. Busy is
+# flow control, not failure, and its backoff starts fine-grained: rotation
+# install windows are millisecond-scale, so a 10 ms first retry turns an
+# invisible wait into a p99 event.
 _RETRYABLE_CODES = {'database_timeout', 'database_busy', 'database_unavailable'}
 _BUSY_COMMAND_ATTEMPTS = 16
 _BUSY_COMMAND_BASE_DELAY_S = 0.002
@@ -73,25 +80,12 @@ _BUSY_COMMAND_MAX_DELAY_S = 0.250
 # the authority starved (2026-09-22 cgroup memory-pressure incident: the
 # supervisor withheld recycling while 120 sync threads retry-spun the
 # pool). The FIRST retry keeps the server hint — a healthy blip pays nothing
-# — and consecutive availability failures space out exponentially with
-# jitter, still inside the caller's aggregate budget. The escalation engages
-# only when the remaining budget affords it (4x the wait), so a small-budget
-# caller keeps its full attempt count at the blip hint. Busy COMMANDS keep
-# their own finer WAL-rotation schedule below.
-_AVAILABILITY_BACKOFF_CODES = frozenset(
-    {'database_timeout', 'database_busy', 'database_unavailable'})
+# — and consecutive failures of these (all availability-class) codes space
+# out exponentially with jitter up to the cap. Busy COMMANDS keep their own
+# finer WAL-rotation schedule above.
 _AVAILABILITY_BACKOFF_BASE_S = 0.5
 _AVAILABILITY_BACKOFF_CAP_S = 8.0
 
-# Aggregate retry-budget floor for commands. The aggregate cap is
-# ``timeout * attempts``; with the 20 s production deadline and 3 attempts
-# a command already rides a 60 s window, well past a ~10 s supervised
-# recycle. A caller that overrides with a short explicit deadline must
-# still ride the same bounded window — replaying on the receipt proof
-# above is safe at any budget, and failing fast only converts a slow
-# authority into a user-visible 503. The floor is capped so a wedged
-# authority still fails fast relative to the request lifecycle.
-_COMMAND_MIN_RETRY_BUDGET_S = 45.0
 # tofu-db's semantic executor emits storage.v1 error codes directly, except
 # for these v2-specific classifications, which map onto the stable taxonomy.
 _V2_TO_STORAGE_CODE = {
@@ -434,10 +428,13 @@ class StorageV2Client:
         return self._timeout
 
     def bind_runtime_recovery(self, resolve: Callable[[float], StorageV2Client]) -> None:
-        """Bind the selected runtime's ready generation before publication.
+        """Bind the selected runtime's liveness witness before publication.
 
-        Only ordinary replay-safe calls use this port. Health supervision and
-        instance-bound checkpoint control always keep their original handle.
+        ``resolve(pause)`` waits out one backoff pause and returns the ready
+        generation, or raises once the authority is proven down or the
+        runtime is stopping. Only ordinary replay-safe calls use this port.
+        Health supervision and instance-bound checkpoint control always keep
+        their original handle.
         """
         self._recovery_client = resolve
 
@@ -560,19 +557,6 @@ class StorageV2Client:
         timeout = self._timeout if deadline is None else max(0.001, float(deadline))
         read_replay_safe = kind in {'query', 'health', 'metrics'}
         attempts = self._read_attempts if read_replay_safe or kind == 'command' else 1
-        aggregate_budget = timeout * attempts
-        if kind == 'command':
-            aggregate_budget = max(aggregate_budget,
-                                   _COMMAND_MIN_RETRY_BUDGET_S)
-        # A finite FUSE rotation can exceed sixteen fast retries while the
-        # caller still has most of its deadline. Busy means no mutation; ride
-        # the existing time budget with capped backoff and the same receipt ID.
-        # The count is a secondary bound derived from that budget, not another
-        # hidden one-second deadline. Other failures keep their shallow cap.
-        busy_attempts = max(_BUSY_COMMAND_ATTEMPTS,
-            int(aggregate_budget / _BUSY_COMMAND_MAX_DELAY_S) + 16)
-        loop_attempts = busy_attempts if kind == 'command' or self._recovery_client else attempts
-        stop_at = time.monotonic() + aggregate_budget
         # tofu-db rejects any state-mutating op that lacks a command_id
         # (mutates_state() == kind != Query), and maintenance-kind ops such as
         # project_brain.recovery.snapshot mutate. Only reads may omit it.
@@ -580,36 +564,18 @@ class StorageV2Client:
             command_id = f'{operation}:{uuid.uuid4().hex}'
         wire_command_id = None if kind == 'query' else command_id
         started_at = time.monotonic()
-        last_error = None
         active_client = self
-        recover = False
-        for attempt in range(loop_attempts):
-            remaining = stop_at - time.monotonic()
-            if remaining <= 0 and last_error is not None:
-                _record_rpc(kind, operation, started_at, 'error')
-                raise last_error
-            # Each replay gets a fresh execution window within the original
-            # aggregate retry budget. Reusing the first wire deadline makes
-            # every retry after a slow attempt arrive already expired.
+        waits_while_alive = None
+        for attempt in itertools.count():
+            # Every replay gets the full wire deadline: no aggregate budget
+            # shrinks it, so a retry after a slow attempt is never born
+            # expired.
             try:
-                if recover and self._recovery_client is not None:
-                    candidate = self._recovery_client(remaining)
-                    if (not isinstance(candidate, StorageV2Client)
-                            or (candidate._owner_id, candidate._tenant_id)
-                            != (self._owner_id, self._tenant_id)):
-                        raise StorageError('database_integrity',
-                            'Storage recovery changed the authenticated authority scope')
-                    active_client = candidate
-                remaining = stop_at - time.monotonic()
-                if remaining <= 0 and last_error is not None:
-                    raise last_error
-                attempt_timeout = min(timeout, max(0.001, remaining))
-                deadline_unix_ms = int((time.time() + attempt_timeout) * 1000)
                 result = active_client._attempt(
                     operation, payload,
-                    timeout=attempt_timeout,
+                    timeout=timeout,
                     command_id=wire_command_id,
-                    deadline_unix_ms=deadline_unix_ms,
+                    deadline_unix_ms=int((time.time() + timeout) * 1000),
                 )
                 _record_rpc(kind, operation, started_at, 'success')
                 elapsed = time.monotonic() - started_at
@@ -617,7 +583,6 @@ class StorageV2Client:
                 _warn_slow_rpc(kind, operation, elapsed, attempt + 1, wire_command_id)
                 return result
             except StorageError as exc:
-                last_error = exc
                 # ``deadline_elapsed`` arrives with retryable=False because
                 # that single wire flag also gates command replay, but both
                 # server variants are replay-safe here: admission rejects
@@ -634,65 +599,86 @@ class StorageV2Client:
                 busy_command = kind == 'command' and exc.code == 'database_busy'
                 # Frame-boundary EOF carries the same native receipt proof.
                 closed_transient = isinstance(exc, _ConnectionClosedError)
-                # Transport loss does not prove whether a command committed.
-                # Only replaying its unchanged receipt identity resolves that
-                # ambiguity; the runtime resolver changes transport, not the
-                # operation, identity or selected authority.
                 unavailable_transient = exc.code == 'database_unavailable'
-                recover = unavailable_transient
                 command_replay_safe = kind == 'command' and (
                     exc.request_not_dispatched or busy_command
                     or timeout_transient or closed_transient
                     or unavailable_transient)
                 replay_safe = read_replay_safe or command_replay_safe
-                # A managed authority can replace both endpoint and secret.
-                # Its recovery wait consumes this same aggregate budget; a
-                # fast refusal must not exhaust three stale-endpoint attempts
-                # before supervision has a chance to publish the replacement.
-                managed_recovery = unavailable_transient and self._recovery_client is not None
-                attempt_cap = busy_attempts if busy_command or managed_recovery else attempts
-                exhausted = attempt + 1 >= attempt_cap
-                if not retry_classified or not replay_safe or exhausted:
+                if not retry_classified or not replay_safe:
                     _record_rpc(kind, operation, started_at, 'error')
                     raise
-                remaining = stop_at - time.monotonic()
-                if remaining <= 0.05:
-                    _record_rpc(kind, operation, started_at, 'error')
-                    raise
+                if waits_while_alive is None:
+                    waits_while_alive = self._waits_while_alive(kind)
+                attempt_cap = None
+                if not waits_while_alive:
+                    attempt_cap = _BUSY_COMMAND_ATTEMPTS if busy_command else attempts
+                    if attempt + 1 >= attempt_cap:
+                        _record_rpc(kind, operation, started_at, 'error')
+                        raise
                 # Local admission pressure needs congestion backoff; the
                 # millisecond schedule is only for authority WAL flow control.
                 if busy_command and not exc.request_not_dispatched:
                     delay = min(
                         _BUSY_COMMAND_BASE_DELAY_S * (2 ** min(attempt, 16)),
-                        _BUSY_COMMAND_MAX_DELAY_S,
-                        remaining,
-                    )
+                        _BUSY_COMMAND_MAX_DELAY_S)
+                elif attempt >= 1:
+                    delay = min(
+                        _AVAILABILITY_BACKOFF_BASE_S * (2 ** min(attempt - 1, 16)),
+                        _AVAILABILITY_BACKOFF_CAP_S)
                 else:
-                    hint = (exc.retry_after_ms or 50) / 1000.0
-                    escalated = min(
-                        _AVAILABILITY_BACKOFF_BASE_S * (2 ** (attempt - 1)),
-                        _AVAILABILITY_BACKOFF_CAP_S,
-                    )
-                    # Escalate only when the aggregate budget affords
-                    # patience: a small-budget caller keeps the blip hint
-                    # and its full attempt count instead of sleeping the
-                    # whole budget away in one wait.
-                    if (exc.code in _AVAILABILITY_BACKOFF_CODES
-                            and attempt >= 1
-                            and escalated * 4 <= remaining):
-                        delay = escalated
-                    else:
-                        delay = min(hint, remaining)
+                    delay = (exc.retry_after_ms or 50) / 1000.0
+                pause = delay + random.uniform(0.0, min(delay * 0.25, 1.0))
+                waited = time.monotonic() - started_at
                 if retry_log_throttle().allow(f'v2:{kind}:{operation}'):
                     logger.warning(
-                        'storage.v2 retrying %s %s (attempt %d/%d) in %.2fs '
-                        'after %s: %s',
-                        kind, operation, attempt + 2, attempt_cap, delay,
-                        exc.code, str(exc)[:160])
-                time.sleep(min(remaining, delay + random.uniform(0.0, min(delay * 0.25, 1.0))))
-        _record_rpc(kind, operation, started_at, 'error')
-        raise StorageError(  # unreachable: loop either returns or raises
-            'database_internal', 'Storage retry loop exited unexpectedly')
+                        'storage.v2 retrying %s %s (attempt %d/%s) in %.2fs '
+                        'after %s, waiting %.1fs so far: %s',
+                        kind, operation, attempt + 2,
+                        attempt_cap or 'while the authority is alive', pause,
+                        exc.code, waited, str(exc)[:160])
+                if not waits_while_alive:
+                    time.sleep(pause)
+                    continue
+                try:
+                    # A slow call's wait belongs to its thread's owner, which
+                    # presents it and may end it (Stop, shutdown).
+                    if waited >= SLOW_RPC_WARN_SECONDS:
+                        observe_storage_wait(exc)
+                    # The runtime pauses, then answers the live generation or
+                    # raises once the authority is proven down or stopping.
+                    # Transport loss does not prove whether a command
+                    # committed; replaying its unchanged receipt identity on
+                    # that generation resolves the ambiguity.
+                    candidate = self._recovery_client(pause)
+                    if (not isinstance(candidate, StorageV2Client)
+                            or (candidate._owner_id, candidate._tenant_id)
+                            != (self._owner_id, self._tenant_id)):
+                        raise StorageError('database_integrity',
+                            'Storage recovery changed the authenticated authority scope')
+                except BaseException:
+                    _record_rpc(kind, operation, started_at, 'error')
+                    raise
+                active_client = candidate
+
+    def _waits_while_alive(self, kind: str) -> bool:
+        """Whether a transient failure of this call waits on authority liveness.
+
+        Only a runtime-bound client has a liveness witness. Metrics observe the
+        authority and must answer while it is slow, and a thread running an
+        asyncio event loop must never park on storage; both keep the attempt
+        bound.
+        """
+        if self._recovery_client is None or kind not in ('query', 'command'):
+            return False
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return True
+        if retry_log_throttle().allow('v2:event-loop-call'):
+            logger.warning('storage.v2 call on an event-loop thread keeps its attempt '
+                           'bound instead of waiting for the authority; move it off the loop')
+        return False
 
     def _checkpoint_scope(self, owner):
         if owner != self._owner_id:

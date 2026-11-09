@@ -3,6 +3,7 @@
 from lib.storage_authority_sql import operations as ops
 
 from lib.storage_authority_sql.operations_pkg._model_context import read_model_context
+from lib.storage_authority_sql.operations_pkg._turns_read import _turn_projection_page
 
 OPERATIONS = {
     'turn.context.read': ops.OperationSpec('query', False, read_model_context),
@@ -82,6 +83,7 @@ OPERATIONS = {
         'command', False, ops._turn_event_record_batch, ops._turn_change_capture),
     'turn.get': ops.OperationSpec('query', False, ops._turn_get),
     'turn.image.get': ops.OperationSpec('query', False, ops._turn_image_get),
+    'turn.projection.page': ops.OperationSpec('query', False, _turn_projection_page),
     'turn.exists': ops.OperationSpec('query', False, ops._turn_exists),
     'turn.list': ops.OperationSpec('query', False, ops._turn_list),
     'turn.list_delta': ops.OperationSpec('query', False, ops._turn_list_delta),

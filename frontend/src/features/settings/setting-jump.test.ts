@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import indexShell from '../../../../index.html?raw';
 import advancedPanel from '../../../../static/settings_panels/advanced.html?raw';
 import generalPanel from '../../../../static/settings_panels/general.html?raw';
+import messagingPanel from '../../../../static/settings_panels/messaging.html?raw';
 import presetPanel from '../../../../static/settings_panels/preset.html?raw';
 import searchPanel from '../../../../static/settings_panels/search.html?raw';
 import speechPanel from '../../../../static/settings_panels/speech.html?raw';
@@ -56,6 +57,19 @@ describe('SETTING_JUMP_TARGETS', () => {
   it('points every key at a tab the settings shell exposes', () => {
     for (const [key, target] of Object.entries(SETTING_JUMP_TARGETS)) {
       expect(indexShell, `${key} → tab ${target.tab}`).toContain(`data-tab="${target.tab}"`);
+    }
+  });
+
+  it('lands every chat platform key on its section of the 消息平台 panel, and every section has a key', () => {
+    const sections = [...messagingPanel.matchAll(/data-platform="([a-z]+)"/g)].map((match) => match[1]);
+    expect(sections.length).toBeGreaterThan(0);
+    const platforms = Object.entries(SETTING_JUMP_TARGETS).filter(([, target]) => target.platform);
+    for (const [key, target] of platforms) {
+      expect(target.tab, `${key} → tab`).toBe('messaging');
+      expect(sections, `${key} → section ${target.platform}`).toContain(target.platform);
+    }
+    for (const platform of sections) {
+      expect(resolveSettingJumpTarget(platform), `setting:${platform}`).toEqual({ tab: 'messaging', platform });
     }
   });
 

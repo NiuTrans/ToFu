@@ -362,7 +362,7 @@ def scan_message(
     if created:
         logger.info(
             '[Artifacts:scan] conv=%s msg=%s found=%d (fence=%d doc=%d) created=%d',
-            conv_id[:8], (msg_id or '')[:8],
+            conv_id, (msg_id or '')[:8],
             len(candidates), len(fence_blocks), len(doc_blocks), len(created),
         )
     return created

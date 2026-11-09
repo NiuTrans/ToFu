@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu:context-lineage:v1",
+  "title": "Content-free context transformation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "stage", "sources"],
+  "properties": {
+    "version": {"const": 1},
+    "stage": {"$ref": "#/$defs/stage"},
+    "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "wireBodyHash": {"$ref": "#/$defs/digest"},
+    "requestContentHash": {"$ref": "#/$defs/digest"},
+    "requestIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["semantic_request_id", "provider_prefix_id", "admitted_input_tokens"],
+      "properties": {
+        "semantic_request_id": {"$ref": "#/$defs/digest"},
+        "provider_prefix_id": {"$ref": "#/$defs/digest"},
+        "admitted_input_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "traceId": {"type": "string", "minLength": 1},
+    "degraded": {"type": "boolean"},
+    "degradedReason": {"type": "string"}
+  },
+  "dependentRequired": {
+    "requestIdentity": ["wireBodyHash", "requestContentHash"],
+    "wireBodyHash": ["requestContentHash"]
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "shortDigest": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+    "stage": {"enum": [
+      "field_projection", "gateway_sanitize", "text_normalization", "protocol_repair",
+      "same_role_merge", "image_projection", "model_adaptation", "canonical",
+      "chat_projection", "anthropic_projection", "responses_projection",
+      "canonical_ingress", "request_sealing", "snapshot_projection"
+    ]},
+    "location": {
+      "type": "object", "additionalProperties": false,
+      "required": ["region", "message", "part", "start", "end"],
+      "properties": {
+        "region": {"enum": ["messages", "input", "system", "instructions"]},
+        "message": {"type": ["integer", "null"], "minimum": 0},
+        "part": {"type": "integer", "minimum": 0},
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "hash", "evidence", "input", "spanHash", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "eventId": {"type": ["string", "null"]},
+        "hash": {"$ref": "#/$defs/shortDigest"},
+        "receiptHash": {"anyOf": [{"$ref": "#/$defs/shortDigest"}, {"type": "null"}]},
+        "evidence": {"enum": ["managed_carrier", "event_receipt"]},
+        "input": {"$ref": "#/$defs/location"},
+        "output": {"$ref": "#/$defs/location"},
+        "spanHash": {"$ref": "#/$defs/digest"},
+        "status": {"enum": ["located", "unmapped"]},
+        "changedAt": {"$ref": "#/$defs/stage"},
+        "lostAt": {"$ref": "#/$defs/stage"}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "located"}}},
+         "then": {"required": ["output"]}},
+        {"if": {"properties": {"status": {"const": "unmapped"}}},
+         "then": {"required": ["lostAt"], "not": {"required": ["output"]}}}
+      ]
+    }
+  }
+}

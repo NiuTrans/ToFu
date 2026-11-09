@@ -285,6 +285,17 @@ failure receives the same issue. Task and settings feedback instructs releasing
 space or inodes and retrying, without starting a new sign-in. Unknown inode
 accounting alone never skips the known byte dimension.
 
+Problem: an early native-child exit could surface either in the reply loop or
+as a broken initialization pipe, making identical storage-full failures receive
+different labels. Decision: a broken pipe rechecks the same selected home's
+capacity before classification; unknown or available capacity stays a generic
+command failure. After reaping the child, a second broken pipe while closing
+buffered stdin preserves that classification and does not skip closing stdout.
+Process cleanup and source validation retain their owners.
+Alternative rejected: delaying the initial write to force the reply-loop path
+would hide the race. The storage-full test fixes the child-exit order explicitly
+and covers full, available and unknown capacity.
+
 Expired file-backed login may request native `account/read(refreshToken=true)`
 during reconciliation or explicit recovery. Only Codex refreshes or writes its
 credentials; Tofu never copies refresh tokens, initiates sign-in or signs out

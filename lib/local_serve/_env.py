@@ -27,7 +27,7 @@ import os
 import shutil
 import stat
 import subprocess
-import urllib.request
+from lib.http_transport import http_get
 import zipfile
 
 from lib.log import get_logger
@@ -78,21 +78,21 @@ def check_disk_budget(engine: str, *, disk_free: int | None = None) -> dict:
 
 def _fetch(url: str, dest: str, timeout: int = _DOWNLOAD_TIMEOUT) -> None:
     """Stream one URL in bounded chunks; propagate actual network and I/O failures."""
-    req = urllib.request.Request(url, headers={'User-Agent': 'tofu-local-serve'})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, \
+    with http_get(url, headers={'User-Agent': 'tofu-local-serve'},
+                  timeout=timeout, stream=True) as resp, \
             open(dest, 'wb') as out:
+        resp.raise_for_status()
         while True:
-            chunk = resp.read(1 << 20)
+            chunk = resp.raw.read(1 << 20, decode_content=True)
             if not chunk:
                 break
             out.write(chunk)
 
 
 def _fetch_json(url: str, timeout: int = 30) -> dict:
-    import json as _json
-    req = urllib.request.Request(url, headers={'User-Agent': 'tofu-local-serve'})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return _json.loads(resp.read().decode('utf-8'))
+    with http_get(url, headers={'User-Agent': 'tofu-local-serve'}, timeout=timeout) as resp:
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _ensure_uv(runner) -> str | None:

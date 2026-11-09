@@ -4,6 +4,8 @@ Used only by resident-host process tests. The public execution host and manager
 lease are unchanged; the application factory supplies a controlled owned thread.
 A ``fail-close`` file in the project makes the joined shutdown raise its text
 as a TimeoutError, like a shutdown stack whose bounded stop expired.
+An optional ``source-generation`` file exercises the real plan admission before
+construction creates any owned work.
 """
 import asyncio
 import os
@@ -15,8 +17,13 @@ from types import SimpleNamespace
 release = threading.Event()
 
 
-def application(shutdown, _plan):
+def application(shutdown, plan):
     root = Path(os.environ['TOFU_PROJECT_PATH'])
+    generation = root / 'source-generation'
+    if generation.exists():
+        from serverctl_pkg.execution_plan import require_plan_match
+        require_plan_match(plan, {**plan, 'sourceSha256': generation.read_text()},
+                           stage='before probe construction')
     entered = threading.Event()
     runner = SimpleNamespace(status='starting', task=None)
 

@@ -129,13 +129,13 @@ _GENERIC_HINT_EN = (
 # the credential is GONE, not rejected — recovery is an interactive re-login,
 # never a key edit and never "check the logs". Actionable in one step.
 _OAUTH_REAUTH_HINT_CN = (
-    '• 订阅登录已过期或已登出。前往 「设置 → 订阅登录」 重新登录对应服务（Codex / Claude），'
+    '• 订阅登录已过期或已登出。前往 「设置 → 订阅登录」 重新登录对应服务（Codex / Claude / Kimi），'
     '登录成功后模型会立即恢复。\n'
     '• 这不是 API Key / 配额问题，无需修改 Keys。'
 )
 _OAUTH_REAUTH_HINT_EN = (
     '• The subscription session expired or was logged out. Open '
-    '"Settings → Subscription sign-in" and sign the service (Codex / Claude) '
+    '"Settings → Subscription sign-in" and sign the service (Codex / Claude / Kimi) '
     'back in — models recover immediately after.\n'
     '• This is NOT an API key / quota problem; do not edit Keys.'
 )

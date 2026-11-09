@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _GATEWAY = {
-    'key': 'meituan',
+    'key': 'yourprovider',
     'name': 'AIGC',
     'base_url': 'https://aigc.example/v1/openai/native',
     'faces': {

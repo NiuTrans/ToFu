@@ -122,6 +122,8 @@ def _perform_request(url, timeout, verify, legacy_ssl):
     # silently went direct even when a proxy was configured — on a host
     # without direct egress every page fetch failed (2026-08-21 incident).
     host_key, plan = proxy_mode_manager.fetch_attempt_plan(url, cfg)
+    if cfg.requests_transport is not None:
+        plan = [('managed', None)]
 
     def _open(proxies_kwarg, extra_headers=None):
         kw = {'timeout': request_timeout(timeout), 'stream': True,

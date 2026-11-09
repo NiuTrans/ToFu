@@ -360,3 +360,90 @@ def test_failed_response_growth_preserves_previous_owned_buffer(monkeypatch):
     grown_buffer, grown_capacity = embedded._grow_response_buffer(old_capacity + 1)
     assert grown_buffer is not old_buffer and grown_capacity == old_capacity + 1
     assert bytes(_ffi.buffer(old_buffer, 5)) == b'owned'
+
+
+def _open_runtime(lib):
+    runtime = EmbeddedRuntime.__new__(EmbeddedRuntime)
+    runtime._handle = _ffi.cast('void*', 1)
+    runtime._lifecycle = threading.Condition()
+    runtime._active_calls = 0
+    runtime._watch_tokens = set()
+    runtime._closing = False
+    runtime._lib = lib
+    return runtime
+
+
+class _Interrupted(BaseException):
+    """An asynchronous interrupt: a signal-raised test timeout, KeyboardInterrupt, SystemExit."""
+
+
+def test_an_interrupted_close_leaves_the_runtime_open_and_closable():
+    closed = []
+    runtime = _open_runtime(SimpleNamespace(tofudb_embed_close=closed.append))
+    entered, release = threading.Event(), threading.Event()
+
+    def execute(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {'status': 0}
+
+    class InterruptedJoin(threading.Condition):
+        interrupt = True
+
+        def wait(self, timeout=None):
+            if self.interrupt:
+                self.interrupt = False
+                raise _Interrupted  # Condition.wait re-holds the lock before raising.
+            return super().wait(timeout)
+
+    runtime._execute_json = execute
+    runtime._lifecycle = InterruptedJoin()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        call = pool.submit(runtime.execute_json, 'record.get', {}, command_id=None, deadline_unix_ms=1)
+        assert entered.wait(timeout=5)
+        with pytest.raises(_Interrupted):
+            runtime.close()
+        assert not runtime.closed and closed == []
+        release.set()
+        assert call.result(timeout=5) == {'status': 0}
+    # The close did not happen: callers are admitted and a later close completes.
+    assert runtime.execute_json('record.get', {}, command_id=None, deadline_unix_ms=1) == {'status': 0}
+    closing = threading.Thread(target=runtime.close, daemon=True)
+    closing.start()
+    closing.join(timeout=5)
+    assert not closing.is_alive(), 'close waited for an interrupted close that never ends'
+    assert runtime.closed and len(closed) == 1
+
+
+def test_the_finalizer_never_waits_for_a_runtime_left_mid_close():
+    """The 2026-11-07 hang: collection inside an unrelated fixture blocked forever."""
+    closed = []
+
+    def collect_unreachable_runtime():
+        runtime = _open_runtime(SimpleNamespace(tofudb_embed_close=closed.append))
+        runtime._closing = True  # Left by a close that an interrupt cut short.
+        del runtime  # The last reference: CPython finalizes it right here.
+
+    collecting = threading.Thread(target=collect_unreachable_runtime, daemon=True)
+    collecting.start()
+    collecting.join(timeout=5)
+    assert not collecting.is_alive(), 'the finalizer waited for a close that cannot finish'
+    assert closed == []
+
+
+def test_the_finalizer_never_joins_and_closes_only_a_quiescent_runtime():
+    closed = []
+    busy = _open_runtime(SimpleNamespace(tofudb_embed_close=closed.append))
+    busy._active_calls = 1  # An unreachable runtime has no callers; a count is leaked state.
+    finalizing = threading.Thread(target=busy.__del__, daemon=True)
+    finalizing.start()
+    finalizing.join(timeout=5)
+    assert not finalizing.is_alive() and closed == [] and not busy.closed
+
+    quiescent = _open_runtime(SimpleNamespace(tofudb_embed_close=closed.append))
+    handle = quiescent._handle
+    quiescent.__del__()
+    assert quiescent.closed and closed == [handle]
+    quiescent.__del__()
+    quiescent.close()
+    assert closed == [handle]

@@ -152,9 +152,8 @@ PROJECT_TOOL_WRITE_FILE = {
             "Relative paths use the current project. An absolute path outside "
             "registered roots needs allow_outside_workspace=true after the user "
             "confirms it (the containing directory then registers as a new root); "
-            "system paths (/etc, /usr, $HOME itself) are refused outright. Give "
-            "exactly one source: content (an empty string creates an empty file) "
-            "or content_ref to reuse all/a slice of a previous tool result."
+            "system paths (/etc, /usr, $HOME itself) are refused outright. "
+            "content is required; an empty string creates an empty file."
         ),
         "parameters": {
             "type": "object",
@@ -172,25 +171,9 @@ PROJECT_TOOL_WRITE_FILE = {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Complete replacement; may be empty."
-                },
-                "content_ref": {
-                    "type": "object",
-                    "description": "Reuse prior tool output without regenerating it.",
-                    "properties": {
-                        "tool_round": {
-                            "type": "integer", "description": "Prior roundNum."
-                        },
-                        "start": {
-                            "type": "integer",
-                            "description": "First character; default 0."
-                        },
-                        "end": {
-                            "type": "integer",
-                            "description": "Exclusive end; default content end."
-                        }
-                    },
-                    "required": ["tool_round"]
+                    "description": (
+                        "Complete file text, or the bytes to append; may be "
+                        "empty.")
                 },
                 "append": {
                     "type": "boolean",
@@ -209,7 +192,7 @@ PROJECT_TOOL_WRITE_FILE = {
                     )
                 }
             },
-            "required": ["path"],
+            "required": ["path", "content"],
             "additionalProperties": False
         }
     }
@@ -231,8 +214,7 @@ PROJECT_TOOL_APPLY_DIFF = {
             "not count. To edit an unread file: read_files this turn, apply_diff "
             "the NEXT.\n\n"
             "**Use for small, targeted edits.** New files or whole-file rewrites: "
-            "write_file; purely additive changes: insert_content. MULTIPLE edits "
-            "in one call: **apply_diffs**."
+            "write_file. MULTIPLE edits in one call: **apply_diffs**."
         ),
         "parameters": {
             "type": "object",
@@ -307,122 +289,53 @@ PROJECT_TOOL_APPLY_DIFFS = {
     }
 }
 
-PROJECT_TOOL_INSERT_CONTENT = {
-    "type": "function",
-    "function": {
-        "name": "insert_content",
-        "description": (
-            "Insert new content before or after an anchor string in a file. Unlike "
-            "apply_diff (search-and-replace), this tool ADDS content without removing "
-            "the anchor. Prefer it over apply_diff for purely additive changes "
-            "(imports, new functions, config entries) — no need to repeat the "
-            "anchor in search and replace.\n\n"
-            "**Read-before-edit gate**: REJECTED unless the target file was read or "
-            "written in an earlier turn; a read_files call in the SAME batch does "
-            "not count. To edit an unread file: read_files this turn, insert_content "
-            "the NEXT.\n\n"
-            "The 'anchor' must match EXACTLY once — on multiple matches the tool "
-            "errors; make the anchor more specific. MULTIPLE insertions in one "
-            "call: **insert_contents**."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "description": {"type": "string", "description": "Optional caption for the insertion."},
-                "path": {"type": "string", "description": "Relative file path from project root"},
-                "anchor": {
-                    "type": "string",
-                    "description": "Exact text to locate the insertion point (must match exactly once in the file)"
-                },
-                "content": {"type": "string", "description": "New content to insert"},
-                "position": {
-                    "type": "string",
-                    "enum": ["before", "after"],
-                    "description": "Insert before or after the anchor. Default: 'after'"
-                },
-                "allow_outside_workspace": {
-                    "type": "boolean",
-                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused. Unneeded for a git worktree of a registered repo."
-                }
-            },
-            "required": ["path", "anchor", "content"]
-        }
-    }
-}
+def retired_edit_operation_error(operation):
+    """Model-facing refusal for a legacy ``edit_file`` item ``operation``.
 
-PROJECT_TOOL_INSERT_CONTENTS = {
-    "type": "function",
-    "function": {
-        "name": "insert_contents",
-        "description": (
-            "insert_contents: Insert content at multiple locations in one call, "
-            "sequentially — later insertions see earlier changes. Each insertion "
-            "adds content before or after an anchor string.\n\n"
-            "**Read-before-edit gate**: every target file must have been read or "
-            "written in an earlier turn; a read_files call in the SAME batch does "
-            "not count.\n\n"
-            "**Failure semantics**: a failed insertion (anchor not found, ambiguous) "
-            "does NOT halt the batch and applied insertions are NOT rolled back. "
-            "The summary reads ``Inserted X/(X+Y) edits`` with per-edit OK/FAIL "
-            "lines; re-read affected files before retrying."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "edits": {
-                    "type": "array",
-                    "description": "Array of insertion operations; every entry is processed. Each entry has description, path, anchor, content, and position.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "description": {"type": "string", "description": "Optional caption for this insertion."},
-                            "path": {"type": "string", "description": "Relative file path"},
-                            "anchor": {"type": "string", "description": "Exact text to locate the insertion point"},
-                            "content": {"type": "string", "description": "New content to insert"},
-                            "position": {
-                                "type": "string", "enum": ["before", "after"],
-                                "description": "Insert before or after the anchor. Default: 'after'"
-                            }
-                        },
-                        "required": ["path", "anchor", "content"]
-                    }
-                },
-                "description": {"type": "string", "description": "Optional caption for the overall insertion."},
-                "allow_outside_workspace": {
-                    "type": "boolean",
-                    "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused. Unneeded for a git worktree of a registered repo."
-                }
-            },
-            "required": ["edits"]
-        }
-    }
-}
+    ``edit_file`` only replaces, so the field is gone; ``None`` (absent) and
+    ``'replace'`` need no refusal and are dropped by input repair. Every other
+    value is refused with the replace that expresses it: guessing the line
+    break between an anchor and inserted text is what made inserts fail.
+    """
+    if operation is None or operation == 'replace':
+        return None
+    retired = '`operation` is retired: edit_file only replaces. Omit it.'
+    if operation == 'insert_after':
+        return (f'{retired} To insert after anchor A, put A in `anchor` and A '
+                'followed by the new text in `content`: '
+                '{"anchor":"A","content":"A\\nNEW"}.')
+    if operation == 'insert_before':
+        return (f'{retired} To insert before anchor A, put A in `anchor` and '
+                'the new text followed by A in `content`: '
+                '{"anchor":"A","content":"NEW\\nA"}.')
+    if operation == 'replace_all':
+        return (f'{retired} To replace every match, set "replace_all": true '
+                'on the edit.')
+    return (f'{retired} Each edit is {{anchor, content}}, plus optional path '
+            'and replace_all.')
 
 
-# ``edit_file`` is the only edit surface shown to new model turns.  The four
-# older schemas above deliberately remain module-level constants: persisted
-# conversations, input repair and the rollback switch still need to understand
-# their exact wire shapes, but making all five visible recreates the tool-choice
-# competition this unified entry point exists to remove.
+# ``edit_file`` is the only edit surface shown to new model turns.  The two
+# older schemas above remain module-level constants: persisted conversations,
+# input repair and the rollback switch still need their exact wire shapes, but
+# making all three visible recreates the tool-choice competition this unified
+# entry point exists to remove.
 PROJECT_TOOL_EDIT_FILE = {
     "type": "function",
     "function": {
         "name": "edit_file",
         "description": (
-            "Apply ordered anchored edits; read/write targets in an earlier round. "
-            "Prefer replace, including additions: content is the complete desired "
-            "replacement, including retained anchor text and all line breaks. "
-            'After A: `{"operation":"replace","anchor":"A","content":"A\\nB"}`; '
-            'before A: `{"operation":"replace","anchor":"A","content":"B\\nA"}`. '
-            "For insert_after/insert_before, content is only new text; the anchor "
-            "stays automatically. Append at end-of-file with write_file(append=true). "
-            "Name the batch's file once in `path` and leave each edit's own "
-            "`path` out; set an edit's `path` only to target a different file. "
-            "Anchors match exactly once; "
-            "replace_all permits multiple matches only for replace. Later edits see "
-            "earlier changes. Atomic preflight defaults true: any validation failure "
-            "writes nothing. With atomic=false, one failure neither rolls back nor "
-            "stops the others. I/O failures may leave partial writes."
+            "Replace text in files read/written in an earlier round. Each edit "
+            "finds `anchor`, copied exactly from the file, and replaces it with "
+            "`content`; empty content deletes. The anchor must match once; "
+            "replace_all replaces every match. To add text, keep neighbouring "
+            "text in both: after A: `{\"anchor\":\"A\",\"content\":\"A\\nB\"}`; "
+            "before A: `{\"anchor\":\"A\",\"content\":\"B\\nA\"}`. Append at "
+            "end-of-file with write_file(append=true). Name the file once in "
+            "`path`; set an edit's `path` only for another file. Later edits see "
+            "earlier changes. Atomic preflight defaults true: any failure writes "
+            "nothing. With atomic=false, one failure neither rolls back nor stops "
+            "the others. I/O failures may leave partial writes."
         ),
         "parameters": {
             "type": "object",
@@ -445,7 +358,7 @@ PROJECT_TOOL_EDIT_FILE = {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
-                    "description": "Shortest-unique-anchor operations, in order.",
+                    "description": "Replacements, applied in order.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -457,30 +370,23 @@ PROJECT_TOOL_EDIT_FILE = {
                                     "the previous edit; omit it rather than "
                                     "sending an empty string."),
                             },
-                            "operation": {
-                                "type": "string",
-                                "enum": ["replace", "insert_after", "insert_before"],
-                                "description": (
-                                    "Prefer replace for complete old-to-new edits, including additions. "
-                                    "insert_after adds content below anchor; insert_before above it."),
-                            },
                             "anchor": {
                                 "type": "string",
                                 "minLength": 1,
-                                "description": "Exact, normally unique existing text. For replace, this is the old text being removed.",
+                                "description": "Existing text to replace.",
                             },
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete. "
-                                    "Insert: added lines only, without copied anchor/context."),
+                                    "Complete new text, including kept anchor "
+                                    "text and line breaks; empty deletes."),
                             },
                             "replace_all": {
                                 "type": "boolean",
-                                "description": "Replace every match; ignored by inserts.",
+                                "description": "Replace every match.",
                             },
                         },
-                        "required": ["operation", "anchor", "content"],
+                        "required": ["anchor", "content"],
                     },
                 },
                 "atomic": {
@@ -722,7 +628,6 @@ PROJECT_TOOLS_UNIFIED = [
 PROJECT_TOOLS_LEGACY = [
     PROJECT_TOOL_SEARCH_FILES, PROJECT_TOOL_FIND, PROJECT_TOOL_REPO_MAP,
     PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_APPLY_DIFF, PROJECT_TOOL_APPLY_DIFFS,
-    PROJECT_TOOL_INSERT_CONTENT, PROJECT_TOOL_INSERT_CONTENTS,
     PROJECT_TOOL_RUN_COMMAND,
 ]
 
@@ -761,9 +666,9 @@ def project_tools_for_runtime():
 # ``project_tools_for_runtime`` so operators retain the rollback switch.
 PROJECT_TOOLS = PROJECT_TOOLS_UNIFIED
 # Handler-registration names for the LIVE project tool surface. Historical
-# create_project rounds still render in the UI, but the name is deliberately
-# absent here so any new/latched call is refused as an unknown tool instead of
-# executing a retired scaffold action.
+# create_project and insert_content(s) rounds still render in the UI, but the
+# names are deliberately absent here so a new/latched call is refused instead
+# of executing a retired action (input repair explains the replace for inserts).
 PROJECT_TOOL_NAMES = {
     # ``list_dir`` remains dispatchable only for conversation-latched legacy
     # schemas. New tool epochs omit it and route simple ``run_command`` ls
@@ -772,7 +677,6 @@ PROJECT_TOOL_NAMES = {
     # and frozen catalogs still dispatch it; name repair maps fresh calls.
     'list_dir', 'search_files', 'grep_search', 'find_files', 'repo_map',
     'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
-    'insert_content', 'insert_contents',
     'run_command', 'check_background_command', 'kill_background_command',
 }
 
@@ -781,10 +685,10 @@ __all__ = [
     'PROJECT_TOOL_SEARCH_FILES', 'PROJECT_TOOL_FIND', 'PROJECT_TOOL_REPO_MAP',
     'PROJECT_TOOL_WRITE_FILE', 'PROJECT_TOOL_EDIT_FILE',
     'PROJECT_TOOL_APPLY_DIFF', 'PROJECT_TOOL_APPLY_DIFFS',
-    'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
     'PROJECT_TOOL_RUN_COMMAND',
     'PROJECT_TOOLS', 'PROJECT_TOOLS_UNIFIED', 'PROJECT_TOOLS_LEGACY',
     'PROJECT_TOOL_NAMES', 'project_tools_for_runtime',
+    'retired_edit_operation_error',
     'with_command_input_observation_scope', 'with_multiroot_hint',
     'with_remote_hint',
 ]

@@ -12,8 +12,10 @@
 /**
  * Ask the human how to deliver a message SENT WHILE a turn is generating.
  * Shown ONLY when a task is already running for `convId` (caller-gated). The
- * dialog auto-closes to the safe default ('queue') if that running turn ends
- * while it's open (liveCheck), so a moot choice never lingers on screen.
+ * dialog auto-closes with 'cancel' if that running turn ends while it's open
+ * (liveCheck), so a moot choice never lingers on screen; like a dismissal or a
+ * missing dialog service, nothing is sent without the human's choice and the
+ * message stays in the composer for an ordinary send.
  *
  * @param {string} convId
  * @returns {Promise<'steer'|'queue'|'cancel'>}

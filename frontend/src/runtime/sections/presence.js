@@ -19,9 +19,12 @@
     } catch (_error) { return ''; }
   }
 
-  function sidebarPath() {
-    var folder = typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
+  function sidebarFolder() {
+    return typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
       ? getFolders().find(function (item) { return item.id === getActiveFolderId(); }) : null;
+  }
+  function sidebarPath() {
+    var folder = sidebarFolder();
     return folder ? norm(folder.projectPaths?.[0] || folder.projectPath || '') : projectPath();
   }
   function scope(sidebarOnly) {
@@ -191,6 +194,13 @@
     canvas: sidebarOnly ? document.createElement('div') : host,
     mode: sidebarOnly ? 'sidebar' : 'canvas',
     scope: function () { return scope(sidebarOnly); }, sidebarPath: sidebarPath,
+    // A selected folder that names no directory has no project to bind yet;
+    // its Coordinator row opens that folder's settings, where one is added.
+    folderSetup: sidebarOnly ? function () {
+      var folder = sidebarFolder();
+      if (!folder || sidebarPath()) return null;
+      return function () { if (typeof _promptRenameFolder === 'function') _promptRenameFolder(folder.id); };
+    } : undefined,
 
     changed: function () { if (typeof renderConversationList === 'function') renderConversationList(); },
     canCreate: function () { return typeof getActiveFolderId === 'function' && !!getActiveFolderId(); },
@@ -267,9 +277,11 @@
   // Other surfaces (the studio's compute-stall dialog) ensure the Watchdog through its
   // owner, so the header and composer steering adopt the binding they open.
   runtimeScope.ensureRouterWatchdogConversation = function () { return routerWatchdog.ensure(); };
+  // A selected folder is a project before it names a directory: its own
+  // Coordinator row, not the main coordinator's card, takes the slot.
   function sidebarHasProject() {
     var root = sidebarPath();
-    return !!root && !isRouterManaged(root);
+    return root ? !isRouterManaged(root) : !!sidebarFolder();
   }
   /* A bound Coordinator's composer steers its live reply without asking
    * (_promptInjectMode). Each owner names one from a server binding: the open
@@ -278,6 +290,10 @@
   runtimeScope.isCoordinatorConversation = function (id) {
     return !!id && (id === surface.coordinatorId() || id === sidebarSurface.coordinatorId()
       || id === globalRouter.conversationId() || id === routerWatchdog.conversationId());
+  };
+  // Progress rounds seen in the open conversation (ui/tool_rounds.js) refresh the board.
+  runtimeScope.observeCoordinatorProgress = function (progress) {
+    surface.observeProgress(progress); sidebarSurface.observeProgress(progress);
   };
   // Reached from the main coordinator's card and settings, never as list rows.
   runtimeScope.routerConversationIds = function () {

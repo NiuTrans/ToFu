@@ -369,11 +369,18 @@ def create_child_invocation(
     from lib.tasks_pkg.native_parent import resolve_native_parent
     native_parent, execution_parent = resolve_native_parent(parent)
     native_child_owner=native_parent if native_parent is not None and (native_parent._transient or native_parent.pricing_resolver is not None) else None
+    principal = PrincipalContext.from_payload(parent['_principalContext'])
+    if native_child_owner is not None:
+        routing_repository = native_child_owner.repository
+    else:
+        from lib.model_routing import OwnerBoundary, request_routing_repository
+        routing_repository = request_routing_repository(parent, OwnerBoundary.create(
+            principal.require_owner(context='child invocation'), principal.tenant_id))
     child = create_task(
         parent.get('convId') or '', messages, cfg,
-        principal=PrincipalContext.from_payload(parent['_principalContext']),
+        principal=principal,
         supersede=False, transient=True,
-        **({'model_routing_repository':native_child_owner.repository} if native_child_owner is not None else {}))
+        **({'model_routing_repository': routing_repository} if routing_repository is not None else {}))
     fence = ChildPublicationFence()
 
     def fenced_sink(event):
@@ -405,6 +412,8 @@ def create_child_invocation(
                               (parent.get('config') or {}).get('_pinned_provider_id') or '')),
         _tool_env=parent.get('_tool_env'),
     )
+    from lib.model_routing import share_request_routing_authority
+    share_request_routing_authority(parent, child)
     if swarm_message_binding is not None:
         child['_swarmMessageBinding'] = copy.deepcopy(swarm_message_binding)
     if output_schema is not None:

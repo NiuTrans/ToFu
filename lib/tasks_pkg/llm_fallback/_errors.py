@@ -7,7 +7,7 @@ from lib.agent_core.events import Phase, build_phase
 from lib.llm.conversion import ProtocolConversionError
 from lib.llm.llm_error_format import format_llm_error_for_user
 from lib.llm.llm_errors import _ERR_BODY_LIMIT, ModelRefusalError
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.tasks_pkg.manager import _events as task_events
 from lib.turn_verdict import GATEWAY_CONTENT_FILTER_CAUSE
 
@@ -148,7 +148,7 @@ def settle_content_rejection(task, e, *, model, round_num, preset, thinking_enab
     """Settle invalid images or HTTP 450 without authorizing a model switch."""
     from lib.llm import ContentFilterError
 
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     # InvalidImageError — image content rejected (too large, corrupt, etc.)
     # Fallback to another model won't help (same image = same rejection).
     from lib.llm import InvalidImageError
@@ -244,7 +244,7 @@ def settle_non_rotatable_primary_error(
     Subscription credential outages are model-scoped availability. Local
     request defects and gateway outages cannot authorize model rotation.
     """
-    tid = task['id'][:8]
+    tid = task_log_tag(task['id'])
     err_str = str(e)[:_ERR_BODY_LIMIT]
     # A gateway outage cannot authorize model rotation. Keep the pinned
     # model and surface the dispatcher's actual wait/abort outcome.

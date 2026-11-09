@@ -14,6 +14,12 @@ an absent last-read setting, never replace any present valid value (even zero).
 The manager publishes last-read candidates only with terminal task snapshots;
 running checkpoints retain them in memory. Invocation teardown is not a
 second durability/settlement authority.
+
+A stored row retains the candidates its publishing checkpoint carried. A writer
+that rewrites an existing row without observing cache facts (the conversation
+worker exit receipt) omits both fields: authorities refuse candidates without
+the cache-settings contract, and with it the rewrite would re-publish stale
+facts.
 """
 
 TASK_RESULT_CHECKPOINT_GUARD_CONTRACT = (

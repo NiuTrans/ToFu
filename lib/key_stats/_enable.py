@@ -121,15 +121,21 @@ def _pair_key_for(provider_id: str, key_name: str) -> str:
 
 
 def is_key_refused_for_optional_work(provider_id: str, key_name: str,
-                                     model: str = '') -> bool:
+                                     model: str = '', *,
+                                     honor_override: bool = False) -> bool:
     """Return True when strict optional-work admission refuses this key outright.
 
     These are the refusals that hold whatever the key's siblings are: a
-    recorded key-wide or *model* billing stop (it beats a manual ON inside
-    :func:`strict_billing_stop_admission`) and an explicit user disable. A
+    recorded key-wide or *model* billing stop and an explicit user disable. A
     planner can therefore consult them before any slot for the key exists.
     An automatic credential-health disable is not included: dispatch may
     still promote such a key as last resort among its live siblings.
+
+    ``honor_override`` selects the manual-ON precedence. Ordinary dispatch
+    passes True, matching :func:`is_key_enabled` — an owner who re-enabled a
+    key ("I topped up") has capacity again, including over a stop recorded
+    afterwards. Strict optional work keeps the default False, so a stale
+    manual ON cannot make a background job spend on a known dead balance.
     """
     if not key_name:
         return False
@@ -138,8 +144,11 @@ def is_key_refused_for_optional_work(provider_id: str, key_name: str,
     with _lock:
         if observed is not None:
             _ensure_fresh_unlocked(observed)
-        return (_billing_stop_recorded(_cache['stats'].get(pk) or {}, model)
-                or _has_explicit_false_override_unlocked(pk))
+        if _has_explicit_false_override_unlocked(pk):
+            return True
+        if honor_override and _cache['overrides'].get(pk) is True:
+            return False
+        return _billing_stop_recorded(_cache['stats'].get(pk) or {}, model)
 
 
 def _rank_for_last_resort_unlocked(pk: str) -> tuple:
@@ -162,7 +171,7 @@ def _rank_for_last_resort_unlocked(pk: str) -> tuple:
     return (not exhausted, sr, s, -cons429, -f)
 
 
-def _pick_last_resort_unlocked(siblings: list):
+def _pick_last_resort_unlocked(siblings: list, model: str = ''):
     """Pick the single pair-key to keep enabled as last-resort, or None.
 
     Caller MUST hold _lock.  *siblings* is the list of pair-keys under a
@@ -172,6 +181,12 @@ def _pick_last_resort_unlocked(siblings: list):
         - ``None`` if any sibling is raw-enabled (no last-resort needed).
         - ``None`` if the user has explicitly disabled every sibling
           (``override=False``) — respect the user's choice.
+        - ``None`` if every remaining sibling carries a recorded billing
+          stop for *model* (key-wide, or per-model when one is named).
+          A billing stop is the provider's own statement that this
+          credential cannot pay for another request; promoting it only
+          buys one more live 402 per turn. It clears on a provider reset,
+          day rollover or an owner re-enable, never on a retry.
         - Otherwise, the pair-key with the "healthiest" stats per
           :func:`_rank_for_last_resort_unlocked`.  Ties broken by later
           index in the configured ``siblings`` list (i.e. the last key wins)
@@ -185,6 +200,8 @@ def _pick_last_resort_unlocked(siblings: list):
             return None
         if _has_explicit_false_override_unlocked(sib):
             continue  # user said no — respect it
+        if _billing_stop_recorded(_cache['stats'].get(sib) or {}, model):
+            continue  # out of credit — a retry cannot revive it
         eligible.append((idx, sib))
     if not eligible:
         return None
@@ -197,7 +214,7 @@ def _pick_last_resort_unlocked(siblings: list):
     return best_pk
 
 
-def _is_last_resort_unlocked(pk: str, siblings: list) -> bool:
+def _is_last_resort_unlocked(pk: str, siblings: list, model: str = '') -> bool:
     """True iff *pk* is THE ONE key chosen to stay alive as last-resort.
 
     Caller MUST hold _lock.  *siblings* is the full list of pair-keys under
@@ -218,7 +235,9 @@ def _is_last_resort_unlocked(pk: str, siblings: list) -> bool:
     # a removed key, don't resurrect it.
     if pk not in siblings:
         return False
-    return _pick_last_resort_unlocked(siblings) == pk
+    if _billing_stop_recorded(_cache['stats'].get(pk) or {}, model):
+        return False
+    return _pick_last_resort_unlocked(siblings, model) == pk
 
 
 def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
@@ -250,6 +269,9 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
          them enabled — the "healthiest" per
          :func:`_rank_for_last_resort_unlocked`, with ties broken toward
          the last configured key.  All other siblings stay disabled.
+         A key carrying a recorded billing stop for *model* is never
+         promoted: the provider has already refused its credit, so only a
+         provider reset, a new day or an owner re-enable can revive it.
          Logs once per (day, pk) at INFO level when a key is promoted.
       6. Otherwise return False (normal auto-disable).
     """
@@ -283,7 +305,7 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
         # provider — users retain full control.
         if _has_explicit_false_override_unlocked(pk):
             return False
-        if _is_last_resort_unlocked(pk, siblings):
+        if _is_last_resort_unlocked(pk, siblings, model):
             day = _cache['day']
             key = (day, pk)
             if key not in _last_resort_logged:

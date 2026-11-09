@@ -115,7 +115,8 @@ def test_no_workspace_keeps_ordinary_worker_start_phase(monkeypatch):
 @pytest.mark.parametrize('stage', [
     'input_build', 'turn_persist', 'executor_start', 'acknowledgement',
     'input_translation', 'startup_config', 'startup_resume', 'startup_project',
-    'startup_tools', 'startup_memory', 'startup_context', 'startup_history',
+    'startup_tools', 'startup_resume_view', 'startup_memory', 'startup_context',
+    'startup_history',
     'memory_list', 'memory_rank', 'memory_hydrate',
 
 

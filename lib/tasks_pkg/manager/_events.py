@@ -18,7 +18,7 @@ import uuid
 from lib.agent_core.events import EventType, require_registered_event
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import make_envelope
-from lib.log import get_logger
+from lib.log import get_logger, task_log_tag
 from lib.task_replay.task_replay import (
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
@@ -205,7 +205,7 @@ def reset_task_text(task, *, content='', thinking=''):
                 assemble_segments(task), previous=task.get('segments'))
         except Exception:
             logger.warning('[Task %s] segment mirror refresh after a vetoed '
-                           'answer release failed', str(task.get('id', ''))[:8],
+                           'answer release failed', task_log_tag(task.get('id', '')),
                            exc_info=True)
     return epoch
 
@@ -284,7 +284,7 @@ def _probe_durable_next_seq(task_id):
         return _durable_next_seq(task_id)
     except Exception as e:
         logger.debug('[Manager] durable seq probe failed task=%s: %s',
-                     (task_id or '?')[:8], e)
+                     (task_id or '?'), e)
         return None
 
 
@@ -331,7 +331,7 @@ def _try_readopt_task(task) -> bool:
                 logger.warning('[Manager] task %s retained %d fallback-minted '
                                'event(s) diverged from the durable log '
                                '(next=%d < seed=%d) — resetting the replay '
-                               'window', task_id[:8], len(retained),
+                               'window', task_log_tag(task_id), len(retained),
                                retained_next, seeded)
                 retained.clear()
         if not task.get('events'):
@@ -347,7 +347,7 @@ def _try_readopt_task(task) -> bool:
         return False
     logger.warning('[Manager] re-registered live task %s into the chat '
                    'runtime (seeded _eventNextSeq=%d) — it was unregistered '
-                   'while still emitting events', task_id[:8], seeded)
+                   'while still emitting events', task_log_tag(task_id), seeded)
     return True
 
 
@@ -362,16 +362,20 @@ def _revoke_stale_attempt(task):
     plant — then revoke this executor's publication.
     """
     if not task.get('aborted'):
+        from lib.turn_lifecycle import stale_attempt_abort_reason
+        cause = stale_attempt_abort_reason(
+            task, str(task.get('_attemptId') or ''),
+            fallback='conversation_attempt_stale_fence')
         task['aborted'] = True
         task['_abort_timestamp'] = time.time()
-        task['_abort_reason'] = 'conversation_attempt_stale_fence'
+        task['_abort_reason'] = cause
         abort_event = task.get('abort_event')
         if abort_event is not None:
             abort_event.set()
         logger.warning('[Task %s] conversation attempt rejected as stale — '
                        'cooperative abort flagged so the worker '
                        'unwinds instead of looping',
-                       (task.get('id') or '?')[:8])
+                       (task.get('id') or '?'))
     from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
     raise EventDeliveryRevoked(
         'conversation event rejected: attempt is stale or no longer current')
@@ -439,7 +443,7 @@ def append_event(task, event):
         # re-enter the closed attempt, whose stale-attempt fence then aborts
         # the shared task signal that the command itself observes.
         logger.debug('[Manager] ignored %s from a detached command of settled task=%s',
-                     event.get('type'), str(task.get('id') or '?')[:8])
+                     event.get('type'), str(task.get('id') or '?'))
         return None
     from lib.tasks_pkg.event_delivery import delivery_lane_for
     lane = delivery_lane_for(task)
@@ -616,7 +620,7 @@ def _append_event_ordered(task, event, *, lane=None):
             event['error'] = envelope
             logger.error(
                 '[Task %s] terminal success refused: execution resource '
-                'invariant failed', str(task.get('id') or '?')[:8],
+                'invariant failed', str(task.get('id') or '?'),
             )
 
     # Terminal execution includes required resource settlement, but excludes
@@ -634,7 +638,7 @@ def _append_event_ordered(task, event, *, lane=None):
             task, event, observed_at_ms=event.get('executionAtMs', _trace_observed_at))
     except Exception as exc:
         logger.debug('[TaskTrace] phase observation skipped task=%s: %s',
-                     str(task.get('id') or '?')[:8], exc)
+                     str(task.get('id') or '?'), exc)
 
     # Keep the correlation envelope identical on the TaskRuntime and legacy
     # fallback paths.  ``taskId``/``requestId`` are data fields, never metric
@@ -671,7 +675,7 @@ def _append_event_ordered(task, event, *, lane=None):
             _wire = _xform(task, event)
         except Exception as e:
             logger.warning('[Task] _vu_event_transform failed task=%s: %s — '
-                           'emitting raw frame', task['id'][:8], e)
+                           'emitting raw frame', task_log_tag(task['id']), e)
             _wire = event
 
     # Track phase in task for polling fallback — AND for the v2 attempt-event
@@ -1009,7 +1013,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     or task.get('_discarded_at'):
                 logger.debug(
                     '[Manager] ignored event for retired task=%s type=%s',
-                    task['id'][:8], event.get('type'))
+                    task_log_tag(task['id']), event.get('type'))
             else:
                 withheld_count = int(task.get('_registryWithheldCount') or 0) + 1
                 task['_registryWithheldCount'] = withheld_count
@@ -1018,7 +1022,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     logger.warning(
                         '[Manager] withheld event for unregistered task=%s '
                         'type=%s count=%d; no alternate sequence authority exists',
-                        task['id'][:8], event.get('type'), withheld_count)
+                        task_log_tag(task['id']), event.get('type'), withheld_count)
             return None
         if _ingress_token and lane is None:
             if (event.get('type') == 'phase'
@@ -1050,7 +1054,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     logger.warning(
                         '[Manager] ingress persistence recovered task=%s '
                         'seq=%s after %.1fs (%d frames withheld)',
-                        task['id'][:8], _seq,
+                        task_log_tag(task['id']), _seq,
                         time.time() - float(withheld_at), withheld_count)
                 if callable(task.get('_invocationEventSink')):
                     from lib.tasks_pkg.invocation import deliver_invocation_event
@@ -1069,7 +1073,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     except Exception as push_error:
                         logger.debug(
                             '[Manager] ingress delivery push failed task=%s: %s',
-                            task['id'][:8], push_error)
+                            task_log_tag(task['id']), push_error)
 
             enqueue_ingress_delivery(
                 task,
@@ -1124,7 +1128,7 @@ def _append_event_ordered(task, event, *, lane=None):
             _transient_notifier()
         except Exception as e:
             logger.debug('[Manager] transient event notify failed task=%s: %s',
-                         task['id'][:8], e)
+                         task_log_tag(task['id']), e)
 
     # Wake any async API handler awaiting this task (event-driven wait,
     #   replaces the old busy-poll loops). Every event nudges the waiter so
@@ -1139,7 +1143,7 @@ def _append_event_ordered(task, event, *, lane=None):
         notify_task(task['id'], terminal=_is_terminal)
     except Exception as e:
         logger.debug('[Manager] admission notify failed task=%s: %s',
-                     task['id'][:8], e)
+                     task_log_tag(task['id']), e)
 
     # Only this exact synchronous attempt commit authorizes effect entry. A
     # queued/unregistered/suppressed frame or unrelated sibling cannot attest it.

@@ -1249,6 +1249,8 @@ export interface ToolWireProjectionEvent {
   schemaTokens: number;
   /** opaque exact provider-schema digest */
   schemaFingerprint: string;
+  /** (optional) content-free context source map bound to this sealed request */
+  contextLineage?: Record<string, unknown>;
   /** explicit cost target, zero=uncapped */
   schemaBudgetTokens: number;
   /** names omitted by explicit budget */
@@ -1643,6 +1645,8 @@ export interface MessagesSnapshotEvent {
   label: string;
   /** (optional) bounded context-manifest entries */
   contextManifest?: unknown[];
+  /** (optional) content-free source ranges in this snapshot */
+  contextLineage?: Record<string, unknown>;
   /** (optional) flow phase label */
   turn?: string;
   /** (optional, request kind) sampling params {maxTokens, temperature, thinkingEnabled, …} */

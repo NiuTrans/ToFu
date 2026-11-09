@@ -28,7 +28,9 @@ Package remains application-independent.
 `EmbeddedRuntime.commit_watch` uses the generated commit-watch ABI from
 `contracts/worker_control_v1.json` (`scripts/gen_worker_control.py`). Each native
 token is freed after execution and cancellation borrowers leave; runtime close
-cancels tokens before joining calls. It shares the authority condition with
+cancels tokens before joining calls. A close interrupted before it takes the
+handle leaves the runtime open, and `__del__` never waits
+(`docs/DEFENSIVE_PATTERNS.md`). It shares the authority condition with
 daemon watches and never polls, opens sockets or writes semantic state. Verify
 `test_embedded_runtime_lifecycle.py` and the actual embedded supervisor watch
 specifications in `tests/storage/test_storage_v2_embedded_client.py`.

@@ -34,7 +34,7 @@ def large_original():
     return ('历史\r\n' * 80000 + 'unique anchor\r\n').encode()
 
 
-@pytest.mark.parametrize('action', ['append', 'overwrite', 'upload', 'diff', 'insert', 'atomic-diffs', 'edit'])
+@pytest.mark.parametrize('action', ['append', 'overwrite', 'upload', 'diff', 'atomic-diffs', 'edit'])
 def test_large_edit_preserves_history_and_exact_undo(project, action):
     original = large_original()
     target = project / 'JOURNAL.md'
@@ -50,12 +50,10 @@ def test_large_edit_preserves_history_and_exact_undo(project, action):
         result = _ops.save_uploaded_file(base, 'JOURNAL.md', b'replacement', on_conflict='overwrite', **args)
     elif action == 'diff':
         result = _ops.tool_apply_diff(base, 'JOURNAL.md', 'unique anchor', 'new anchor', **args)
-    elif action == 'insert':
-        result = _ops.tool_insert_content(base, 'JOURNAL.md', 'unique anchor', 'new evidence\r\n', **args)
     elif action == 'atomic-diffs':
         result = _ops.tool_apply_diffs(base, [{'path':'JOURNAL.md', 'search':'unique anchor', 'replace':'new anchor'}], atomic=True, **args)
     else:
-        result = _ops.tool_edit_file(base, [{'path':'JOURNAL.md', 'operation':'replace', 'anchor':'unique anchor', 'content':'new anchor'}], **args)
+        result = _ops.tool_edit_file(base, [{'path':'JOURNAL.md', 'anchor':'unique anchor', 'content':'new anchor'}], **args)
     if isinstance(result, dict):
         assert result['ok'], result
     else:

@@ -67,10 +67,15 @@ def _handle_coordinator_tools(task, tc, fn_name, tc_id, fn_args, rn, round_entry
     from lib.tasks_pkg.tool_runtime import active_context_for_call
     runtime_context = active_context_for_call(
         task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
+
+    def _progress_meta(meta, content, _args):
+        # update_task_progress: the checklist and board revision for both live views.
+        meta.update(getattr(content, 'progress_view', None) or {})
+
     return simple_call(task, fn_name, fn_args, rn, round_entry, tc_id,
                        executor=lambda name, args: execute_coordinator_tool(
                            task, name, args, runtime_context=runtime_context),
-                       source='Coordinator', module_tag='Coordinator')
+                       source='Coordinator', module_tag='Coordinator', post_build=_progress_meta)
 
 
 from lib.conversations.project_messages import NAMES as PROJECT_MESSAGE_NAMES

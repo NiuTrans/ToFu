@@ -295,7 +295,7 @@ def test_restart_keeps_explicit_success_and_resumes_only_known_nonterminal(monke
 def test_running_and_timeout_guidance_names_explicit_poll_handles(monkeypatch):
     spec = SubTaskSpec(id='child', objective='work')
     master = MasterOrchestrator(task_id='live', conv_id='', specs=[spec], user_id=7)
-    master._scheduler = Mock(_running={'child': Mock()}, _pending=[])
+    master._scheduler = Mock(_running={'child': Mock()}, _pending={})
     running = master.get_agent_result('child')
     timeout = master._build_await_response(
         completed_ids=[], still_running=['child'], unknown=[], mode='all',

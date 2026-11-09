@@ -43,7 +43,7 @@ def _markers(body) -> int:
 
 @pytest.mark.parametrize('protocol', ['anthropic', 'openai'])
 @pytest.mark.parametrize('profile', [None, {'features': {}}, _MEITUAN_FACE],
-                         ids=['no-profile', 'empty-profile', 'meituan-face'])
+                         ids=['no-profile', 'empty-profile', 'yourprovider-face'])
 def test_claude_route_without_a_declaration_keeps_breakpoints(profile, protocol):
     body = _body(profile)
     add_cache_breakpoints(body, api_protocol=protocol)

@@ -53,8 +53,12 @@ fetch/search and self-contained PDF rendering do not consult this function.
     # Lazy import avoids search -> fetch -> search initialization cycles.
     from tofu_search.search.proxy_mode import proxy_mode_manager
 
-    _host_key, plan = proxy_mode_manager.fetch_attempt_plan(url, get_config())
-    _mode, proxies = plan[0]
-    selected = requests.utils.get_environ_proxies(url) if proxies is None else proxies
+    config = get_config()
+    if config.browser_proxy_resolver is not None:
+        selected = config.browser_proxy_resolver(url)
+    else:
+        _host_key, plan = proxy_mode_manager.fetch_attempt_plan(url, config)
+        _mode, proxies = plan[0]
+        selected = requests.utils.get_environ_proxies(url) if proxies is None else proxies
     proxy = requests.utils.select_proxy(url, selected)
     return _browser_proxy_options(proxy) if proxy else None
